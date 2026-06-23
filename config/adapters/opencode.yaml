@@ -1,0 +1,17 @@
+name: opencode
+support_status: experimental
+roots:
+  shared:
+    - alias: opencode-shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+      exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**"]
+team_target: "${AGENT_ROOT}/memory/team"
+file_pattern: "*.md"
+frontmatter_required: false
+team_hint_injection:
+  mode: install_once
+  target: "${AGENT_ROOT}/AGENTS.md"
+  install_once_default: "${AGENT_ROOT}/AGENTS.md"
+  content_template: |
+    @memory/team/INDEX.md

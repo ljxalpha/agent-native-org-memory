@@ -1,0 +1,11 @@
+[
+  {
+    "memory_id": "leaf-a-mem-1",
+    "revision_hash": "abc12345",
+    "author_node": "alice",
+    "source_branch_sha": "deadbeef",
+    "relative_path": "memories/auth/retry.md",
+    "category_hint": "auth",
+    "content": "Use backoff."
+  }
+]

@@ -1,0 +1,4 @@
+# Code owners for the aomt repository.
+# (Shared-memory-repo path protection — team/, manifest.json, distill_runs/, etc. —
+#  belongs in the shared memory repo's own CODEOWNERS, not in this code repo.)
+* @ljxalpha

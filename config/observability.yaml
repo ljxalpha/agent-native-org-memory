@@ -1,0 +1,8 @@
+schema_version: memory-net/observability-config/v1
+logging:
+  level: INFO
+  json: false
+secrets_filter:
+  deny_by_default: true
+  apply_to_sinks: ["file", "stderr", "artifact"]
+

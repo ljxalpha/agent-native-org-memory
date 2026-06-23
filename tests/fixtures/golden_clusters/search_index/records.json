@@ -1,0 +1,11 @@
+[
+  {
+    "memory_id": "leaf-b-mem-1",
+    "revision_hash": "def67890",
+    "author_node": "bob",
+    "source_branch_sha": "feedface",
+    "relative_path": "memories/search/index.md",
+    "category_hint": "search",
+    "content": "Rebuild index after schema changes."
+  }
+]

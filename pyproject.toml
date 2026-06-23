@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aomt"
+version = "0.1.0"
+description = "Distill each agent's scattered memories into shared organizational knowledge, and feed it back to every agent."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ljxalpha", email = "36989185+ljxalpha@users.noreply.github.com" }]
+keywords = ["llm", "agents", "memory", "distillation", "git", "multi-agent", "organizational-memory"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "apscheduler>=3.10",
+  "anthropic>=0.34",
+  "click>=8.1",
+  "fastembed>=0.3",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=24.0",
+  "isort>=5.13",
+  "mypy>=1.10",
+  "pytest>=8.0",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+memory-net-leaf = "memory_net.leaf.cli:main"
+memory-net-distiller = "memory_net.distiller.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ljxalpha/agent-native-org-memory"
+Repository = "https://github.com/ljxalpha/agent-native-org-memory"
+Issues = "https://github.com/ljxalpha/agent-native-org-memory/issues"
+
+[tool.setuptools.packages.find]
+include = ["memory_net*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+# These third-party libraries ship no type stubs; treat as untyped.
+# (yaml is handled by per-import `# type: ignore[import-untyped]`, kept hermetic
+#  so results don't depend on whether types-PyYAML happens to be installed.)
+module = ["fastembed.*", "sklearn.*", "anthropic.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

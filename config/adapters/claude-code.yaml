@@ -1,0 +1,27 @@
+name: claude-code
+roots:
+  personal:
+    - alias: claude-user-memory
+      base_dir: "~/.claude"
+      include: ["CLAUDE.md"]
+  shared:
+    - alias: claude-project-shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+      exclude: ["**/draft/**"]
+team_target: "${AGENT_ROOT}/memory/team"
+file_pattern: "*.md"
+frontmatter_required: false
+team_hint_injection:
+  mode: install_once
+  target: "${AGENT_ROOT}/CLAUDE.md"
+  install_once_default: "${AGENT_ROOT}/CLAUDE.md"
+  fallback_targets:
+    - "${AGENT_ROOT}/AGENTS.md"
+    - "${AGENT_ROOT}/README.md"
+  anchor_start: "<!-- memory-net-hint:start -->"
+  anchor_end: "<!-- memory-net-hint:end -->"
+  content_template: |
+    Team knowledge is synced by memory-net.
+    Use the stable index entry:
+    @memory/team/INDEX.md

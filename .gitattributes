@@ -1,0 +1,6 @@
+# Enforce LF line endings for all text files to ensure consistent behavior
+# across WSL2, Linux, and Windows Git clients.
+* text=auto eol=lf
+
+# Shell scripts must always use LF; CRLF causes "bad interpreter" errors on execution.
+*.sh text eol=lf

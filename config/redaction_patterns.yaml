@@ -1,0 +1,78 @@
+schema_version: memory-net/redaction-patterns/v1
+version: 2
+patterns:
+  - name: email
+    regex: '\b[\w._%+-]+@[\w.-]+\.[A-Za-z]{2,}\b'
+    replacement: '<REDACTED:email>'
+  - name: phone_cn
+    regex: '\b1[3-9]\d{9}\b'
+    replacement: '<REDACTED:phone>'
+  - name: id_card_cn
+    regex: '\b\d{17}[\dXx]\b'
+    replacement: '<REDACTED:id_card>'
+  - name: api_key_prefix
+    regex: '\b(sk|pk|rk)_[A-Za-z0-9]{20,}\b'
+    replacement: '<REDACTED:api_key>'
+  - name: bearer_token
+    regex: '\b[Bb]earer\s+[A-Za-z0-9\-._~+/]{16,}=*\b'
+    replacement: 'Bearer <REDACTED:token>'
+  - name: api_key_generic
+    regex: '(?i)(api[_-]?key|token|secret)\s*[:=]\s*["'']?[A-Za-z0-9._~+/=-]{16,}["'']?'
+    replacement: '\1=<REDACTED:secret>'
+  - name: aws_access_key
+    regex: '\b(AKIA|ASIA)[0-9A-Z]{16}\b'
+    replacement: '<REDACTED:aws_access_key>'
+  - name: jwt
+    regex: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+    replacement: '<REDACTED:jwt>'
+  - name: private_key
+    regex: '-----BEGIN (RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----'
+    replacement: '<REDACTED:private_key>'
+    action: block
+  - name: slack_webhook
+    regex: 'https://hooks\.slack\.com/services/[A-Z0-9/]{20,}'
+    replacement: '<REDACTED:slack_webhook>'
+  - name: discord_webhook
+    regex: 'https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+'
+    replacement: '<REDACTED:discord_webhook>'
+  - name: db_url_with_password
+    regex: '\b(postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://[^\s:@/]+:[^\s:@/]+@[^\s/]+'
+    replacement: '\1://<REDACTED>@<HOST>'
+  - name: credit_card
+    regex: '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b'
+    replacement: '<REDACTED:card>'
+  - name: github_token
+    regex: '\bgh[pousr]_[A-Za-z0-9]{36,}\b'
+    replacement: '<REDACTED:github_token>'
+  - name: gcp_service_account_key
+    regex: '"private_key"\s*:\s*"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"'
+    replacement: '"private_key":"<REDACTED:private_key>"'
+  - name: anthropic_api_key
+    regex: '\bsk-ant-(?:api03|admin01)-[A-Za-z0-9_\-]{80,}\b'
+    replacement: '<REDACTED:anthropic_key>'
+  - name: openai_api_key
+    regex: '\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}T3BlbkFJ[A-Za-z0-9_\-]{20,}\b'
+    replacement: '<REDACTED:openai_key>'
+  - name: stripe_secret_key
+    regex: '\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b'
+    replacement: '<REDACTED:stripe_key>'
+  - name: npm_token
+    regex: '\bnpm_[A-Za-z0-9]{36}\b'
+    replacement: '<REDACTED:npm_token>'
+  - name: google_api_key
+    regex: '\bAIza[0-9A-Za-z_\-]{35}\b'
+    replacement: '<REDACTED:google_api_key>'
+  - name: azure_storage_connection_string
+    regex: 'DefaultEndpointsProtocol=https;AccountName=[A-Za-z0-9]+;AccountKey=[A-Za-z0-9+/=]{40,};EndpointSuffix=core\.windows\.net'
+    replacement: '<REDACTED:azure_storage_connection>'
+  - name: sentry_dsn
+    regex: 'https://[A-Za-z0-9]+@[A-Za-z0-9.-]+\.ingest\.sentry\.io/\d+'
+    replacement: '<REDACTED:sentry_dsn>'
+  - name: ipv4_private
+    regex: '\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}(?:\.\d{1,3}){1,2}\b'
+    replacement: '<REDACTED:internal_ip>'
+  - name: ssh_url_with_user
+    regex: '\b[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+:[a-zA-Z0-9._/~-]+\.git\b'
+    replacement: '<REDACTED:ssh_git_url>'
+blocklist_terms:
+  - DO_NOT_REPORT_SECRET

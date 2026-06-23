@@ -1,0 +1,18 @@
+name: codex
+support_status: experimental
+roots:
+  shared:
+    - alias: codex-shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+      # 真实 ~/.codex/memories 是 git 仓库（.git/ + *.sqlite + 可能的 *.lock）；显式排除
+      exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**", "**/*.lock"]
+team_target: "${AGENT_ROOT}/memory/team"
+file_pattern: "*.md"
+frontmatter_required: false
+team_hint_injection:
+  mode: install_once
+  target: "${AGENT_ROOT}/AGENTS.md"
+  install_once_default: "${AGENT_ROOT}/AGENTS.md"
+  content_template: |
+    @memory/team/INDEX.md

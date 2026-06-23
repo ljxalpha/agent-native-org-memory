@@ -1,0 +1,3 @@
+{"id":"email","text":"email alice@example.com","expected":["email"]}
+{"id":"aws","text":"aws AKIAIOSFODNN7EXAMPLE","expected":["aws_access_key"]}
+{"id":"benign","text":"no secret here","expected":[]}

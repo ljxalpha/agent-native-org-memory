@@ -1,0 +1,11 @@
+[
+  {
+    "memory_id": "leaf-c-mem-1",
+    "revision_hash": "9876abcd",
+    "author_node": "carol",
+    "source_branch_sha": "cafebabe",
+    "relative_path": "memories/deploy/window.md",
+    "category_hint": "deploy",
+    "content": "Deploy during business hours."
+  }
+]

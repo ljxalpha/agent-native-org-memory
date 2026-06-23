@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""hermes-memory-distill — HermesToolProvider bridge (DN-P3).
+
+Bridges the distiller's ``--provider hermes_tool`` path to an external process.
+It speaks the exact JSON contract defined in
+``memory_net/distiller/llm/hermes_tool.py``:
+
+    stdin  : {"system_prompt": str, "user_prompt": str, "model": str,
+              "max_tokens": int, "metadata": {...}}
+    stdout : {"text": str, "model": str, "usage": {"input_tokens": int, ...}}
+
+``text`` is the distillation-result JSON that ``DistillationPipeline`` then parses
+into team products. A non-zero exit with a stderr message signals failure (the
+provider raises ``RuntimeError`` on a non-zero return code).
+
+Backend (zero LLM quota): by default this produces the SAME deterministic output
+as the in-process ``MockLLMProvider``, so the whole ``hermes_tool`` pipeline can be
+exercised end to end over a real process + JSON boundary without spending tokens.
+This is the M0–M3 stand-in.
+
+M4 swap point: to drive a real Hermes agent, replace the body of
+``produce_response()`` with a call that shells out to ``hermes`` and returns the
+agent's distillation JSON. The stdin/stdout contract above does NOT change.
+
+Usage (real CLI):
+    HERMES_TOOL_COMMAND="$(command -v python3) scripts/hermes-memory-distill" \
+        python -m memory_net.distiller.cli run --provider hermes_tool --repo <repo>
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+# Self-locate the repo root so the bridge imports cleanly regardless of the
+# caller's cwd or PYTHONPATH (the provider invokes us as a bare subprocess).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from memory_net.distiller.llm.base import LLMRequest, LLMResponse  # noqa: E402
+from memory_net.distiller.llm.mock import MockLLMProvider  # noqa: E402
+
+
+def produce_response(request: LLMRequest) -> LLMResponse:
+    """Produce the distillation response for one request.
+
+    M0–M3: deterministic mock distillation (zero quota). This reuses
+    ``MockLLMProvider`` so the bridge output can never drift from the in-process
+    mock path. M4 replaces this with a real ``hermes`` invocation.
+    """
+    return MockLLMProvider().generate(request)
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(f"hermes-memory-distill: invalid request JSON: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print("hermes-memory-distill: request must be a JSON object", file=sys.stderr)
+        return 1
+
+    request = LLMRequest(
+        system_prompt=str(payload.get("system_prompt", "")),
+        user_prompt=str(payload.get("user_prompt", "")),
+        model=str(payload.get("model", "")),
+        max_tokens=int(payload.get("max_tokens", 2000)),
+        metadata=dict(payload.get("metadata") or {}),
+    )
+
+    try:
+        response = produce_response(request)
+    except Exception as exc:  # surface as a non-zero exit per the provider contract
+        print(f"hermes-memory-distill: distillation failed: {exc}", file=sys.stderr)
+        return 1
+
+    json.dump(
+        {"text": response.text, "model": response.model, "usage": response.usage},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

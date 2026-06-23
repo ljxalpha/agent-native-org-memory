@@ -1,0 +1,8 @@
+schema_version: memory-net/platform-config/v1
+runtime:
+  supported_os: ["Linux", "Darwin"]
+review_gate:
+  enabled: false
+paths:
+  allow_home: true
+  allow_agent_root: true

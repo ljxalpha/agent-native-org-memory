@@ -1,0 +1,23 @@
+schema_version: memory-net/report-config/v1
+include_scopes: ["shared"]
+default_category: common_knowledge
+memory_id_prefix: leaf
+redaction_patterns_path: config/redaction_patterns.yaml
+include:
+  - "**/*.md"
+exclude:
+  - ".git/**"
+  - "**/.git/**"
+  - ".cache/**"
+  - "**/.cache/**"
+limits:
+  max_files: 1000
+  max_file_bytes: 1048576
+category_hints:
+  frontmatter_key: category
+external_scanners:
+  builtin:
+    enabled: true
+    mode: audit
+priority:
+  default: normal

@@ -1,0 +1,18 @@
+name: hermes
+support_status: experimental
+roots:
+  shared:
+    - alias: hermes-shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+      # 真实 ~/.hermes/memories 下 *.md 旁并存 *.lock；显式排除以贴合该布局
+      exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**", "**/*.lock"]
+team_target: "${AGENT_ROOT}/memory/team"
+file_pattern: "*.md"
+frontmatter_required: false
+team_hint_injection:
+  mode: install_once
+  target: "${AGENT_ROOT}/AGENTS.md"
+  install_once_default: "${AGENT_ROOT}/AGENTS.md"
+  content_template: |
+    @memory/team/INDEX.md

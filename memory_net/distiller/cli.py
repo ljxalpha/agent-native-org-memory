@@ -1,0 +1,545 @@
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import platform
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml  # type: ignore[import-untyped]
+
+from memory_net import __version__
+from memory_net.distiller.categories import canonical_category
+from memory_net.distiller.golden_eval import evaluate_golden_fixture
+from memory_net.distiller.llm.anthropic_sdk import (
+    DEFAULT_ANTHROPIC_MODEL,
+    AnthropicSDKProvider,
+)
+from memory_net.distiller.llm.base import LLMProvider
+from memory_net.distiller.llm.hermes_tool import HermesToolProvider
+from memory_net.distiller.llm.mock import MockLLMProvider
+from memory_net.distiller.llm.recording import (
+    BundleRecorder,
+    RecordingProvider,
+    ReplayProvider,
+)
+from memory_net.distiller.orchestrator import DistillOrchestrator
+from memory_net.distiller.pipeline import DistillationPipeline
+from memory_net.shared.git_io import GitRepo
+from memory_net.shared.observability import setup_logging
+from memory_net.shared.schema import validate_bootstrap_state
+
+BUILD_API = 1
+MOCK_MODEL = "mock-memory-distiller"
+LOGGER = logging.getLogger(__name__)
+
+
+def main(argv: list[str] | None = None) -> int:
+    _enforce_supported_platform()
+    parser = argparse.ArgumentParser(prog="memory-net-distiller")
+    sub = parser.add_subparsers(dest="command", required=True)
+    run_parser = sub.add_parser("run")
+    run_parser.add_argument("--repo", required=True, type=Path)
+    run_parser.add_argument(
+        "--provider", choices=["mock", "anthropic", "hermes_tool"], default=None
+    )
+    run_parser.add_argument(
+        "--fallback-provider",
+        choices=["none", "mock", "anthropic", "hermes_tool"],
+        default=None,
+    )
+    run_parser.add_argument("--model", default=None)
+    run_parser.add_argument("--max-tokens", type=int, default=None)
+    run_parser.add_argument("--system-prompt", type=Path)
+    run_parser.add_argument("--user-prompt", type=Path)
+    run_parser.add_argument("--record", type=Path)
+    run_parser.add_argument("--record-dir", type=Path)
+    run_parser.add_argument("--replay", type=Path)
+    run_parser.add_argument(
+        "--strict", dest="replay_strict", action="store_true", default=True
+    )
+    run_parser.add_argument("--loose", dest="replay_strict", action="store_false")
+    run_parser.add_argument(
+        "--replay-mode",
+        choices=["strict", "prompt-only", "allow-live-on-miss"],
+        default=None,
+    )
+    run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument("--no-push", action="store_true")
+    run_parser.add_argument("--eval", dest="eval_fixture", type=Path)
+    args = parser.parse_args(argv)
+
+    if args.command == "run":
+        snapshot_sha = _freeze_master_snapshot(args.repo)
+        _setup_runtime(args, snapshot_sha=snapshot_sha)
+        _validate_bootstrap_state_from_repo(args.repo, snapshot_sha)
+        distill_config = _distill_config(args.repo, snapshot_sha)
+        provider_name = _provider_name(args, distill_config)
+        fallback_name = _fallback_provider_name(args, distill_config)
+        provider, fallback_provider = _build_providers(
+            args, provider_name, fallback_name, distill_config
+        )
+        pipeline = DistillationPipeline(
+            provider=provider,
+            fallback_provider=fallback_provider,
+            system_prompt_path=_resolve_prompt(
+                args.repo,
+                _prompt_path(
+                    args.system_prompt,
+                    distill_config,
+                    "system_template_path",
+                    Path("prompts/distill_system.md"),
+                ),
+            ),
+            user_prompt_path=_resolve_prompt(
+                args.repo,
+                _prompt_path(
+                    args.user_prompt,
+                    distill_config,
+                    "user_template_path",
+                    Path("prompts/distill_user.md"),
+                ),
+            ),
+            model=_pipeline_model(args, provider_name, distill_config),
+            max_tokens=_max_tokens(args, distill_config),
+            cost_budget_usd=_cost_budget_usd(distill_config),
+            input_cost_per_mtok_usd=_input_cost_per_mtok_usd(distill_config),
+            output_cost_per_mtok_usd=_output_cost_per_mtok_usd(distill_config),
+            dbscan_eps=_dbscan_eps(distill_config),
+            dbscan_min_samples=_dbscan_min_samples(distill_config),
+            categories=_category_names(distill_config),
+            min_citations_by_category=_min_citations_by_category(distill_config),
+            min_contributors_by_category=_min_contributors_by_category(distill_config),
+        )
+        result = DistillOrchestrator(
+            repo_path=args.repo,
+            pipeline=pipeline,
+            dry_run=args.dry_run,
+            no_push=args.no_push,
+            publish_branch_template=_publish_branch_template(distill_config),
+            frozen_master_snapshot_sha=snapshot_sha,
+            record_bundle_dir=args.record_dir,
+            replay_mode=_replay_mode(args),
+        ).run()
+        response: dict[str, Any] = {
+            "run_id": result.run_id,
+            "input_records": result.input_records,
+            "products": result.products,
+            "manifest_path": str(result.manifest_path),
+        }
+        if args.eval_fixture is not None:
+            response["golden_eval"] = evaluate_golden_fixture(args.eval_fixture)
+        print(json.dumps(response, sort_keys=True))
+        return 0
+    parser.error("unknown command")
+    return 2
+
+
+def _build_providers(
+    args: argparse.Namespace,
+    provider_name: str,
+    fallback_name: str,
+    config: dict[str, Any],
+) -> tuple[LLMProvider, LLMProvider | None]:
+    """Build the (primary, fallback) providers, sharing record/replay state.
+
+    On record the primary and fallback wrap one shared ``BundleRecorder`` so both
+    land in a single ordered bundle (RECORD-001). On replay they share one
+    ``ReplayProvider`` cursor so a recorded primary->fallback sequence replays in
+    order; the fallback is attached only when one is configured, otherwise a
+    recorded primary parse failure with no fallback would consume the next
+    cluster's record.
+    """
+    if args.replay:
+        replay = _replay_provider(args, provider_name)
+        if fallback_name == "none":
+            return replay, None
+        # Share one ordered cursor, but give the fallback lane its own
+        # live-on-miss provider (the configured fallback) so allow-live-on-miss
+        # misses do not fall through to the primary provider.
+        fallback_live = (
+            _base_provider(fallback_name, args.model or _fallback_model(config))
+            if args.replay_mode == "allow-live-on-miss"
+            else None
+        )
+        return replay, replay.sharing_cursor(fallback_provider=fallback_live)
+    recorder = _record_recorder(args)
+    primary = _wrap_record(_base_provider(provider_name, args.model), recorder)
+    if fallback_name == "none":
+        return primary, None
+    fallback_model = _fallback_model(config)
+    fallback = _wrap_record(
+        _base_provider(fallback_name, args.model or fallback_model), recorder
+    )
+    return primary, fallback
+
+
+def _replay_provider(args: argparse.Namespace, provider_name: str) -> ReplayProvider:
+    live_on_miss = (
+        _base_provider(provider_name, args.model)
+        if args.replay_mode == "allow-live-on-miss"
+        else None
+    )
+    return ReplayProvider(
+        args.replay,
+        strict=args.replay_strict,
+        mode=args.replay_mode,
+        fallback_provider=live_on_miss,
+    )
+
+
+def _record_recorder(args: argparse.Namespace) -> BundleRecorder | None:
+    if args.replay:
+        return None
+    if args.record_dir:
+        return BundleRecorder(
+            args.record_dir / "calls.jsonl",
+            requests_dir=args.record_dir / "requests",
+        )
+    if args.record:
+        return BundleRecorder(args.record)
+    return None
+
+
+def _wrap_record(provider: LLMProvider, recorder: BundleRecorder | None) -> LLMProvider:
+    if recorder is None:
+        return provider
+    return RecordingProvider(provider, recorder=recorder)
+
+
+def _replay_mode(args: argparse.Namespace) -> str:
+    if not args.replay:
+        return "live"
+    if args.replay_mode:
+        return str(args.replay_mode)
+    return "strict" if args.replay_strict else "prompt-only"
+
+
+def _fallback_provider_name(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    provider_name = args.fallback_provider
+    llm = config.get("llm")
+    if provider_name is None:
+        if isinstance(llm, dict) and llm.get("fallback_provider"):
+            provider_name = str(llm["fallback_provider"])
+        elif config.get("fallback_provider"):
+            provider_name = str(config["fallback_provider"])
+        elif isinstance(llm, dict) and llm.get("fallback_model"):
+            provider_name = _provider_name(args, config)
+        else:
+            provider_name = "none"
+    return str(provider_name)
+
+
+def _fallback_model(config: dict[str, Any]) -> str | None:
+    llm = config.get("llm")
+    if isinstance(llm, dict) and llm.get("fallback_model"):
+        return str(llm["fallback_model"])
+    return None
+
+
+def _base_provider(provider_name: str, model: str | None) -> LLMProvider:
+    if provider_name == "anthropic":
+        return AnthropicSDKProvider(model=model)
+    if provider_name == "hermes_tool":
+        return HermesToolProvider()
+    return MockLLMProvider()
+
+
+def _provider_name(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    if args.provider:
+        return str(args.provider)
+    llm = config.get("llm")
+    if isinstance(llm, dict) and llm.get("provider"):
+        return str(llm["provider"])
+    return "mock"
+
+
+def _pipeline_model(
+    args: argparse.Namespace,
+    provider_name: str,
+    config: dict[str, Any],
+) -> str:
+    if args.model:
+        return str(args.model)
+    llm = config.get("llm")
+    if isinstance(llm, dict) and llm.get("model"):
+        return str(llm["model"])
+    if provider_name == "anthropic":
+        return DEFAULT_ANTHROPIC_MODEL
+    return MOCK_MODEL
+
+
+def _max_tokens(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    if args.max_tokens is not None:
+        return int(args.max_tokens)
+    llm = config.get("llm")
+    if isinstance(llm, dict) and llm.get("max_tokens") is not None:
+        return int(llm["max_tokens"])
+    return 2000
+
+
+def _cost_budget_usd(config: dict[str, Any]) -> float | None:
+    llm = config.get("llm")
+    if isinstance(llm, dict) and llm.get("budget_usd") is not None:
+        return float(llm["budget_usd"])
+    cost_budget = config.get("cost_budget")
+    if isinstance(cost_budget, dict) and cost_budget.get("budget_usd") is not None:
+        return float(cost_budget["budget_usd"])
+    return None
+
+
+def _input_cost_per_mtok_usd(config: dict[str, Any]) -> float:
+    return _pricing_value(config, "input_per_mtok_usd", default=3.0)
+
+
+def _output_cost_per_mtok_usd(config: dict[str, Any]) -> float:
+    return _pricing_value(config, "output_per_mtok_usd", default=15.0)
+
+
+def _pricing_value(config: dict[str, Any], key: str, *, default: float) -> float:
+    llm = config.get("llm")
+    pricing = llm.get("pricing") if isinstance(llm, dict) else None
+    if isinstance(pricing, dict) and pricing.get(key) is not None:
+        return float(pricing[key])
+    cost_budget = config.get("cost_budget")
+    if isinstance(cost_budget, dict) and cost_budget.get(key) is not None:
+        return float(cost_budget[key])
+    return default
+
+
+def _dbscan_eps(config: dict[str, Any]) -> float:
+    clustering = config.get("clustering")
+    if isinstance(clustering, dict) and clustering.get("dbscan_eps") is not None:
+        return float(clustering["dbscan_eps"])
+    if isinstance(clustering, dict) and clustering.get("eps") is not None:
+        return float(clustering["eps"])
+    return 0.5
+
+
+def _dbscan_min_samples(config: dict[str, Any]) -> int:
+    clustering = config.get("clustering")
+    if isinstance(clustering, dict) and clustering.get("min_samples") is not None:
+        return int(clustering["min_samples"])
+    return 2
+
+
+def _min_citations_by_category(config: dict[str, Any]) -> dict[str, int]:
+    raw = config.get("category_evidence_rules") or config.get("categories")
+    rules = raw if isinstance(raw, dict) else {}
+    result: dict[str, int] = {}
+    for category, value in rules.items():
+        if isinstance(value, dict):
+            raw_min = value.get("min_citations") or value.get("min_evidence")
+        else:
+            raw_min = value
+        if raw_min is not None:
+            result[canonical_category(str(category))] = int(raw_min)
+    return result
+
+
+def _min_contributors_by_category(config: dict[str, Any]) -> dict[str, int]:
+    raw = config.get("category_evidence_rules") or config.get("categories")
+    rules = raw if isinstance(raw, dict) else {}
+    result: dict[str, int] = {}
+    for category, value in rules.items():
+        if isinstance(value, dict) and value.get("min_contributors") is not None:
+            result[canonical_category(str(category))] = int(value["min_contributors"])
+    return result
+
+
+def _category_names(config: dict[str, Any]) -> list[str]:
+    raw = config.get("categories")
+    if isinstance(raw, dict):
+        return sorted(canonical_category(str(category)) for category in raw)
+    if isinstance(raw, list):
+        return sorted(canonical_category(str(category)) for category in raw)
+    raw = config.get("category_evidence_rules")
+    if isinstance(raw, dict):
+        return sorted(canonical_category(str(category)) for category in raw)
+    output = config.get("output")
+    if isinstance(output, dict) and output.get("default_category"):
+        return [canonical_category(str(output["default_category"]))]
+    return []
+
+
+def _publish_branch_template(config: dict[str, Any]) -> str | None:
+    review_gate = config.get("review_gate")
+    if not isinstance(review_gate, dict) or not review_gate.get("enabled"):
+        return None
+    return str(review_gate.get("branch_template") or "release/<run_id>")
+
+
+def _prompt_path(
+    cli_path: Path | None,
+    config: dict[str, Any],
+    key: str,
+    default: Path,
+) -> Path:
+    if cli_path is not None:
+        return cli_path
+    prompts = config.get("prompts")
+    if isinstance(prompts, dict) and prompts.get(key):
+        return Path(str(prompts[key]))
+    return default
+
+
+def _resolve_prompt(repo: Path, path: Path) -> Path:
+    resolved = path if path.is_absolute() else repo / path
+    try:
+        resolved.resolve().relative_to(repo.resolve())
+    except ValueError as exc:
+        raise SystemExit(f"prompt path must be inside repo: {path}") from exc
+    return resolved
+
+
+def _setup_runtime(
+    args: argparse.Namespace,
+    *,
+    snapshot_sha: str | None = None,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="memory-net-runtime-config-") as tmpdir:
+        tmp = Path(tmpdir)
+        _enforce_supported_platform(
+            _runtime_config_path(args.repo, "platform.yaml", snapshot_sha, tmp)
+        )
+        setup_logging(
+            config_path=_runtime_config_path(
+                args.repo,
+                "observability.yaml",
+                snapshot_sha,
+                tmp,
+            )
+        )
+
+
+def _enforce_supported_platform(config_path: Path | None = None) -> None:
+    current = platform.system()
+    supported = _supported_platforms(config_path)
+    if current not in supported:
+        print(
+            f"[ABORT] unsupported OS: {current}; supported: {', '.join(supported)}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def _validate_bootstrap_state_from_repo(
+    repo_path: Path,
+    snapshot_sha: str | None = None,
+) -> None:
+    text = _read_bootstrap_state(repo_path, snapshot_sha)
+    try:
+        value = json.loads(text)
+        validate_bootstrap_state(
+            value,
+            build_version=__version__,
+            build_api=BUILD_API,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SystemExit(f"bootstrap_state.json is not compatible: {exc}") from exc
+
+
+def _read_bootstrap_state(repo_path: Path, snapshot_sha: str | None = None) -> str:
+    if (repo_path / ".git").exists():
+        repo = GitRepo(repo_path)
+        ref = snapshot_sha or "origin/master"
+        if snapshot_sha is None:
+            repo.fetch()
+        result = repo.run(
+            "show",
+            f"{ref}:bootstrap_state.json",
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    path = repo_path / "bootstrap_state.json"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    raise SystemExit("bootstrap_state.json is required before running distiller")
+
+
+def _runtime_config_path(
+    repo_path: Path,
+    filename: str,
+    snapshot_sha: str | None,
+    tmp: Path,
+) -> Path | None:
+    if snapshot_sha is not None and (repo_path / ".git").exists():
+        repo = GitRepo(repo_path)
+        result = repo.run("show", f"{snapshot_sha}:config/{filename}", check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            path = tmp / filename
+            path.write_text(result.stdout, encoding="utf-8")
+            return path
+    return _first_existing_config(repo_path, filename)
+
+
+def _first_existing_config(repo_path: Path, filename: str) -> Path | None:
+    for path in [repo_path / "config" / filename, Path("config") / filename]:
+        if path.exists():
+            return path
+    return None
+
+
+def _supported_platforms(config_path: Path | None) -> tuple[str, ...]:
+    config = _load_yaml_mapping(config_path) if config_path is not None else {}
+    runtime = config.get("runtime")
+    raw = runtime.get("supported_os") if isinstance(runtime, dict) else None
+    if raw is None:
+        raw = config.get("supported_os")
+    if isinstance(raw, list) and raw:
+        return tuple(str(item) for item in raw)
+    return ("Linux", "Darwin")
+
+
+def _freeze_master_snapshot(repo_path: Path) -> str | None:
+    if not (repo_path / ".git").exists():
+        return None
+    repo = GitRepo(repo_path)
+    repo.fetch()
+    result = repo.run("rev-parse", "origin/master", check=False)
+    snapshot_sha = result.stdout.strip()
+    if result.returncode != 0 or not snapshot_sha:
+        raise SystemExit("cannot resolve origin/master")
+    return snapshot_sha
+
+
+def _distill_config(repo_path: Path, snapshot_sha: str | None = None) -> dict[str, Any]:
+    if snapshot_sha is not None and (repo_path / ".git").exists():
+        repo = GitRepo(repo_path)
+        result = repo.run("show", f"{snapshot_sha}:config/distill.yaml", check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return _load_yaml_text(result.stdout, f"{snapshot_sha}:config/distill.yaml")
+    path = repo_path / "config" / "distill.yaml"
+    return _load_optional_yaml_mapping(path)
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    return _load_required_yaml_mapping(path)
+
+
+def _load_required_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise SystemExit(f"config file is required: {path}")
+    return _load_yaml_text(path.read_text(encoding="utf-8"), str(path))
+
+
+def _load_optional_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        LOGGER.info("using default config; file not found: %s", path)
+        return {}
+    return _load_yaml_text(path.read_text(encoding="utf-8"), str(path))
+
+
+def _load_yaml_text(text: str, label: str) -> dict[str, Any]:
+    value = yaml.safe_load(text) or {}
+    if not isinstance(value, dict):
+        raise SystemExit(f"config must be a mapping: {label}")
+    return value
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,16 @@
+schema_version: memory-net/subscribe-config/v1
+merge_strategy: replace
+include_index: true
+target_dir: memory/team
+priority_order:
+  - high
+  - normal
+  - low
+allowed_product_schema_versions:
+  - memory-net/team-product/v1
+include:
+  categories: ["*"]
+exclude:
+  categories: []
+limits:
+  max_products: 1000

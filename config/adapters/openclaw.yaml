@@ -1,0 +1,19 @@
+# EXPERIMENTAL / UNVERIFIED: template only — NOT validated against a real OpenClaw
+# install and not supported in the MVP. Paths/keys here are illustrative.
+name: openclaw
+support_status: experimental
+roots:
+  shared:
+    - alias: openclaw-shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+      exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**"]
+team_target: "${AGENT_ROOT}/memory/team"
+file_pattern: "*.md"
+frontmatter_required: false
+team_hint_injection:
+  mode: install_once
+  target: "${AGENT_ROOT}/AGENTS.md"
+  install_once_default: "${AGENT_ROOT}/AGENTS.md"
+  content_template: |
+    @memory/team/INDEX.md

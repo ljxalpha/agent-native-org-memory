@@ -1,0 +1,34 @@
+schema_version: memory-net/distill-config/v1
+llm:
+  provider: mock
+  model: mock-memory-distiller
+  max_tokens: 2000
+  budget_usd: 5.0
+  pricing:
+    input_per_mtok_usd: 3.0
+    output_per_mtok_usd: 15.0
+prompts:
+  system_template_path: prompts/distill_system.md
+  user_template_path: prompts/distill_user.md
+output:
+  default_category: common_knowledge
+  products_dir: team
+categories:
+  - common_knowledge
+  - best_practices
+  - shared_qa
+  - risk_signals
+  - open_questions
+clustering:
+  eps: 0.5
+  min_samples: 2
+category_evidence_rules:
+  common_knowledge:
+    min_citations: 1
+review_gate:
+  enabled: true
+  branch_template: release/<run_id>
+  pr_target_branch: master
+  codeowners_path: .github/CODEOWNERS
+platform_write_protection:
+  required: true
