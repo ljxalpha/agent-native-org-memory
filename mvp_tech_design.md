@@ -715,6 +715,76 @@ MVP **不**新增 `DistillationEngine` 接口——它与 `LLMProvider` 职责�
 
 未来若要支持"非模板蒸馏策略"（map-reduce、图抽取等），在 `pipeline.py` 内以函数分支实现，或新增 `pipeline_<strategy>.py`；不强制引入抽象层。
 
+### 5.5 运行上下文与 run 级预算（`memory_net/distiller/runctx.py`）
+
+#### 5.5.1 `RunContext`：唯一的注入载体
+
+一次蒸馏 run 需要把若干 run 级事实送到运行期（run_id 与时钟、成本预算、profile 溯源、
+输出扫描器、录制句柄）。**这些一律通过一个 `RunContext` 值对象注入，不得各开一条通道**：
+每开一条通道就要同时改消费方签名与 `cli.py`，消费方的构造参数会随特性数量线性膨胀。
+
+```
+RunContext (frozen):
+  identity: RunIdentity | None      # run_id + 时钟
+  budget:   RunBudget   | None      # 定价、上界与已消耗计数
+  profile:  ProfileProvenance | None
+  scanner:  OutputScanner | None
+  recorder: BundleRecorder | None
+```
+
+- 五个字段**全部可为 `None`**，`None` 表示"该特性对本 run 不适用"，消费方回落到注入前的行为。
+- 装配用 `RunContextBuilder`（可变，**只在 `cli.py` 内使用**）：逐个 `set_*`，
+  全部就绪后 `freeze()` 产出唯一的不可变 `RunContext`，**然后才构造任何消费者**。
+  `freeze()` 之后再调 `set_*` 直接抛错，`freeze()` 也不可重复调用——
+  否则会出现"不同消费者持有不同版本 context"，而这类偏差在运行期几乎不可能被发现。
+- `RunIdentity`（frozen）持 `run_id: str` 与 `now: Callable[[], str]`。
+  run 级的时钟与 id **只有这一个来源**：任何模块自读时钟或自造 run_id，
+  都会让"注入固定 identity 后两次 run 逐字节一致"这一可复现性判据失效。
+
+#### 5.5.2 `RunBudget`：run 级共享的预扣/结算预算
+
+预算是 **run 级**的，不是 provider 级的：primary 与 fallback 是两个不同的 provider 实例，
+若各持一份上限，则一个配了 `max_usd=5` 的 run 实际最多可以花 10 美元。
+因此 `cli.py` 构造**一个** `RunBudget` 实例并注入两条 lane，二者共用同一份余额。
+
+`RunBudget` 持有定价与三个维度的上界：`input_per_mtok_usd` / `output_per_mtok_usd` /
+`max_usd` / `max_attempts` / `max_wall_clock_s`（后三者为 `None` 表示该维度不设限）。
+**定价与换算全在 budget 内部**，调用方只提供 token 上界——否则每个 provider 都要复制一份
+定价知识，而它们迟早会漂移。
+
+**预扣（reserve）而不是事后计费**：
+
+```
+reserve(*, input_tokens_upper, output_tokens_upper, timeout_s_upper) -> Reservation
+```
+
+调用**之前**按上界扣减；任一维度触顶抛 `BudgetExhausted`，**调用根本不会发出**。
+这是"绝不超额"的实质保证——事后结算做不到，因为钱在结算时已经花掉了。
+wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直接触顶，
+不允许"只剩 1 秒还去开一个 120 秒的请求"。
+
+**`Reservation` 的三个终态，每次尝试必须恰好调用其一**：
+
+| 终态 | 何时用 | 成本 | `attempts` |
+|---|---|---|---|
+| `settle(*, usage, wall_s)` | 成功返回 | 按真实 `usage` 结算，回补预扣差额 | +1 |
+| `settle_unknown(*, wall_s)` | 超时 / 连接中断 / 结果未知 | **预扣一律不回补** | +1 |
+| `release(*, wall_s)` | 能证明服务端未执行、未计费 | 预扣全额回补 | +1 |
+
+- `settle_unknown` 是**默认的保守路径**：请求可能已在服务端产生费用，回补等于低估余额。
+  "5xx 且响应体无 usage"**不能**证明服务端没执行（可能执行完在返回路径上失败）。
+  `release` 只在"发出请求之前就失败"（缺 key、参数非法）或服务端明示未执行时使用。
+- `attempts` 永远由 `Reservation` 自己 +1，**调用方不传累计值**——传累计值会把"本次"
+  与"累计"混淆，第二次调用传 2 就变成 1+2=3。
+- 一个 `Reservation` 只能终结一次，重复终结抛错：否则一次失败重试可以把额度退两遍。
+- 真实成本**超过**预扣时不回滚已发生的调用（钱已经花了），只记账，并让下一次 `reserve` 触顶。
+- `assert_all_settled()` 由 orchestrator 在 `finally` 里**显式调用**断言无残留预扣。
+  **不依赖 `__del__`**：析构时机不确定，不是可靠的检测点。
+- `snapshot() -> dict` 供 metrics，键集合稳定。
+
+`RunBudget` 是**单一预算真相源**：`DistillationPipeline` 原有的 `cost_budget_usd` 自累加闸
+在 `context.budget` 存在时完全委托给它，不再自行累加，避免同一个 run 出现两套互不知情的闸。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
