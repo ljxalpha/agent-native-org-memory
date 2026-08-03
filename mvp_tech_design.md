@@ -635,6 +635,30 @@ class LLMProvider(ABC):
 - `LLMResponse.cache_read_input_tokens / cache_creation_input_tokens` 属于后续
   prompt-cache fidelity 指标，当前 MVP-core 不要求 provider 暴露或写入该字段。
 
+#### 5.3.1 计量溯源（provenance）字段契约
+
+上面的 `complete()/embed()/PromptBlock` 是目标态；**当前实现的抽象方法是
+`generate(LLMRequest) -> LLMResponse`**（`memory_net/distiller/llm/base.py`），
+本节定义的 provenance 契约以该实现形态为准，两者的其余差异归 §5.3 目标态路线图。
+
+`LLMResponse` 除 `text` / `model` / `usage` 外，带三个**独立的顶层 provenance 字段**：
+
+| 字段 | 类型 | 默认 | 语义 |
+|---|---|---|---|
+| `usage_source` | `str` | `"unknown"` | 本次调用的 token 计数来源，取值域**固定为** `reported`（服务端返回的真实用量）/ `estimated`（本地估算）/ `unknown`（无法判定）。传入取值域外的值直接 `ValueError`。 |
+| `provider_backend` | `str` | `"unknown"` | 实际执行该调用的后端标识（自由字符串，如 `mock` / `hermes_tool`），用于 run 级聚合。空串直接 `ValueError`。 |
+| `raw_meta` | `dict[str, str]` | `{}` | 仅存**字符串标量**的附加元数据（如模型版本、`finish_reason`）。禁止放原始响应体——那会凭空多出一个未经扫描的落盘面。非字符串键值直接 `TypeError`。 |
+
+两条硬约束：
+
+1. **`usage` 的值域是 `int`**。这些 provenance 值**不得**写进 `usage`：消费方
+   （如 `HermesToolProvider`）对 usage 逐值执行 `int(v)`，字符串值必抛 `ValueError`。
+2. 三个字段**全部有默认值**（`raw_meta` 用 `default_factory`，禁止可变默认值），
+   既有构造点无需修改即可继续工作。
+
+`MockLLMProvider` 返回 `usage_source="estimated"`（它的 token 数是词数估算）、
+`provider_backend="mock"`，使 mock 路径与真实路径的 metrics 键集合完全一致。
+
 MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 
 | 实现 | 用途 | 必要性 |
@@ -1756,6 +1780,21 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
   - `allow-live-on-miss`：miss 时回落 live provider，并在 response usage 中标记 miss。
 - run-scoped replay CLI、source run id 与 replay miss metrics 进入 `RECORD-001`。
 
+**provenance 贯穿 record / replay**：
+
+- 每条 `calls.jsonl` 记录的 `response` 对象除 `text` / `model` / `usage` 外，
+  **必须**带 §5.3.1 的 `usage_source` / `provider_backend` / `raw_meta` 三个键，
+  逐调用**原样**保留，不做任何聚合——这是 run 级聚合唯一的真相源。
+- `ReplayProvider` 重建 `LLMResponse` 时**原样回放**录制期的这三项，
+  **不得**改写为 `"replay"`。否则一个录自真实后端的 bundle 在 strict replay 下会丢失
+  "这次计量来自服务端"这一事实，依赖它的回归断言在离线车道就复现不出来。
+  "本次是重放"这件事由既有的 `replay_mode` / `replay_hits` / `replay_misses` /
+  `replay_live_calls` 表达，**两组字段正交**。
+- **向后兼容**：缺这三个键的历史记录在读取时回落为
+  `usage_source="unknown"` / `provider_backend="unknown"` / `raw_meta={}`，不报错。
+- `prompt_hash` 口径不变（仍只覆盖 `system_prompt + user_prompt`），
+  provenance 字段**不进** hash，既有 bundle 的请求文件名与匹配行为不受影响。
+
 ### 9.3 dry-run
 
 - `leaf-daemon report --dry-run`：输出将上报的文件列表、脱敏 diff、预计 commit 消息，**不 commit、不 push**。
@@ -1794,6 +1833,24 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
   `publish_branch` / `target_branch` 与 run status。
 - C7 cache/cost by model、C6 resume/fallback 进度、C12 replay source/miss/live-call
   metrics 与 per-cluster 成本一致性属于 `DISTILL-001` / `RECORD-001`。
+
+**run 级 provenance 聚合语义**（`memory_net/distiller/provenance.py`，纯函数无 IO）。
+一次 run 会混合 primary 与 fallback 两条 lane，因此聚合规则必须先定死，
+否则"这次 run 的计量是否可信"在混合场景下无定义：
+
+- `provider_backends`：全部调用的 `provider_backend` **去重后按字典序排序的列表**；
+  零调用为 `[]`。**不提供标量版本**——标量在混合场景下只能编码成 `"mixed"`，
+  信息有损且诱导误判，判据因此写成 `provider_backends == [<期望后端>]`。
+- `usage_source`（标量，取值域固定 5 值）：
+  零调用 → `"none"`；全部为 `reported` → `"reported"`；
+  全部为同一个非 `reported` 值 → 该值；出现两种及以上 → `"mixed"`。
+- `usage_source_counts`：`{reported: N, estimated: M, unknown: K}`，
+  **始终写全三个键**（缺席的计 0），让 `"mixed"` 可被拆开审计。
+- **落点**：三个字段同时写入 `distill_runs/<run_id>/metrics.json` **与** bundle 的
+  `record_metrics.json`，**两处取值必须逐字段相等**（由测试直接对比两个文件）。
+  失败 run 的 metrics 同样写这三个字段（无 output 时为 `none` / `[]` / 全 0）。
+- 聚合的输入是**逐调用**的响应（primary 与 fallback 都计入），
+  由 pipeline 在既有的响应聚合路径上收集进 `DistillationOutput`。
 - `leaf` 侧每次 report 写 `state/last_report.json`：files_scanned、files_included、files_redacted、files_tombstoned、commit_sha、`config_revision`、`config_source_master_sha`、`redaction_pattern_version`、`external_scanner_hits{rule→count}`。
 - 对 DBSCAN 调参，至少落 `metric`、`normalize=true/false`、`eps`、近邻距离摘要、noise ratio，保证 run 间可比。
 - 无 Prometheus 依赖；可视化从 git 历史解析即可（预留 `scripts/metrics_aggregate.py`，按 `run_id` 聚合 tokens / cost / 耗时）。
@@ -2701,6 +2758,30 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
 - Change summary: Appended the missing §7.2 / §9.7 design change records for the 2026-06-02 METRICS-001 / RECORD-001 promotions and the 2026-06-03 record/replay updates.
 - Change reason: The design change log had ended at 2026-05-06, losing the record of the later design changes.
 - Change time: 2026-06-03
+
+## Change Record - 2026-08-03 provenance 链路
+
+- Change summary: §5.3 新增 5.3.1，把 `usage_source` / `provider_backend` / `raw_meta`
+  定义为 `LLMResponse` 的独立顶层字段（含取值域与校验），并写明 `usage` 的值域是 `int`；
+  同时声明 §5.3 的 `complete()/embed()` 是目标态、当前实现为 `generate()`。
+- Change reason: 计量来源等非数值元数据此前无处安放，塞进 `usage` 会在消费方的
+  `int(v)` 处直接抛错，因此必须提升为独立字段；文档与实现的接口形态差异也需显式说明，
+  避免继续无声不一致。
+- Change time: 2026-08-03
+
+- Change summary: §9.2 增加 provenance 贯穿 record/replay 的契约——逐调用原样序列化三字段、
+  replay 原样回放而不改写为 `"replay"`、缺字段的历史记录回落 `unknown`、`prompt_hash` 口径不变。
+- Change reason: 录制格式此前只存 `text/model/usage`，走一遍 record→replay 会丢掉计量来源，
+  离线重放车道因此无法复现"计量是否来自服务端"的判据。
+- Change time: 2026-08-03
+
+- Change summary: §9.5 增加 run 级 provenance 聚合语义：`provider_backends`（去重排序列表，
+  不提供有损标量）、`usage_source`（`none/reported/estimated/unknown/mixed`）、
+  `usage_source_counts`（始终写全三键），并规定 `metrics.json` 与 `record_metrics.json`
+  两处取值必须相等。
+- Change reason: 一次 run 会混合 primary / fallback 两条 lane，不先定死聚合规则，
+  "本次 run 的计量来源"在混合场景下没有定义。
+- Change time: 2026-08-03
 
 - Change summary: 项目顶层改名为 Agent 原生组织记忆架构 (aomt)；同步更新本文档标题。代码标识符（`memory_net` 包、`memory-net-*` 脚本、`MEMORY_NET_HOME`、`~/.memory-net`、配置键）与 schema 字段均保持不变。
 - Change reason: 品牌改名（仅项目名称/标题），不影响任何代码契约。
