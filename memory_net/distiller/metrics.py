@@ -4,6 +4,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from memory_net.distiller.provenance import RunProvenance
+
 
 @dataclass(frozen=True)
 class DistillMetrics:
@@ -48,6 +50,16 @@ class DistillMetrics:
     replay_hits: int = 0
     replay_misses: int = 0
     replay_live_calls: int = 0
+    # Run-level provenance. Orthogonal to the replay_* counters above: those say
+    # whether calls were replayed, these say where their accounting came from.
+    # The defaults describe a run that made no call at all.
+    provider_backends: list[str] = field(
+        default_factory=lambda: RunProvenance.empty().provider_backends
+    )
+    usage_source: str = "none"
+    usage_source_counts: dict[str, int] = field(
+        default_factory=lambda: RunProvenance.empty().usage_source_counts
+    )
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

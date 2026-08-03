@@ -18,6 +18,7 @@ from memory_net.distiller.metrics import (
     parse_failure_rate,
 )
 from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
+from memory_net.distiller.provenance import RunProvenance
 from memory_net.shared.git_io import GitError, GitRepo
 from memory_net.shared.paths import (
     MASTER_ALLOWED_EXACT_PATHS,
@@ -325,6 +326,9 @@ class DistillOrchestrator:
             replay_hits=output.replay_hits,
             replay_misses=output.replay_misses,
             replay_live_calls=_replay_live_calls(output),
+            provider_backends=output.provenance.provider_backends,
+            usage_source=output.provenance.usage_source,
+            usage_source_counts=output.provenance.usage_source_counts,
         )
 
     def _write_failure_outputs(
@@ -360,6 +364,9 @@ class DistillOrchestrator:
             encoding="utf-8",
         )
         config_revision = self._config_revision(snapshot_sha)
+        # A failed run still discloses where whatever calls it did make were
+        # accounted; with no output at all this is the zero-call view.
+        provenance = output.provenance if output else RunProvenance.empty()
         metrics = DistillMetrics(
             run_id=run_id,
             input_records=len(records),
@@ -410,6 +417,9 @@ class DistillOrchestrator:
             replay_hits=output.replay_hits if output else 0,
             replay_misses=output.replay_misses if output else 0,
             replay_live_calls=_replay_live_calls(output) if output else 0,
+            provider_backends=provenance.provider_backends,
+            usage_source=provenance.usage_source,
+            usage_source_counts=provenance.usage_source_counts,
             status="failed",
             recent_errors=[error],
         )
@@ -960,6 +970,11 @@ class DistillOrchestrator:
                 "replay_hits": output.replay_hits,
                 "replay_misses": output.replay_misses,
                 "replay_live_calls": _replay_live_calls(output),
+                # Same values as distill_runs/<run_id>/metrics.json: the two
+                # sinks are read by different consumers and must never disagree.
+                "provider_backends": output.provenance.provider_backends,
+                "usage_source": output.provenance.usage_source,
+                "usage_source_counts": output.provenance.usage_source_counts,
             },
         )
 
