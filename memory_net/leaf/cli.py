@@ -1223,9 +1223,16 @@ def _read_state_time(path: Path) -> datetime | None:
     raw = path.read_text(encoding="utf-8").strip()
     try:
         # fromisoformat has accepted a trailing 'Z' since 3.11 (our floor).
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        # A naive value would blow up on the `datetime.now(UTC) - latest`
+        # subtraction in _health_commit_due. State files are always written by
+        # _write_state_time, which stamps UTC, so anything naive is corrupt
+        # input and is treated the same as an unparsable one: no known time.
+        return None
+    return parsed
 
 
 def _read_recent_errors(path: Path) -> list[str]:

@@ -440,6 +440,40 @@ def test_health_commit_not_due_without_prior_state(tmp_path: Path) -> None:
     assert _health_commit_due(tmp_path) is False
 
 
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "not-a-timestamp",
+        # Parses in 3.11+ ('Z' is accepted as an arbitrary date/time separator)
+        # but yields a *naive* datetime.
+        "2026-01-01Z00:00:00",
+        "2026-01-01T00:00:00",
+        "",
+    ],
+)
+def test_health_commit_survives_a_corrupt_state_timestamp(
+    tmp_path: Path, corrupt: str
+) -> None:
+    """A naive or unparsable stamp must read as "no known time", not crash.
+
+    _health_commit_due subtracts the parsed value from an aware datetime.now,
+    so letting a naive datetime through would raise TypeError and take the
+    whole daemon tick down over one corrupt state file.
+    """
+    (tmp_path / "last_health_commit_at").write_text(corrupt + "\n", encoding="utf-8")
+
+    assert _health_commit_due(tmp_path) is False
+
+
+def test_health_commit_is_due_after_a_stale_aware_timestamp(tmp_path: Path) -> None:
+    """Guard the other side: a valid stamp is still parsed and compared."""
+    (tmp_path / "last_health_commit_at").write_text(
+        "2000-01-01T00:00:00Z\n", encoding="utf-8"
+    )
+
+    assert _health_commit_due(tmp_path) is True
+
+
 def test_subscribe_rejects_product_content_hash_mismatch(tmp_path: Path) -> None:
     adapter, _agent_root = _adapter(tmp_path)
     master = tmp_path / "master"
