@@ -659,8 +659,18 @@ class LLMProvider(ABC):
    这类非字符串值；它们一旦被录制进 bundle，replay 侧读取 provenance 标量时必抛
    `TypeError`，record→replay 往返就此断裂。把类型校验钉在构造点是唯一能让往返闭合的位置。
 
-`MockLLMProvider` 返回 `usage_source="estimated"`（它的 token 数是词数估算）、
-`provider_backend="mock"`，使 mock 路径与真实路径的 metrics 键集合完全一致。
+**每个 provider 都必须申报自己的 provenance**——留用默认值 `unknown` 等于让生产调用
+在 run 级聚合里显示成"来源不明"，整条溯源链在真实路径上就是空的：
+
+| provider | `provider_backend` | `usage_source` | `raw_meta` |
+|---|---|---|---|
+| `MockLLMProvider` | `mock` | `estimated`（token 数是词数估算） | `{}` |
+| `AnthropicSDKProvider` | `anthropic_sdk` | 服务端返回了 usage 对象 → `reported`；拿不到 → `unknown`（此时 token 计数是补 0 的占位，不能谎称 reported） | `stop_reason` 与服务端回报的 `model`，仅字符串标量 |
+| `HermesToolProvider` | 桥接进程申报的非空字符串，否则 `hermes_tool` | 桥接进程申报的合法取值，否则 `unknown`——桥接层无法代下游断言"这是服务端报告的"，因此**不得**默认成 `reported` | 桥接进程申报的字符串标量映射，否则 `{}` |
+
+桥接协议（`memory_net/distiller/llm/hermes_tool.py` 的 stdout 契约、参考实现
+`scripts/hermes-memory-distill`）相应扩展三个**可选**键
+`usage_source` / `provider_backend` / `raw_meta`；不带这三键的旧桥接按上表回落，不报错。
 
 MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 
@@ -2787,6 +2797,12 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   两处取值必须相等。
 - Change reason: 一次 run 会混合 primary / fallback 两条 lane，不先定死聚合规则，
   "本次 run 的计量来源"在混合场景下没有定义。
+- Change time: 2026-08-03
+
+- Change summary: §5.3.1 增加每个 provider 的 provenance 申报口径表，并把
+  `usage_source` / `provider_backend` / `raw_meta` 三个可选键加入 hermes 桥接的 stdout 契约。
+- Change reason: `AnthropicSDKProvider` / `HermesToolProvider` 此前都留用默认 `unknown`，
+  于是真实生产调用在 run 级聚合里全部显示为"来源不明后端不明"，溯源链只在 mock 路径上成立。
 - Change time: 2026-08-03
 
 - Change summary: §9.5 明确失败 run 的 provenance 口径：只要本轮已产出 `DistillationOutput`，
