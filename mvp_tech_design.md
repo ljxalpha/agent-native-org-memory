@@ -677,8 +677,31 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 | 实现 | 用途 | 必要性 |
 |---|---|---|
 | `AnthropicSDKProvider` | 直连 Claude API；最简路径 | **M1c 必须** |
-| `HermesToolProvider` | 蒸馏节点是一个 Hermes Agent 时的桥接 | **M4 目标** |
-| `OpenAICompatProvider` | 内部代理 / 开源模型兼容 | 可选 |
+| `HermesToolProvider` | 进程外 agent 后端的**实验性**集成入口 | **experimental** |
+| `OpenAICompatProvider` | 直连 OpenAI 兼容端点（DeepSeek 等）；**生产蒸馏后端** | **M4 必须** |
+
+#### 5.3.2 `HermesToolProvider` 的定位：experimental 集成入口
+
+`HermesToolProvider` 与参考桥接 `scripts/hermes-memory-distill` **不是生产蒸馏后端**，
+也**不作为产物等价性的生产基准**。它们存在的意义是证明 `LLMProvider` 抽象能容纳一个
+**进程外**后端；生产蒸馏走 `--provider deepseek`（`OpenAICompatProvider`，见 §5.3.3）。
+
+判据是通道能力而非成熟度：桥接把 `system_prompt` 与 `user_prompt` 交给一个只接受
+单一文本提示的 CLI，**role 边界在通道上就不存在**，也没有服务端级别的结构化输出约束，
+因此不能承担"把不可信的叶子记录喂给模型"的生产职责。据此：
+
+- 该 provider **不得**进入任何生产 profile 的 `llm.provider`；
+- 参考桥接的 `produce_response()` **保持确定性 mock 实现**，它验证的是协议而不是模型；
+- 两处文件头必须写明该定位，避免后续被误接成生产路径。
+
+即便是实验入口，跨进程边界仍有必须成立的最低生产化契约：
+
+| 契约 | 行为 |
+|---|---|
+| 超时 | 单次调用有 wall-clock 上限（默认 300s），超时抛 `RuntimeError`，永不无限期阻塞蒸馏 |
+| 进程组隔离 | 子进程以**新会话**启动；超时后按进程**组**发 `SIGTERM`，有界等待后无条件补发 `SIGKILL`。只杀桥接自身不够——桥接再拉起的孙进程会继续消耗额度并继续写状态 |
+| stdout 非 JSON | 抛 `RuntimeError`，且错误信息必须**同时**带 stdout 前缀与 stderr 尾部（截断到有界长度）。裸 `JSONDecodeError` 既不是本契约的错误类型，也不带诊断所需的现场 |
+| 响应非对象 | 顶层不是 JSON 对象同样抛 `RuntimeError`，不做"退回原始 stdout 当 text"的猜测 |
 
 ### 5.4 蒸馏 Pipeline（不引入额外 Engine 抽象）
 
@@ -2820,3 +2843,15 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
 - Change summary: 项目顶层改名为 Agent 原生组织记忆架构 (aomt)；同步更新本文档标题。代码标识符（`memory_net` 包、`memory-net-*` 脚本、`MEMORY_NET_HOME`、`~/.memory-net`、配置键）与 schema 字段均保持不变。
 - Change reason: 品牌改名（仅项目名称/标题），不影响任何代码契约。
 - Change time: 2026-06-13
+
+## Change Record - 2026-08-03 生产 provider 与 run 级预算
+
+- Change summary: §5.3 新增 5.3.2，把 `HermesToolProvider` 与参考桥接显式定位为 experimental
+  集成入口（不进生产 profile、不作等价性基准、桥接后端保持确定性 mock），并写死其跨进程
+  最低契约：单次调用超时上限、超时后按进程组 `SIGTERM`→有界等待→无条件 `SIGKILL`、
+  stdout 非 JSON / 顶层非对象一律抛 `RuntimeError` 且错误信息同时带 stdout 前缀与 stderr 尾部。
+  §5.3 的实现表同步把 `OpenAICompatProvider` 标为生产蒸馏后端。
+- Change reason: 该桥接通道在结构上没有 system/user role 边界，也没有服务端级别的结构化
+  输出约束，不能承担把不可信叶子记录喂给模型的生产职责；而它此前既无超时也无进程组管理，
+  被桥接拉起的孙进程会在蒸馏侧放弃后继续消耗额度并继续写状态。
+- Change time: 2026-08-03
