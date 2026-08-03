@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ from memory_net.distiller.clustering.dbscan import cluster_vectors
 from memory_net.distiller.clustering.embedder import FastEmbedder
 from memory_net.distiller.conflict import CONFLICT_MARKER, normalize_conflicts
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
+from memory_net.distiller.provenance import RunProvenance, aggregate
 from memory_net.shared.models import TeamProduct
 from memory_net.shared.util.frontmatter import render_frontmatter
 from memory_net.shared.util.hashing import short_hash
@@ -51,6 +52,8 @@ class DistillationOutput:
     # a live/record run (no replay markers present).
     replay_hits: int = 0
     replay_misses: int = 0
+    # Run-level fold of every call's provenance, primary and fallback lanes alike.
+    provenance: RunProvenance = field(default_factory=RunProvenance.empty)
 
 
 class DistillationPipeline:
@@ -134,6 +137,9 @@ class DistillationPipeline:
         evidence_rule_rejections = 0
         replay_hits = 0
         replay_misses = 0
+        # Every actual call, in invocation order, primary and fallback alike —
+        # the fallback lane is precisely what makes a run's provenance "mixed".
+        call_responses: list[LLMResponse] = []
 
         for cluster_records in clusters:
             if self._budget_exhausted(estimated_cost_usd):
@@ -147,6 +153,7 @@ class DistillationPipeline:
                 records=cluster_records,
                 run_id=run_id,
             )
+            call_responses.append(response)
             estimated_cost_usd += self._estimate_response_cost(response)
             input_tokens += int(response.usage.get("input_tokens", 0))
             output_tokens += int(response.usage.get("output_tokens", 0))
@@ -170,6 +177,7 @@ class DistillationPipeline:
                     records=cluster_records,
                     run_id=run_id,
                 )
+                call_responses.append(fallback_response)
                 estimated_cost_usd += self._estimate_response_cost(fallback_response)
                 input_tokens += int(fallback_response.usage.get("input_tokens", 0))
                 output_tokens += int(fallback_response.usage.get("output_tokens", 0))
@@ -246,6 +254,9 @@ class DistillationPipeline:
             category_distribution=dict(sorted(category_distribution.items())),
             replay_hits=replay_hits,
             replay_misses=replay_misses,
+            # The synthesized aggregate ``response`` above is not a call, so it
+            # is deliberately not part of the fold.
+            provenance=aggregate(call_responses),
         )
 
     def _cluster_records(
