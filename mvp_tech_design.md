@@ -1851,7 +1851,10 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
   **始终写全三个键**（缺席的计 0），让 `"mixed"` 可被拆开审计。
 - **落点**：三个字段同时写入 `distill_runs/<run_id>/metrics.json` **与** bundle 的
   `record_metrics.json`，**两处取值必须逐字段相等**（由测试直接对比两个文件）。
-  失败 run 的 metrics 同样写这三个字段（无 output 时为 `none` / `[]` / 全 0）。
+  失败 run 的 metrics 同样写这三个字段：**只要本轮已经产出过 `DistillationOutput`**
+  （即 bundle 已落盘），失败 metrics 就必须写该 output 的聚合值，而不是零调用视图——
+  否则同一轮 run 的两个 sink 会自相矛盾，等于凭空抹掉已经真实发生过的调用。
+  仅当本轮压根没有 output（pipeline 之前或之中失败）时才为 `none` / `[]` / 全 0。
 - 聚合的输入是**逐调用**的响应（primary 与 fallback 都计入），
   由 pipeline 在既有的响应聚合路径上收集进 `DistillationOutput`。
 - `leaf` 侧每次 report 写 `state/last_report.json`：files_scanned、files_included、files_redacted、files_tombstoned、commit_sha、`config_revision`、`config_source_master_sha`、`redaction_pattern_version`、`external_scanner_hits{rule→count}`。
@@ -2784,6 +2787,12 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   两处取值必须相等。
 - Change reason: 一次 run 会混合 primary / fallback 两条 lane，不先定死聚合规则，
   "本次 run 的计量来源"在混合场景下没有定义。
+- Change time: 2026-08-03
+
+- Change summary: §9.5 明确失败 run 的 provenance 口径：只要本轮已产出 `DistillationOutput`，
+  失败 metrics 就写该 output 的聚合值；零调用视图仅用于压根没有 output 的失败。
+- Change reason: 蒸馏成功、随后在写产物或发布阶段失败的 run，此前会把失败 metrics 写成
+  零调用，而同一轮已落盘的 `record_metrics.json` 仍带真实 provenance，两个 sink 直接自相矛盾。
 - Change time: 2026-08-03
 
 - Change summary: §5.3.1 收紧 `provider_backend` 的校验口径——从真值校验改为类型校验：

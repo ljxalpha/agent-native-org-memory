@@ -115,6 +115,10 @@ class DistillOrchestrator:
     ) -> OrchestratorResult:
         run_id = _new_run_id()
         records: list[dict[str, Any]] = []
+        # Bound before the try so a failure *after* distillation succeeded still
+        # reports this run's real provenance. Anything else would contradict the
+        # record_metrics.json already written from the same output.
+        output: DistillationOutput | None = None
         try:
             records = self._load_leaf_records()
             previous_manifest = self._load_master_manifest()
@@ -165,6 +169,7 @@ class DistillOrchestrator:
                     records=records,
                     error=str(exc) or exc.__class__.__name__,
                     duration_seconds=time.monotonic() - started,
+                    output=output,
                 )
             raise
         return OrchestratorResult(

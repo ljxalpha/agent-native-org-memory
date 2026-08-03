@@ -538,6 +538,44 @@ def test_orchestrator_writes_record_bundle(tmp_path: Path) -> None:
     assert bundle not in (repo / "distill_runs").glob("*")
 
 
+def test_orchestrator_failure_after_the_bundle_keeps_run_provenance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A crash after distillation succeeded must not fake a zero-call run.
+
+    The bundle's record_metrics.json is already on disk with this run's real
+    provenance; writing the failure metrics from "no output" would leave the two
+    sinks of the same run disagreeing about where its token accounting came from.
+    """
+    repo = _distill_clone(tmp_path)
+    _add_leaf(repo, "alice", "leaf-alice-mem-1", "alice text")
+    _add_leaf_record(repo, "alice", "leaf-alice-mem-2", "alice second text")
+    _git(repo, "fetch", "--all", "--prune")
+    bundle = tmp_path / "record_runs" / "bundle"
+
+    def failing_publish(
+        self: DistillOrchestrator, *, snapshot_sha: str, run_id: str
+    ) -> None:
+        raise RuntimeError("publish boom")
+
+    monkeypatch.setattr(DistillOrchestrator, "_publish_outputs", failing_publish)
+
+    with pytest.raises(RuntimeError, match="publish boom"):
+        _orchestrator(repo, record_bundle_dir=bundle).run()
+
+    metrics = json.loads(
+        (repo / "distill_runs" / "latest" / "metrics.json").read_text(encoding="utf-8")
+    )
+    record_metrics = json.loads(
+        (bundle / "record_metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["status"] == "failed"
+    assert metrics["provider_backends"] == ["mock"]
+    for key in ("provider_backends", "usage_source", "usage_source_counts"):
+        assert metrics[key] == record_metrics[key], key
+
+
 def test_orchestrator_writes_degraded_health_when_pipeline_fails(
     tmp_path: Path,
 ) -> None:
