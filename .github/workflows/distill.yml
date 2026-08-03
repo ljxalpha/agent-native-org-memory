@@ -23,7 +23,9 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
-      - run: mypy .
+      # Same scope as distiller-ci: memory_net is the strictly typed surface.
+      # `mypy .` never resolved here (scripts/ maps to two module names at once).
+      - run: mypy memory_net
       - run: pytest
       - run: bash tests/integration/local_repo.sh
       - name: Upload diagnostics
