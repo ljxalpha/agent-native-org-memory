@@ -49,6 +49,15 @@ class LLMResponse:
             raise ValueError(
                 f"usage_source must be one of {USAGE_SOURCES}, got {self.usage_source!r}"
             )
+        # Type-checked, not merely truth-checked: a non-string backend label
+        # (``1``, ``["x"]``, ...) would serialize into a bundle and then blow up
+        # on the replay side when the provenance scalar is read back, breaking
+        # the record -> replay round trip.
+        if not isinstance(self.provider_backend, str):
+            raise TypeError(
+                "provider_backend must be a string label, "
+                f"got {self.provider_backend!r}"
+            )
         if not self.provider_backend:
             raise ValueError("provider_backend must be a non-empty label")
         for key, value in self.raw_meta.items():

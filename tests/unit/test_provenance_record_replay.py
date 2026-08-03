@@ -165,17 +165,70 @@ def test_strict_request_matching_is_unchanged(tmp_path: Path) -> None:
         ReplayProvider(path).generate(_request("different"))
 
 
-def test_prompt_hash_ignores_provenance(tmp_path: Path) -> None:
-    """Bundle request filenames and prompt-only matching stay stable."""
-    first = tmp_path / "a.jsonl"
-    second = tmp_path / "b.jsonl"
-    RecordingProvider(_StubProvider(_response()), first).generate(_request())
+def test_prompt_hash_keys_on_prompts_only(tmp_path: Path) -> None:
+    """prompt_hash covers system+user prompt only, and nothing else.
+
+    That is the compatibility contract behind bundle request filenames and
+    prompt-only matching: changing ``model`` / ``max_tokens`` must leave the hash
+    (hence the prompt-only match) intact, while strict matching — which compares
+    the full request tuple — must still reject the very same request.
+    """
+    path = tmp_path / "calls.jsonl"
+    recorded = LLMRequest(system_prompt="s", user_prompt="u", model="m", max_tokens=100)
+    RecordingProvider(_StubProvider(_response()), path).generate(recorded)
+    retuned = LLMRequest(
+        system_prompt="s", user_prompt="u", model="other", max_tokens=4000
+    )
+
+    replayed = ReplayProvider(path, mode="prompt-only").generate(retuned)
+    assert replayed.provider_backend == "stub"
+    assert replayed.usage["replay_hits"] == 1
+
+    with pytest.raises(RuntimeError, match="replay request mismatch"):
+        ReplayProvider(path).generate(retuned)
+
+
+@pytest.mark.parametrize("backend", [1, ["stub"], {"name": "stub"}, None])
+def test_response_rejects_a_non_string_provider_backend(backend: object) -> None:
+    """A truthy non-string label would round-trip into a replay-side TypeError."""
+    with pytest.raises(TypeError, match="provider_backend"):
+        _response(provider_backend=backend)
+
+
+def test_replay_rejects_a_recorded_non_string_provider_backend(tmp_path: Path) -> None:
+    """Bundles hand-edited past the constructor still fail loudly, not silently."""
+    path = tmp_path / "calls.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "prompt_hash": "h",
+                "request": {
+                    "system_prompt": "s",
+                    "user_prompt": "u",
+                    "model": "m",
+                    "max_tokens": 2000,
+                },
+                "response": {
+                    "text": "{}",
+                    "model": "m",
+                    "usage": {},
+                    "provider_backend": 1,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeError, match="provenance label"):
+        ReplayProvider(path).generate(_request())
+
+
+def test_a_valid_backend_still_round_trips(tmp_path: Path) -> None:
+    """Regression guard: the new type check does not narrow the accepted domain."""
+    path = tmp_path / "calls.jsonl"
     RecordingProvider(
-        _StubProvider(_response(usage_source="unknown", provider_backend="other")),
-        second,
+        _StubProvider(_response(provider_backend="hermes_tool")), path
     ).generate(_request())
 
-    assert (
-        json.loads(first.read_text(encoding="utf-8"))["prompt_hash"]
-        == json.loads(second.read_text(encoding="utf-8"))["prompt_hash"]
-    )
+    assert ReplayProvider(path).generate(_request()).provider_backend == "hermes_tool"

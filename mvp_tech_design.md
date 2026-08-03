@@ -646,7 +646,7 @@ class LLMProvider(ABC):
 | 字段 | 类型 | 默认 | 语义 |
 |---|---|---|---|
 | `usage_source` | `str` | `"unknown"` | 本次调用的 token 计数来源，取值域**固定为** `reported`（服务端返回的真实用量）/ `estimated`（本地估算）/ `unknown`（无法判定）。传入取值域外的值直接 `ValueError`。 |
-| `provider_backend` | `str` | `"unknown"` | 实际执行该调用的后端标识（自由字符串，如 `mock` / `hermes_tool`），用于 run 级聚合。空串直接 `ValueError`。 |
+| `provider_backend` | `str` | `"unknown"` | 实际执行该调用的后端标识（自由字符串，如 `mock` / `hermes_tool`），用于 run 级聚合。**必须是 `str`**：非字符串直接 `TypeError`，空串直接 `ValueError`。 |
 | `raw_meta` | `dict[str, str]` | `{}` | 仅存**字符串标量**的附加元数据（如模型版本、`finish_reason`）。禁止放原始响应体——那会凭空多出一个未经扫描的落盘面。非字符串键值直接 `TypeError`。 |
 
 两条硬约束：
@@ -655,6 +655,9 @@ class LLMProvider(ABC):
    （如 `HermesToolProvider`）对 usage 逐值执行 `int(v)`，字符串值必抛 `ValueError`。
 2. 三个字段**全部有默认值**（`raw_meta` 用 `default_factory`，禁止可变默认值），
    既有构造点无需修改即可继续工作。
+3. `provider_backend` 的校验是**类型校验而非真值校验**。仅判真值会放行 `1`、`["x"]`
+   这类非字符串值；它们一旦被录制进 bundle，replay 侧读取 provenance 标量时必抛
+   `TypeError`，record→replay 往返就此断裂。把类型校验钉在构造点是唯一能让往返闭合的位置。
 
 `MockLLMProvider` 返回 `usage_source="estimated"`（它的 token 数是词数估算）、
 `provider_backend="mock"`，使 mock 路径与真实路径的 metrics 键集合完全一致。
@@ -2781,6 +2784,12 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   两处取值必须相等。
 - Change reason: 一次 run 会混合 primary / fallback 两条 lane，不先定死聚合规则，
   "本次 run 的计量来源"在混合场景下没有定义。
+- Change time: 2026-08-03
+
+- Change summary: §5.3.1 收紧 `provider_backend` 的校验口径——从真值校验改为类型校验：
+  非 `str` 抛 `TypeError`，空串仍抛 `ValueError`。
+- Change reason: 只判真值会放行 `1` / `["x"]` 这类非字符串标签；它们能被录制进 bundle，
+  却在 replay 读取 provenance 标量时抛错，record→replay 往返因此不闭合。
 - Change time: 2026-08-03
 
 - Change summary: 项目顶层改名为 Agent 原生组织记忆架构 (aomt)；同步更新本文档标题。代码标识符（`memory_net` 包、`memory-net-*` 脚本、`MEMORY_NET_HOME`、`~/.memory-net`、配置键）与 schema 字段均保持不变。
