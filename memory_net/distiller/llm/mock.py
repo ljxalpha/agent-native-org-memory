@@ -50,6 +50,9 @@ class MockLLMProvider(LLMProvider):
                 "input_tokens": len(request.user_prompt.split()),
                 "output_tokens": 32 * max(1, len(products)),
             },
+            # Token counts above are word-count estimates, not backend-reported.
+            usage_source="estimated",
+            provider_backend="mock",
         )
 
 
