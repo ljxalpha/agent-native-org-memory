@@ -1,3 +1,4 @@
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -29,6 +30,88 @@ def test_hermes_tool_provider_accepts_quoted_command_args() -> None:
 
     assert response.text == "user"
     assert response.model == "model"
+
+
+def _echo_command(payload: str) -> str:
+    script = f"import sys; sys.stdout.write({payload!r})"
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+
+def test_provider_relays_the_backend_declared_provenance() -> None:
+    """A real backend behind the bridge must stay visible in the aggregate."""
+    payload = json.dumps(
+        {
+            "text": "t",
+            "model": "m",
+            "usage": {"input_tokens": 3},
+            "usage_source": "reported",
+            "provider_backend": "hermes/claude-x",
+            "raw_meta": {"finish_reason": "stop"},
+        }
+    )
+
+    response = HermesToolProvider(command=_echo_command(payload)).generate(
+        LLMRequest("s", "u", "m")
+    )
+
+    assert response.usage_source == "reported"
+    assert response.provider_backend == "hermes/claude-x"
+    assert response.raw_meta == {"finish_reason": "stop"}
+
+
+def test_a_bridge_without_provenance_degrades_instead_of_failing() -> None:
+    """Older bridges predate the three keys; they must not turn the run red."""
+    payload = json.dumps({"text": "t", "model": "m", "usage": {"input_tokens": 3}})
+
+    response = HermesToolProvider(command=_echo_command(payload)).generate(
+        LLMRequest("s", "u", "m")
+    )
+
+    # Never optimistically "reported": the bridge cannot vouch for counts it
+    # only relayed. The backend label still identifies who ran the call.
+    assert response.usage_source == "unknown"
+    assert response.provider_backend == "hermes_tool"
+    assert response.raw_meta == {}
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("replay", "unknown"),
+        ("", "unknown"),
+        (7, "unknown"),
+        ("estimated", "estimated"),
+    ],
+)
+def test_only_in_domain_usage_sources_are_honoured(
+    declared: object, expected: str
+) -> None:
+    payload = json.dumps({"text": "t", "model": "m", "usage_source": declared})
+
+    response = HermesToolProvider(command=_echo_command(payload)).generate(
+        LLMRequest("s", "u", "m")
+    )
+
+    assert response.usage_source == expected
+
+
+def test_non_string_provenance_from_the_bridge_is_dropped_not_coerced() -> None:
+    """A malformed bridge must not be able to poison the response contract."""
+    payload = json.dumps(
+        {
+            "text": "t",
+            "model": "m",
+            "provider_backend": 1,
+            "raw_meta": {"ok": "yes", "bad": 2, "3": "no-int-keys-in-json"},
+        }
+    )
+
+    response = HermesToolProvider(command=_echo_command(payload)).generate(
+        LLMRequest("s", "u", "m")
+    )
+
+    assert response.provider_backend == "hermes_tool"
+    assert response.raw_meta == {"ok": "yes", "3": "no-int-keys-in-json"}
 
 
 def test_mock_and_hermes_fixture_pipeline_are_equivalent(tmp_path: Path) -> None:

@@ -7,7 +7,12 @@ It speaks the exact JSON contract defined in
 
     stdin  : {"system_prompt": str, "user_prompt": str, "model": str,
               "max_tokens": int, "metadata": {...}}
-    stdout : {"text": str, "model": str, "usage": {"input_tokens": int, ...}}
+    stdout : {"text": str, "model": str, "usage": {"input_tokens": int, ...},
+              "usage_source": str, "provider_backend": str, "raw_meta": {str: str}}
+
+The three provenance keys are optional: a bridge that omits them is read as
+``unknown`` / ``hermes_tool`` / ``{}``. Emitting them is how a real backend
+behind this bridge stays visible in the run-level provenance aggregate.
 
 ``text`` is the distillation-result JSON that ``DistillationPipeline`` then parses
 into team products. A non-zero exit with a stderr message signals failure (the
@@ -75,7 +80,16 @@ def main() -> int:
         return 1
 
     json.dump(
-        {"text": response.text, "model": response.model, "usage": response.usage},
+        {
+            "text": response.text,
+            "model": response.model,
+            "usage": response.usage,
+            # Relayed verbatim from whatever backend produced_response() used, so
+            # the distiller aggregates the real backend rather than this bridge.
+            "usage_source": response.usage_source,
+            "provider_backend": response.provider_backend,
+            "raw_meta": response.raw_meta,
+        },
         sys.stdout,
         ensure_ascii=False,
     )

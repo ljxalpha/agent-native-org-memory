@@ -51,6 +51,10 @@ def test_bridge_satisfies_hermes_tool_contract() -> None:
 
     assert response.model == "mock-model"
     assert response.usage.get("output_tokens", 0) > 0
+    # The backend's own provenance survives the process + JSON boundary rather
+    # than being flattened to the bridge's defaults.
+    assert response.usage_source == "estimated"
+    assert response.provider_backend == "mock"
     parsed = json.loads(response.text)
     assert [p["category"] for p in parsed["products"]] == ["auth"]
     assert parsed["products"][0]["citations"][0]["memory_id"] == "leaf-a-mem-1"
