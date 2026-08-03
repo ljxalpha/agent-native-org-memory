@@ -128,10 +128,15 @@ class ReplayProvider(LLMProvider):
                 response = self.fallback_provider.generate(request)
                 usage = dict(response.usage)
                 usage["replay_misses"] = int(usage.get("replay_misses", 0)) + 1
+                # A live-on-miss call really did happen, so its own provenance
+                # is the truthful one to carry forward.
                 return LLMResponse(
                     text=response.text,
                     model=response.model,
                     usage=usage,
+                    usage_source=response.usage_source,
+                    provider_backend=response.provider_backend,
+                    raw_meta=response.raw_meta,
                 )
             if self.mode == "strict":
                 raise RuntimeError("replay record exhausted")
@@ -155,10 +160,16 @@ class ReplayProvider(LLMProvider):
         recorded_response = _mapping(item.get("response"), "response")
         usage = _usage(recorded_response.get("usage"))
         usage["replay_hits"] = int(usage.get("replay_hits", 0)) + 1
+        # Provenance is replayed exactly as recorded — never rewritten to
+        # "replay". The fact that this run is a replay is carried by the
+        # orthogonal replay_mode / replay_hits / replay_misses counters.
         return LLMResponse(
             text=str(recorded_response["text"]),
             model=str(recorded_response["model"]),
             usage=usage,
+            usage_source=_provenance_str(recorded_response.get("usage_source")),
+            provider_backend=_provenance_str(recorded_response.get("provider_backend")),
+            raw_meta=_raw_meta(recorded_response.get("raw_meta")),
         )
 
 
@@ -214,6 +225,12 @@ def _record_item(request: LLMRequest, response: LLMResponse) -> dict[str, object
             "text": response.text,
             "model": response.model,
             "usage": response.usage,
+            # Per-call provenance is stored verbatim and never aggregated here:
+            # calls.jsonl is the single source of truth the run-level aggregate
+            # is derived from.
+            "usage_source": response.usage_source,
+            "provider_backend": response.provider_backend,
+            "raw_meta": response.raw_meta,
         },
     }
 
@@ -257,6 +274,34 @@ def _mapping(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise RuntimeError(f"replay {label} must be an object")
     return value
+
+
+def _provenance_str(value: object) -> str:
+    """Read one provenance label, falling back for bundles recorded before them.
+
+    A bundle predating the provenance contract simply has no such key; failing
+    on it would turn every historical bundle red, so a missing value degrades to
+    ``"unknown"``. A present-but-invalid value is not degraded — ``LLMResponse``
+    validates it and raises.
+    """
+    if value is None:
+        return "unknown"
+    if not isinstance(value, str):
+        raise TypeError(f"replay provenance label must be a string, got {value!r}")
+    return value
+
+
+def _raw_meta(value: object) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"replay raw_meta must be an object, got {value!r}")
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise TypeError(
+                f"replay raw_meta accepts string scalars only, got {key!r}: {item!r}"
+            )
+    return {str(key): str(item) for key, item in value.items()}
 
 
 def _usage(value: object) -> dict[str, int]:
