@@ -60,6 +60,10 @@ class LLMResponse:
             )
         if not self.provider_backend:
             raise ValueError("provider_backend must be a non-empty label")
+        # Checked before iterating: a non-mapping would otherwise surface as a
+        # bare AttributeError on .items(), which is not the contract's own error.
+        if not isinstance(self.raw_meta, dict):
+            raise TypeError(f"raw_meta must be a mapping, got {self.raw_meta!r}")
         for key, value in self.raw_meta.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise TypeError(

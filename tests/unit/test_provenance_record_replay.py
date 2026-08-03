@@ -188,6 +188,13 @@ def test_prompt_hash_keys_on_prompts_only(tmp_path: Path) -> None:
         ReplayProvider(path).generate(retuned)
 
 
+@pytest.mark.parametrize("raw_meta", [None, ["finish_reason"], "stop", 7])
+def test_response_rejects_a_non_mapping_raw_meta(raw_meta: object) -> None:
+    """A non-mapping must raise the contract's TypeError, not AttributeError."""
+    with pytest.raises(TypeError, match="raw_meta must be a mapping"):
+        _response(raw_meta=raw_meta)
+
+
 @pytest.mark.parametrize("backend", [1, ["stub"], {"name": "stub"}, None])
 def test_response_rejects_a_non_string_provider_backend(backend: object) -> None:
     """A truthy non-string label would round-trip into a replay-side TypeError."""

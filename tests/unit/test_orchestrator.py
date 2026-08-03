@@ -576,6 +576,23 @@ def test_orchestrator_failure_after_the_bundle_keeps_run_provenance(
         assert metrics[key] == record_metrics[key], key
 
 
+def test_orchestrator_dry_run_failure_writes_no_metrics_at_all(tmp_path: Path) -> None:
+    """A dry run owns nothing under distill_runs/, so it reports nothing there.
+
+    Pins the deliberate asymmetry with the live path: rather than writing a
+    failure metrics file, a dry run leaves the last real run's metrics intact.
+    """
+    repo = _distill_clone(tmp_path)
+    _add_leaf(repo, "alice", "leaf-alice-mem-1", "alice text")
+    _git(repo, "fetch", "--all", "--prune")
+
+    with pytest.raises(RuntimeError, match="pipeline boom"):
+        _orchestrator(repo, dry_run=True, pipeline=FailingPipeline()).run()
+
+    assert not (repo / "distill_runs" / "latest" / "metrics.json").exists()
+    assert not (repo / ".health.json").exists()
+
+
 def test_orchestrator_writes_degraded_health_when_pipeline_fails(
     tmp_path: Path,
 ) -> None:
