@@ -41,7 +41,7 @@ class Redactor:
             self._compiled.append((rule, regex))
 
     @classmethod
-    def from_yaml(cls, path: Path) -> "Redactor":
+    def from_yaml(cls, path: Path) -> Redactor:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         rules: list[RedactionRule] = []
         for item in data.get("patterns") or []:

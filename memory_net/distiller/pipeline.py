@@ -228,7 +228,7 @@ class DistillationPipeline:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "skipped_clusters": skipped_clusters,
-                "estimated_cost_microusd": int(round(estimated_cost_usd * 1_000_000)),
+                "estimated_cost_microusd": round(estimated_cost_usd * 1_000_000),
             },
         )
         category_distribution: dict[str, int] = {}
@@ -353,9 +353,8 @@ def _render_user_prompt(
     used_contract_placeholders: set[str] = set()
     for placeholder, value in context.items():
         token = "{{ " + placeholder + " }}"
-        if token in rendered:
-            if placeholder in contract_placeholders:
-                used_contract_placeholders.add(placeholder)
+        if token in rendered and placeholder in contract_placeholders:
+            used_contract_placeholders.add(placeholder)
         rendered = rendered.replace(
             token,
             json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2),

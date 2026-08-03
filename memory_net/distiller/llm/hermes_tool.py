@@ -28,8 +28,7 @@ class HermesToolProvider(LLMProvider):
                 ensure_ascii=False,
             ),
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         if proc.returncode != 0:

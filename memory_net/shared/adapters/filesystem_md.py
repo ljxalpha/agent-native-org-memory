@@ -110,7 +110,7 @@ class FileSystemMdAdapter(MemoryAdapter):
         path: Path,
         *,
         agent_root: Path | None = None,
-    ) -> "FileSystemMdAdapter":
+    ) -> FileSystemMdAdapter:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         support_status = str(data.get("support_status") or "stable")
         if (

@@ -996,8 +996,7 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
         ["git", *args],
         cwd=cwd,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check and proc.returncode != 0:

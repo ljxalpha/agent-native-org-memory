@@ -42,7 +42,7 @@ def evaluate(config: Path, cases: Path) -> dict[str, Any]:
         if not line.strip():
             continue
         case = json.loads(line)
-        expected = set(str(item) for item in case.get("expected") or [])
+        expected = {str(item) for item in case.get("expected") or []}
         result = redactor.redact(str(case["text"]))
         actual = set(result.stats)
         missing = sorted(expected - actual)

@@ -111,7 +111,9 @@ class _SecretsFilter(logging.Filter):
                 re.IGNORECASE,
             )
 
-            def replace(match: re.Match[str]) -> str:
+            # ``key`` is bound as a default so the closure captures this
+            # iteration's key rather than the loop variable's final value.
+            def replace(match: re.Match[str], key: str = key) -> str:
                 value = match.group(2)
                 if key in self.hash_keys:
                     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]

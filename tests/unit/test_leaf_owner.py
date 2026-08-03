@@ -220,8 +220,7 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
         cwd=cwd,
         env=env,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check:

@@ -12,8 +12,7 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
         ["git", *args],
         cwd=repo,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check and proc.returncode != 0:

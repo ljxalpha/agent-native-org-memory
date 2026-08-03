@@ -68,15 +68,13 @@ file_pattern: "*.md"
     product = master / "team" / "common" / "note.md"
     product.parent.mkdir(parents=True)
     product.write_text(
-        "\n".join(
-            [
-                "---",
-                "schema_version: memory-net/team-product/v1",
-                "distillation_id: d1",
-                "category: common",
-                "---",
-                "# Note",
-            ]
+        (
+            "---\n"
+            "schema_version: memory-net/team-product/v1\n"
+            "distillation_id: d1\n"
+            "category: common\n"
+            "---\n"
+            "# Note"
         ),
         encoding="utf-8",
     )
@@ -447,15 +445,13 @@ def test_subscribe_rejects_product_content_hash_mismatch(tmp_path: Path) -> None
     master = tmp_path / "master"
     product = master / "team" / "common" / "note.md"
     product.parent.mkdir(parents=True)
-    content = "\n".join(
-        [
-            "---",
-            "schema_version: memory-net/team-product/v1",
-            "distillation_id: d1",
-            "category: common",
-            "---",
-            "# Note",
-        ]
+    content = (
+        "---\n"
+        "schema_version: memory-net/team-product/v1\n"
+        "distillation_id: d1\n"
+        "category: common\n"
+        "---\n"
+        "# Note"
     )
     product.write_text(content, encoding="utf-8")
     (master / "manifest.json").write_text(
@@ -490,15 +486,13 @@ def test_subscribe_rejects_incompatible_product_schema_before_replace(
     product = master / "team" / "common" / "note.md"
     product.parent.mkdir(parents=True)
     product.write_text(
-        "\n".join(
-            [
-                "---",
-                "schema_version: memory-net/team-product/v2",
-                "distillation_id: d1",
-                "category: common",
-                "---",
-                "# Note",
-            ]
+        (
+            "---\n"
+            "schema_version: memory-net/team-product/v2\n"
+            "distillation_id: d1\n"
+            "category: common\n"
+            "---\n"
+            "# Note"
         ),
         encoding="utf-8",
     )
@@ -530,15 +524,13 @@ def test_subscribe_dry_run_does_not_write_team_or_state(tmp_path: Path) -> None:
     product = master / "team" / "common" / "note.md"
     product.parent.mkdir(parents=True)
     product.write_text(
-        "\n".join(
-            [
-                "---",
-                "schema_version: memory-net/team-product/v1",
-                "distillation_id: d1",
-                "category: common",
-                "---",
-                "# Note",
-            ]
+        (
+            "---\n"
+            "schema_version: memory-net/team-product/v1\n"
+            "distillation_id: d1\n"
+            "category: common\n"
+            "---\n"
+            "# Note"
         ),
         encoding="utf-8",
     )
@@ -699,8 +691,7 @@ def _git(cwd: Path, *args: str) -> str:
         ["git", *args],
         cwd=cwd,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr

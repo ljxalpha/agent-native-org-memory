@@ -50,7 +50,7 @@ class GitRepo:
         *,
         dry_run: bool = False,
         no_push: bool = False,
-    ) -> "GitRepo":
+    ) -> GitRepo:
         if not dry_run and not path.exists():
             _run(["git", "clone", remote_url, str(path)], Path.cwd())
         return cls(path, dry_run=dry_run, no_push=no_push)
@@ -134,8 +134,7 @@ def _run(args: list[str], cwd: Path, *, check: bool = True) -> GitResult:
         cwd=cwd,
         env=env,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check and proc.returncode != 0:
@@ -163,8 +162,7 @@ def _run_bytes(args: list[str], cwd: Path, *, check: bool = True) -> GitBytesRes
         cwd=cwd,
         env=env,
         text=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check and proc.returncode != 0:

@@ -26,8 +26,7 @@ def main() -> int:
         proc = subprocess.run(
             ["bash", str(args.script)],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         results.append(

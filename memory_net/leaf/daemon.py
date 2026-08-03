@@ -4,10 +4,11 @@ import fcntl
 import json
 import logging
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from memory_net.leaf.health import build_health, write_health
 

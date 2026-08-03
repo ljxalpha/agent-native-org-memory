@@ -6,11 +6,12 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, cast
 
 from memory_net.distiller.metrics import (
     DistillMetrics,

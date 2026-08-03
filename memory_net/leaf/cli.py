@@ -1209,8 +1209,7 @@ def _stat_filesystem_type(args: list[str]) -> str | None:
     result = subprocess.run(
         args,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if result.returncode == 0 and result.stdout.strip():
@@ -1223,7 +1222,8 @@ def _read_state_time(path: Path) -> datetime | None:
         return None
     raw = path.read_text(encoding="utf-8").strip()
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # fromisoformat has accepted a trailing 'Z' since 3.11 (our floor).
+        return datetime.fromisoformat(raw)
     except ValueError:
         return None
 

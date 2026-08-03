@@ -43,17 +43,15 @@ def test_subscribe_contract_revision_is_agent_specific(tmp_path: Path) -> None:
     (tmp_path / "bootstrap_state.json").write_text("{}", encoding="utf-8")
     (tmp_path / "config" / "subscribe.yaml").write_text("a: 1\n", encoding="utf-8")
     (adapters / "claude-code.yaml").write_text(
-        "\n".join(
-            [
-                "name: claude-code",
-                "team_target: /tmp/team-a",
-                "roots:",
-                "  shared:",
-                "    - alias: shared",
-                "      base_dir: /tmp/shared-a",
-                "team_hint_injection:",
-                "  mode: install_once",
-            ]
+        (
+            "name: claude-code\n"
+            "team_target: /tmp/team-a\n"
+            "roots:\n"
+            "  shared:\n"
+            "    - alias: shared\n"
+            "      base_dir: /tmp/shared-a\n"
+            "team_hint_injection:\n"
+            "  mode: install_once"
         ),
         encoding="utf-8",
     )
@@ -72,17 +70,15 @@ def test_subscribe_contract_revision_is_agent_specific(tmp_path: Path) -> None:
         adapter_name="claude-code",
     )
     (adapters / "claude-code.yaml").write_text(
-        "\n".join(
-            [
-                "name: claude-code",
-                "roots:",
-                "  shared:",
-                "    - alias: changed",
-                "      base_dir: /tmp/shared-b",
-                "team_hint_injection:",
-                "  mode: never",
-                "team_target: /tmp/team-a",
-            ]
+        (
+            "name: claude-code\n"
+            "roots:\n"
+            "  shared:\n"
+            "    - alias: changed\n"
+            "      base_dir: /tmp/shared-b\n"
+            "team_hint_injection:\n"
+            "  mode: never\n"
+            "team_target: /tmp/team-a"
         ),
         encoding="utf-8",
     )

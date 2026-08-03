@@ -67,6 +67,19 @@ profile = "black"
 line-length = 88
 target-version = "py311"
 
+[tool.ruff.lint]
+ignore = [
+  # TRY004 asks isinstance guards to raise TypeError. Every such guard here
+  # validates *deserialized* input (JSON manifests, YAML config, replayed
+  # bundles) and deliberately raises ValueError/RuntimeError, because those
+  # types are load-bearing: callers catch them to quarantine one bad leaf or
+  # one bad record instead of aborting the run (e.g. the distiller catches
+  # `(json.JSONDecodeError, KeyError, ValueError, GitError)` per leaf).
+  # Switching them to TypeError would let the exception escape those handlers
+  # and change runtime behavior, so this is not a mechanical rewrite.
+  "TRY004",
+]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true

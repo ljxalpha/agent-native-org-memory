@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import memory_net.leaf.cli as cli
+from memory_net.leaf import cli
 
 
 def test_assert_local_memory_net_home_aborts_on_nfs(

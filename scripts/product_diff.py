@@ -115,8 +115,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         ["git", *args],
         cwd=repo,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 
