@@ -28,7 +28,9 @@ jobs:
       - name: Install package
         run: python -m pip install -e '.[dev]'
       - name: Re-validate the release branch (schema, citations, evidence rules)
-        run: python -m memory_net.distiller.merge_gate .
+        # --review-request-required: this job only runs for a release/* head,
+        # and on such a branch a missing review request is itself the failure.
+        run: python -m memory_net.distiller.merge_gate . --review-request-required
 
   test:
     runs-on: ubuntu-latest

@@ -46,8 +46,15 @@ def validate_release_tree(
     root: Path,
     *,
     profile: str = DEFAULT_PROFILE,
+    require_review_request: bool = False,
 ) -> list[str]:
-    """Every reason this tree must not be merged, or an empty list."""
+    """Every reason this tree must not be merged, or an empty list.
+
+    ``require_review_request`` is set by the CI job, which only runs for a
+    ``release/*`` head: on such a branch the request is what a reviewer is
+    supposed to be reading, so its *absence* has to fail. Off by default so the
+    same function can validate an ordinary tree that never had one.
+    """
     failures: list[str] = []
     manifest = _load_manifest(root, failures)
     rules = _evidence_rules(root / profile)
@@ -69,7 +76,7 @@ def validate_release_tree(
         failures.extend(_evidence_failures(relative, frontmatter, rules))
     if manifest is not None:
         failures.extend(_manifest_failures(manifest, products))
-    failures.extend(_review_request_failures(root))
+    failures.extend(_review_request_failures(root, required=require_review_request))
     return failures
 
 
@@ -166,10 +173,24 @@ def _manifest_failures(
     return failures
 
 
-def _review_request_failures(root: Path) -> list[str]:
-    """A review request, if one is present, must still be within its allowlist."""
+def _review_request_failures(root: Path, *, required: bool) -> list[str]:
+    """Every review request must be within its allowlist -- and exist, on a
+    release branch.
+
+    A release branch with no request at all is the quiet failure: the products
+    and the manifest can be perfectly well formed while the record of what was
+    put up for review, and against which snapshot, is simply missing.
+    """
     failures: list[str] = []
-    for path in sorted((root / "distill_runs").glob("*/review_request.json")):
+    found = sorted((root / "distill_runs").glob("*/review_request.json"))
+    if required and not found:
+        return [
+            (
+                "distill_runs/*/review_request.json: a release branch must "
+                "carry the review request its run wrote"
+            )
+        ]
+    for path in found:
         relative = path.relative_to(root).as_posix()
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -210,9 +231,13 @@ def _evidence_rules(profile: Path) -> dict[str, dict[str, int]]:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    required = "--review-request-required" in args
+    args = [item for item in args if item != "--review-request-required"]
     root = Path(args[0]) if args else Path.cwd()
     profile = args[1] if len(args) > 1 else DEFAULT_PROFILE
-    failures = validate_release_tree(root, profile=profile)
+    failures = validate_release_tree(
+        root, profile=profile, require_review_request=required
+    )
     for failure in failures:
         print(f"[ABORT] {failure}", file=sys.stderr)
     if failures:

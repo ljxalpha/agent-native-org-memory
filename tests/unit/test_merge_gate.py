@@ -156,6 +156,48 @@ def test_a_tampered_review_request_is_refused(tmp_path: Path) -> None:
     assert any("review_request.json" in failure for failure in failures)
 
 
+def test_a_release_branch_with_no_review_request_is_refused(tmp_path: Path) -> None:
+    """The quiet bypass: well-formed products, no record of what was reviewed."""
+    root = _tree(tmp_path)
+
+    assert validate_release_tree(root) == []
+    failures = validate_release_tree(root, require_review_request=True)
+
+    assert any("must carry the review request" in failure for failure in failures)
+
+
+def test_a_release_branch_that_carries_its_request_passes(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    request = root / "distill_runs" / "distill-run-001" / "review_request.json"
+    request.parent.mkdir(parents=True)
+    request.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-net/review-request/v1",
+                "run_id": "distill-run-001",
+                "head": "release/distill-run-001",
+                "base": "master",
+                "title": "distill run distill-run-001",
+                "codeowners_path": ".github/CODEOWNERS",
+                "master_snapshot_sha": "a" * 40,
+                "metrics_path": "distill_runs/distill-run-001/metrics.json",
+                "products_count": 1,
+                "categories": ["common_knowledge"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert validate_release_tree(root, require_review_request=True) == []
+
+
+def test_the_entry_point_takes_the_requirement_as_a_flag(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+
+    assert main([str(root)]) == 0
+    assert main([str(root), "--review-request-required"]) == 1
+
+
 def test_the_entry_point_reports_its_verdict_through_the_exit_code(
     tmp_path: Path,
 ) -> None:
@@ -184,3 +226,6 @@ def test_the_ci_job_only_runs_for_a_release_branch_targeting_master() -> None:
     steps = json.dumps(job["steps"])
     assert "secrets." not in steps
     assert "memory_net.distiller.merge_gate" in steps
+    # Without this flag a release branch could omit the review record entirely
+    # and still merge green.
+    assert "--review-request-required" in steps
