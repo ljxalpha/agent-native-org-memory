@@ -100,6 +100,7 @@ output_scanner_thresholds:
 output_scanner_dynamic_rules:
   # Values are injected by the caller at load time, never stored here: writing
   # the real hostname into a tracked file is the leak this rule exists to catch.
+  # Keyed by the rule name: `values_from` defaults to it, and a separate
+  # `hostname` key would only be a second name for the same thing.
   - name: local_hostname
-    values_from: hostname
     regex_template: '(?i)\b{value}\b'

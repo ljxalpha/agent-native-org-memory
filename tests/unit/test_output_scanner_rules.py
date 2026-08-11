@@ -82,7 +82,7 @@ def test_public_domain_is_not_a_hostname_form(ruleset: Ruleset) -> None:
 
 def test_injected_hostname_becomes_a_rule(ruleset: Ruleset) -> None:
     injected = Ruleset.from_yaml(
-        PATTERNS_PATH, dynamic_values={"hostname": ["dev-laptop-7"]}
+        PATTERNS_PATH, dynamic_values={"local_hostname": ["dev-laptop-7"]}
     )
     text = "built on dev-laptop-7 last night"
     assert "local_hostname" in _rules(scan(text, field_kind=PROSE, ruleset=injected))
@@ -97,7 +97,7 @@ def test_injected_hostname_value_does_not_change_the_version(
     """Host facts must not version the corpus, or no two machines could compare
     a recorded bundle against a replayed one."""
     injected = Ruleset.from_yaml(
-        PATTERNS_PATH, dynamic_values={"hostname": ["dev-laptop-7"]}
+        PATTERNS_PATH, dynamic_values={"local_hostname": ["dev-laptop-7"]}
     )
     assert injected.version == ruleset.version
 
