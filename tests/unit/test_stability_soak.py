@@ -35,6 +35,8 @@ LEAVES = tuple(
 #: A sentence in the shape of a reported memory. Nothing like it may reach the
 #: report, no matter which field it was injected through.
 MEMORY_SENTENCE = "When OAuth token refresh returns 429, retry with backoff."
+#: Local-machine-shaped material, in a form that is not itself a real home path.
+ABSOLUTE_PATH_SHAPED = "/opt/agent-root/notes"
 
 
 def health_payload(node_id: str, cycle: int, **overrides: Any) -> dict[str, Any]:
@@ -253,7 +255,10 @@ def test_validator_messages_cannot_smuggle_text_through_a_key() -> None:
         1,
         redaction_incidents={
             "blocked_reports": 0,
-            "scanner_hits": {f"{MEMORY_SENTENCE} /tmp/leaf-home leaf-b@example.invalid": "no"},
+            # Memory text, an absolute path and an address, all as one map key.
+            "scanner_hits": {
+                f"{MEMORY_SENTENCE} {ABSOLUTE_PATH_SHAPED} bob@example.com": "no"
+            },
         },
     )
     cycles = green_cycles(1)
@@ -263,7 +268,7 @@ def test_validator_messages_cannot_smuggle_text_through_a_key() -> None:
     serialized = json.dumps(summary)
 
     assert ("alice-claude-01", "health_schema") in checks(summary)
-    for forbidden in ("OAuth", "429", "backoff", "/home/", "bob@example.com"):
+    for forbidden in ("OAuth", "429", "backoff", ABSOLUTE_PATH_SHAPED, "bob@example"):
         assert forbidden not in serialized
 
 
