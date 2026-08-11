@@ -176,26 +176,38 @@ def test_cli_reads_the_threshold_only_when_the_profile_declares_it() -> None:
 def test_the_parse_failure_rate_stays_per_cluster_under_a_split(
     tmp_path: Path,
 ) -> None:
-    """One cluster, three sub-prompts, one failure: the rate is 1/1, not 1/3."""
+    """One cluster, three sub-prompts, one failure: the rate is 1/1, not 1/3.
 
-    class BrokenProvider(LLMProvider):
+    The failure is deliberately in the *last* sub-prompt. Failing the first
+    would stop the cluster after one call, and then the old call-count
+    denominator would give 1/1 too -- the test would pass with the fix removed.
+    """
+
+    class LastChunkFailsProvider(ChunkRecordingProvider):
         def generate(self, request: LLMRequest) -> LLMResponse:
+            response = super().generate(request)
+            if len(self.calls) < 3:
+                return response
             return LLMResponse(
                 text="not json",
                 model="test",
                 usage={"input_tokens": 1, "output_tokens": 1},
             )
 
-    pipeline = _pipeline(tmp_path, BrokenProvider(), max_records_per_prompt=1)
+    provider = LastChunkFailsProvider()
+    pipeline = _pipeline(tmp_path, provider, max_records_per_prompt=1)
 
     output = pipeline.run([_record(1), _record(2), _record(3)], run_id="run")
 
+    assert len(provider.calls) == 3
     assert output.parse_failures == 1
     assert output.clusters_prompted == 1
     # The call counter keeps counting calls: total_calls and the replay
-    # counters are derived from it.
-    assert output.clusters_attempted == 1
+    # counters are derived from it. That is why the denominator had to be a
+    # second counter rather than a change of meaning for this one.
+    assert output.clusters_attempted == 3
     assert parse_failure_rate(output.parse_failures, output.clusters_prompted) == 1.0
+    assert parse_failure_rate(output.parse_failures, output.clusters_attempted) < 1.0
 
 
 def test_without_a_split_the_two_counters_agree(tmp_path: Path) -> None:

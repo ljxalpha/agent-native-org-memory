@@ -215,5 +215,41 @@ def test_the_accounting_fields_serialize_into_metrics() -> None:
     assert metrics["records_cited"] == 1
     assert metrics["records_unclustered"] == 1
     assert metrics["accounting_mismatch"] is False
+    assert metrics["accounting_audited"] is True
     # clusters_attempted keeps its own, older meaning and is untouched by this.
     assert metrics["clusters_attempted"] == 0
+
+
+def test_an_aborted_run_reports_that_it_did_not_audit_the_counts() -> None:
+    """Not audited and balanced must not look alike.
+
+    A scanner abort leaves clusters with no terminal by design, so no verdict
+    can be reached -- but reporting accounting_mismatch: false is the same
+    provenance mistake as reporting an estimate as a measurement.
+    """
+    accounting = RunAccounting.of(
+        clusters_total=3,
+        terminal_counts={"distilled": 1},
+        records_cited=1,
+        records_unclustered=0,
+        input_records=3,
+        aborted=True,
+    )
+
+    fields = accounting.as_metrics_fields()
+
+    assert fields["accounting_mismatch"] is False
+    assert fields["accounting_audited"] is False
+
+
+def test_a_run_that_reported_no_terminals_was_not_audited_either() -> None:
+    accounting = RunAccounting.of(
+        clusters_total=2,
+        terminal_counts=None,
+        records_cited=0,
+        records_unclustered=0,
+        input_records=2,
+    )
+
+    assert accounting.mismatch is False
+    assert accounting.audited is False

@@ -99,6 +99,7 @@ class DistillMetrics:
     records_cited: int = 0
     records_unclustered: int = 0
     accounting_mismatch: bool = False
+    accounting_audited: bool = True
     # Which run this one continued, empty when it started from scratch.
     resumed_from: str = ""
 
@@ -154,6 +155,13 @@ class RunAccounting:
     records_unclustered: int
     input_records: int
     mismatch: bool
+    audited: bool = True
+    """Whether the identities above were actually checked this run.
+
+    ``mismatch: false`` on a run that was never audited would read as "the
+    counts add up" when nothing was compared -- the same provenance mistake as
+    reporting an estimate as a measurement. See ``of``.
+    """
 
     @classmethod
     def of(
@@ -189,6 +197,7 @@ class RunAccounting:
             )
         )
         return cls(
+            audited=terminal_counts is not None and not aborted,
             clusters_total=clusters_total,
             clusters_terminal=clusters_terminal,
             terminal_counts=counts,
@@ -206,6 +215,7 @@ class RunAccounting:
             "records_cited": self.records_cited,
             "records_unclustered": self.records_unclustered,
             "accounting_mismatch": self.mismatch,
+            "accounting_audited": self.audited,
         }
 
 
