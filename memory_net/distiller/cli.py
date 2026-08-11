@@ -1017,7 +1017,7 @@ def _preflight(args: argparse.Namespace) -> None:
     """
     if getattr(args, "provider", None) != "deepseek":
         return
-    if _replay_mode(args) in _OFFLINE_REPLAY_MODES:
+    if getattr(args, "replay", None) and _replay_mode(args) in _OFFLINE_REPLAY_MODES:
         # A replay that cannot fall through to the live lane never constructs
         # the backend, so demanding its credentials would make the offline
         # regression -- the one that has to stay green on a public runner with
