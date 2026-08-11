@@ -142,3 +142,14 @@ def test_two_lanes_sharing_one_budget_do_not_double_spend() -> None:
     assert budget.attempts == 2
     assert budget.spent_usd == pytest.approx(4e-3)
     assert budget.scope_spent("cluster-0") == pytest.approx(budget.spent_usd)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_a_non_finite_ceiling_is_refused(value: float) -> None:
+    """NaN compares false against every projection, so it caps nothing."""
+    with pytest.raises(ValueError, match="finite"):
+        _budget(max_usd=1.0, per_cluster_max_usd=value)
+    with pytest.raises(ValueError, match="finite"):
+        _budget(max_usd=1.0, soft_max_usd=value)
+    with pytest.raises(ValueError, match="finite"):
+        _budget(max_usd=value)

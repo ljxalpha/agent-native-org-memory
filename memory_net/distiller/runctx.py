@@ -193,10 +193,22 @@ class RunBudget:
         Clamping either silently would leave a run reporting ceilings it never
         applied, so both are rejected at construction.
         """
+        if self.max_usd is not None and not math.isfinite(self.max_usd):
+            # Same reasoning, one level up: a NaN hard ceiling defeats the
+            # pre-call cost check that every paid lane depends on.
+            raise ValueError(f"max_usd must be a finite number: {self.max_usd!r}")
         for name in ("soft_max_usd", "per_cluster_max_usd"):
             value = getattr(self, name)
             if value is None:
                 continue
+            if not math.isfinite(value):
+                # NaN compares false against everything, so a NaN ceiling would
+                # pass every projection check below and cap nothing at all,
+                # while the run still reports a configured limit. Infinity is
+                # refused with it: a ceiling that can never be crossed is not a
+                # ceiling, and writing one is far more likely a typo than a
+                # decision.
+                raise ValueError(f"{name} must be a finite number: {value!r}")
             if value < 0:
                 raise ValueError(f"{name} must not be negative: {value!r}")
             if self.max_usd is None:
