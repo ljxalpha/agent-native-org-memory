@@ -17,12 +17,12 @@ import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from memory_net.distiller.profile import OUTPUT_SCANNER_MODES
+from memory_net.distiller.profile import OUTPUT_SCANNER_MODES, PRODUCTION
 from memory_net.shared.util.hashing import short_hash
 
 PROSE = "prose"
@@ -164,7 +164,25 @@ class Ruleset:
         *,
         dynamic_values: Mapping[str, Sequence[str]] | None = None,
     ) -> Ruleset:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return cls.from_text(
+            path.read_text(encoding="utf-8"), dynamic_values=dynamic_values
+        )
+
+    @classmethod
+    def from_text(
+        cls,
+        text: str,
+        *,
+        dynamic_values: Mapping[str, Sequence[str]] | None = None,
+    ) -> Ruleset:
+        """Load from the rule file's *contents*.
+
+        The run reads its rules out of the frozen snapshot (``git show``), where
+        there is no path to open: loading them from the working tree instead
+        would leave the run's recorded ``master_snapshot_sha`` looking clean
+        while the rules that actually ran came from outside the snapshot.
+        """
+        data = yaml.safe_load(text) or {}
         patterns = data.get("patterns") or []
         blocklist_terms = data.get("blocklist_terms") or []
         raw_thresholds = data.get("output_scanner_thresholds") or {}
@@ -204,6 +222,117 @@ class Ruleset:
     @property
     def min_entropy_bits(self) -> float:
         return float(self.thresholds["high_entropy_min_bits_per_char"])
+
+
+OUTPUT_SCANNER_SCHEMA_VERSION = "memory-net/output-scanner/v1"
+KNOWN_OUTPUT_SCANNER_SCHEMA_VERSIONS = (OUTPUT_SCANNER_SCHEMA_VERSION,)
+"""Declared per profile so a later change of *meaning* can be refused.
+
+Without it, a profile written against v1 semantics keeps being accepted after
+the semantics move, and nothing in the run says which set it got.
+"""
+
+DEFAULT_PATTERNS_PATH = "config/redaction_patterns.yaml"
+MODE_ENV_VAR = "AOMT_OUTPUT_SCANNER_MODE"
+
+
+class ScannerConfigError(ValueError):
+    """A scanner configuration that must not be allowed to start a run."""
+
+
+@dataclass(frozen=True)
+class ScannerSettings:
+    """What the run's scanner will be built from, after every override."""
+
+    mode: str
+    patterns_path: str
+
+
+def resolve_scanner_settings(
+    config: Mapping[str, Any],
+    *,
+    declared_class: str,
+    cli_mode: str | None = None,
+    env_mode: str | None = None,
+) -> ScannerSettings:
+    """The one place a run's scanner mode is decided (§5.5.9).
+
+    Pure: no environment reads, no IO. Production admits *no* override channel
+    at all -- not even one supplying the value the profile already has. An
+    override that is allowed when it happens to agree still teaches that the
+    channel exists, and the point is that in production the mode comes from the
+    frozen, hashed profile and from nowhere else.
+    """
+    block = config.get("output_scanner")
+    if block is None:
+        block = {}
+    if not isinstance(block, Mapping):
+        raise ScannerConfigError(f"output_scanner must be a mapping, got {block!r}")
+    if block:
+        schema_version = block.get("schema_version")
+        if schema_version is None:
+            raise ScannerConfigError(
+                "output_scanner.schema_version is required; known versions: "
+                + ", ".join(KNOWN_OUTPUT_SCANNER_SCHEMA_VERSIONS)
+            )
+        if str(schema_version) not in KNOWN_OUTPUT_SCANNER_SCHEMA_VERSIONS:
+            raise ScannerConfigError(
+                f"unknown output_scanner.schema_version {schema_version!r}; "
+                "known versions: " + ", ".join(KNOWN_OUTPUT_SCANNER_SCHEMA_VERSIONS)
+            )
+    profile_mode = _checked_mode(block.get("mode"), source="profile")
+    production = declared_class == PRODUCTION
+    if production:
+        for value, source in (
+            (cli_mode, "--output-scanner-mode"),
+            (env_mode, MODE_ENV_VAR),
+        ):
+            if value is not None:
+                raise ScannerConfigError(
+                    f"a production profile does not accept {source}: the output "
+                    "scanner mode comes from the frozen profile only"
+                )
+        if profile_mode != "enforce":
+            raise ScannerConfigError(
+                f"production profile requires output_scanner.mode=enforce, "
+                f"got {profile_mode!r}"
+            )
+    mode = profile_mode
+    if not production:
+        # Typed for this run beats ambient, for the same reason --config beats
+        # the profile environment variable.
+        for value in (env_mode, cli_mode):
+            if value is not None:
+                mode = _checked_mode(value, source="override")
+    return ScannerSettings(mode=mode, patterns_path=_patterns_path(block))
+
+
+def _checked_mode(value: object, *, source: str) -> str:
+    if value is None:
+        # Absent means enforce: the gate has to be the state a profile falls
+        # into by saying nothing.
+        return "enforce"
+    text = str(value)
+    if text not in OUTPUT_SCANNER_MODES:
+        raise ScannerConfigError(
+            f"{source} output scanner mode must be one of {OUTPUT_SCANNER_MODES}, "
+            f"got {text!r} (the leaf-side audit/warn/block vocabulary is a "
+            "different thing and is not accepted here)"
+        )
+    return text
+
+
+def _patterns_path(block: Mapping[str, Any]) -> str:
+    raw = block.get("patterns_path")
+    path = DEFAULT_PATTERNS_PATH if raw is None else str(raw).strip()
+    if not path:
+        raise ScannerConfigError("output_scanner.patterns_path must not be empty")
+    candidate = PurePosixPath(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ScannerConfigError(
+            f"output_scanner.patterns_path must stay inside the repo: {path!r}"
+        )
+    return path
 
 
 def scan(

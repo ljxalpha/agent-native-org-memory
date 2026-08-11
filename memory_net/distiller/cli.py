@@ -42,8 +42,16 @@ from memory_net.distiller.llm.recording import (
     ReplayProvider,
 )
 from memory_net.distiller.orchestrator import DistillOrchestrator
+from memory_net.distiller.output_scanner import (
+    MODE_ENV_VAR,
+    OutputScanner,
+    Ruleset,
+    ScannerConfigError,
+    resolve_scanner_settings,
+)
 from memory_net.distiller.pipeline import DistillationPipeline
 from memory_net.distiller.profile import (
+    OUTPUT_SCANNER_MODES,
     ProfileError,
     ProfileProvenance,
     profile_class,
@@ -55,6 +63,7 @@ from memory_net.distiller.runctx import (
     RunContextBuilder,
     RunIdentity,
 )
+from memory_net.leaf.identity import read_host
 from memory_net.shared.git_io import GitError, GitRepo
 from memory_net.shared.observability import setup_logging
 from memory_net.shared.schema import validate_bootstrap_state
@@ -113,6 +122,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["strict", "prompt-only", "allow-live-on-miss"],
         default=None,
     )
+    run_parser.add_argument(
+        "--output-scanner-mode",
+        choices=list(OUTPUT_SCANNER_MODES),
+        default=None,
+        help=(
+            "output scanner mode for this run (non-production profiles only; "
+            f"env {MODE_ENV_VAR}). A production profile rejects this flag "
+            "outright, whatever its value."
+        ),
+    )
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--no-push", action="store_true")
     run_parser.add_argument("--eval", dest="eval_fixture", type=Path)
@@ -166,6 +185,16 @@ def main(argv: list[str] | None = None) -> int:
             RunContextBuilder()
             .set_identity(RunIdentity.system())
             .set_budget(_run_budget(distill_config))
+            # Built here and read from the context by every consumer, so a run
+            # cannot end up with two scanners disagreeing about the mode.
+            .set_scanner(
+                _output_scanner(
+                    args,
+                    distill_config,
+                    repo_path=args.repo,
+                    snapshot_sha=snapshot_sha,
+                )
+            )
             # None when no profile file was found at all, which keeps the run
             # artifacts byte-identical to what they were before provenance
             # existed rather than recording a hash of nothing.
@@ -313,6 +342,99 @@ def _replay_provider(
         mode=args.replay_mode,
         fallback_provider=live_on_miss,
     )
+
+
+def _output_scanner(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    *,
+    repo_path: Path,
+    snapshot_sha: str | None,
+) -> OutputScanner | None:
+    """The run's one scanner, or ``None`` when this repo has no rules (§5.5.9).
+
+    ``None`` is reachable only when the profile declares no ``output_scanner``
+    block *and* the default rule file is absent from the snapshot -- a
+    repository that has nothing to enforce. It cannot happen in production: a
+    production profile is required to declare the block, and a declared block
+    whose rule file is missing stops the run.
+    """
+    try:
+        settings = resolve_scanner_settings(
+            config,
+            declared_class=profile_class(config),
+            cli_mode=args.output_scanner_mode,
+            env_mode=os.environ.get(MODE_ENV_VAR) or None,
+        )
+    except (ScannerConfigError, ProfileError) as exc:
+        raise SystemExit(f"invalid output scanner configuration: {exc}") from exc
+    if settings.mode == "observe" and (args.record or args.record_dir):
+        # Not a process rule but a hard one: under observe the scanner does not
+        # block, so the recorder would write the full prompt and response --
+        # matched text included -- into a bundle. A calibration run needs the
+        # distribution, and that is in metrics.json, without any content.
+        raise SystemExit(
+            "output scanner mode 'observe' cannot be combined with --record or "
+            "--record-dir: an unblocked run would record the matched content"
+        )
+    declared = config.get("output_scanner") is not None
+    text = _snapshot_text(
+        repo_path,
+        snapshot_sha,
+        settings.patterns_path,
+        label="output scanner patterns",
+        required=declared,
+    )
+    if text is None:
+        LOGGER.info(
+            "no output scanner rules at %s; running without one",
+            settings.patterns_path,
+        )
+        return None
+    try:
+        # The machine's own name is a leak in published output but must never be
+        # written into a tracked rule file, so it is injected here. Read through
+        # the package's single hostname call site (§8.7.2), not directly.
+        ruleset = Ruleset.from_text(
+            text, dynamic_values={"local_hostname": [read_host()]}
+        )
+    except (ValueError, yaml.YAMLError) as exc:
+        raise SystemExit(
+            f"invalid output scanner patterns {settings.patterns_path}: {exc}"
+        ) from exc
+    return OutputScanner(ruleset, mode=settings.mode)
+
+
+def _snapshot_text(
+    repo_path: Path,
+    snapshot_sha: str | None,
+    relative: str,
+    *,
+    label: str,
+    required: bool,
+) -> str | None:
+    """One repo-relative file, read from the frozen snapshot (§5.5.5).
+
+    Same rule as the profile: reading the working tree instead would leave the
+    run's recorded ``master_snapshot_sha`` describing bytes it did not use.
+    """
+    if snapshot_sha is not None and (repo_path / ".git").exists():
+        try:
+            blob = GitRepo(repo_path).show_bytes(f"{snapshot_sha}:{relative}")
+        except GitError:
+            blob = b""
+        if blob.strip():
+            try:
+                return blob.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise SystemExit(f"{label} is not valid UTF-8: {relative}") from exc
+    else:
+        path = repo_path / relative
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    if required:
+        raise SystemExit(f"{label} is not in the frozen snapshot: {relative}")
+    return None
 
 
 def _record_recorder(args: argparse.Namespace) -> BundleRecorder | None:
