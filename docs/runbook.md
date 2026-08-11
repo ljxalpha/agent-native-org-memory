@@ -127,6 +127,11 @@ Pass `--workspace` for any long run: it keeps the leaf repositories and the
 per-cycle logs after the run instead of discarding them, which is what you need
 when something fails at hour 19.
 
+A cycle costs the same at hour 19 as at minute 1: each leaf keeps a rolling
+window of three cycles' memories and each review branch is deleted once master
+carries it, so neither the corpus nor the branch list grows without bound. Cycle
+duration drifting upward over a long run is therefore a signal, not the setup.
+
 ### What it checks each cycle, for each leaf
 
 1. the health file passes the strict check (`require_ops_identity=True`, the

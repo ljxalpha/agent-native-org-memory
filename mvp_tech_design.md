@@ -1327,6 +1327,33 @@ stage-2（落盘前）：response = provider.generate(request)
 带命中的 `enforce` 判定书递到 `record()` 一律拒写。
 `context` 为 `None` 时行为与接线前逐字相同（此时 recorder 收到的是显式的"未扫描"判定书）。
 
+#### 5.5.11 事务性 bundle：staging / commit / abort
+
+bundle 的写入过去不是事务性的：`BundleRecorder.record()` 逐调用 append + fsync，
+第一个 cluster 落盘之后第二个 cluster 才被判定命中——前者**已经在磁盘上**。
+"命中即 bundle 为空"在那个调用图下没有实现路径。
+
+因此 recorder 增加 staging 概念：
+
+| 成员 | 契约 |
+|---|---|
+| 构造 | 传入**目标 bundle 路径**与 **run_id**；所有写入落到 `<target>.staging-<run_id>`，**与目标同父目录**（保证 `os.rename` 是同文件系统内的原子操作）；**目标在 `commit()` 之前根本不被创建** |
+| `commit(*, precheck)` | 先在 staging 内跑 `precheck`（全量扫描，见 §5.5.12），通过后原子 rename 到目标并返回目标路径 |
+| `abort()` | `rmtree(staging)`，**幂等**，且保证**不创建**目标 |
+
+三条边界规则：
+
+1. **残留 staging 拒绝复用**：构造时同名 staging 已存在即抛错。静默清理会删掉
+   另一个仍在运行的 run 的工作目录。
+2. **`precheck` 抛错时不 rename、也不自动删 staging**：清理是调用方的决定
+   （`abort()`），保留现场才有机会诊断。
+3. **平面 `--record <file.jsonl>` 也在事务边界内**：先写 `<file>.staging-<run_id>`，
+   commit 时 `os.replace` 到最终路径。否则后续 cluster 失败时，前面的记录会留在最终文件里。
+   注意这条把平面录制从"追加"改成了"替换"：一次 run 的录制是一个整体，
+   半个 run 的记录混进上一次的文件里不是可用的回放素材。
+
+不传 run_id 构造时保持今天的直写行为，`commit()` 退化为返回当前路径。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
@@ -2758,6 +2785,9 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
   分支快进到 master → 按新的 master sha 重新物化每个叶子的配置代际 → `subscribe`。
   第一次调用负责建工作区，其后各轮复用同一工作区，**因此跨轮状态是累积的**——
   这是 `last_report_at` 单调性与"健康文件确实被重新生成"能被断言的前提。
+  **每轮成本必须恒定**：新记忆写入的同时退休窗口外的旧记忆（窗口 3 轮），
+  release 分支在快进 master 之后删除。否则 24h 档跑数千轮时语料与分支数无界增长，
+  每轮蒸馏都比上一轮慢，最后是 soak 自身的成本、而不是被测系统，决定它何时垮掉。
   harness 另带一个故障注入钩子 `MEMORY_NET_SOAK_STALL_LEAF=<node_id>`：该叶子在第一轮之后
   停止上报，其余两个照常。它只服务于 soak 自身的回归——下面第 6 条断言必须能在**真实管线**上
   被触发，否则它只是一条在假执行器上成立的断言。

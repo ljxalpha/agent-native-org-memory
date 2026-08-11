@@ -139,13 +139,24 @@ leaves = [
 PY
 }
 
-# Give one leaf a brand new memory for this cycle. Every cycle must produce
-# genuinely new work, otherwise "the health file changed" would be untestable.
+# How many cycles of memories a leaf keeps. The window has to be bounded: the
+# 24h lane runs thousands of cycles, and an ever-growing corpus would make each
+# distillation slower than the last, so the run's own cost -- not the system
+# under test -- would decide when it fell over.
+MEMORY_WINDOW_CYCLES=3
+
+# Give one leaf a brand new memory for this cycle and retire the one that fell
+# out of the window. Every cycle must produce genuinely new work, otherwise
+# "the health file changed" would be untestable.
 write_cycle_memory() {
   local node_id="$1" topic="$2" cycle="$3"
   local agent_root
   agent_root="$(leaf_agent_root "$node_id")"
   mkdir -p "$agent_root/memory/shared/$topic"
+  local retired=$((cycle - MEMORY_WINDOW_CYCLES))
+  if [[ "$retired" -ge 1 ]]; then
+    rm -f "$agent_root/memory/shared/$topic/cycle-$retired.md"
+  fi
   cat > "$agent_root/memory/shared/$topic/cycle-$cycle.md" <<MD
 ---
 title: $topic practice, round $cycle
@@ -191,6 +202,9 @@ PY
   git -C "$DISTILL_WORK" push --quiet origin "release/$run_id:master"
   git -C "$DISTILL_WORK" fetch --quiet origin master
   git -C "$DISTILL_WORK" switch --quiet -C master origin/master
+  # Retire the review branch once master carries its content: over a 24h run the
+  # remote would otherwise accumulate one branch per cycle.
+  git -C "$DISTILL_WORK" push --quiet origin --delete "release/$run_id" || true
   test -f "$DISTILL_WORK/manifest.json"
   test -n "$(find "$DISTILL_WORK/team" -type f -name '*.md' -print -quit)"
 }
