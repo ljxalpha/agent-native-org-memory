@@ -257,3 +257,23 @@ def test_preflight_refuses_a_snapshot_missing_a_referenced_resource(
     )
     with pytest.raises(Exception, match="redaction_patterns"):
         builder.preflight(trimmed)
+
+
+def test_no_bytecode_is_left_beside_the_fixtures() -> None:
+    """A `.pyc` embeds the absolute path of the source it was compiled from --
+    one machine's username, sitting in a directory whose entire claim is that
+    everything in it is synthetic.
+
+    Asserted rather than remembered: the fixture tree is imported from three
+    test modules, and the guard has to be in all of them. `.gitignore` keeps it
+    out of commits, but a working copy is also what an archive or a support
+    bundle is taken from.
+    """
+    FIXTURES = REPO_ROOT / "tests" / "fixtures"
+    stray = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in FIXTURES.rglob("*")
+        if path.suffix == ".pyc" or path.name == "__pycache__"
+    ]
+
+    assert stray == []

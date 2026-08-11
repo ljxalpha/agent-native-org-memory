@@ -4436,3 +4436,24 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   集成者问"团队记忆会不会进入 agent 视野"时哨兵就是答案，问"agent 会不会主动去读"时不是。
   不写清楚，读者会默认取更强的那个读法，而这正是"看起来像证据"的典型形态。
 - Change time: 2026-08-11
+
+## Change Record - 2026-08-11 预调用拒绝的统一语义与 SDK 内部重试
+
+- Change summary: (a) 新增 `runctx.NotExecuted`，`BudgetExhausted` 与 `AttemptCeilingExceeded`
+  同为其子类；`BudgetedProvider` 对 `NotExecuted` 走 `release()` 退还整笔 hold，
+  pipeline 两处 `except` 改为捕获 `NotExecuted`。(b) 两个 SDK client 一律 `max_retries=0`。
+  (c) §9.12 第 10 条的 `rejected` 只取 `skipped_clusters`，不再求和。
+  (d) `agent_sandbox` 的 `up` 与 `doctor` 补齐挂载源符号链接校验。
+- Change reason:
+  (a) ledger 在 budget 之内被拒时，外层把它当作"可能已计费"而保留 hold，
+  等于为一次**从未发出**的请求扣了预算，其后每个 cluster 都会被错误的闸以错误的理由拒绝。
+  两种拒绝对持有预留的调用方只有一个语义差别——请求是否出去过——因此该语义应当是类型本身。
+  (b) 两个 SDK 默认内部重试（anthropic 2 次），这些重试对预留循环**不可见**：
+  一次预留可以对应最多三次计费请求，而项目天花板数的是预留。
+  重试应当归属于能为其记账的那个循环。**该缺陷同样存在于生产后端 `deepseek`**，
+  一并修正。(c) `pipeline.py` 每处 `parse_failures += 1` / `evidence_rule_rejections += 1`
+  之后都跟着 `skipped_clusters += 1`，`skipped_clusters` 本就是总数，求和等于把一次拒绝
+  数两到三遍，而被抬高的计数正是"静默丢弃被放行"的原因。
+  (d) `mkdir(exist_ok=True)` 会跟随既有符号链接，`<root>/home -> ~` 时 `up` 会把
+  config.yaml 写进 operator 真实的 agent 配置——这是写入而不只是暴露。
+- Change time: 2026-08-11
