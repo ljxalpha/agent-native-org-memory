@@ -86,6 +86,53 @@ class DistillationOutput:
     provenance: RunProvenance = field(default_factory=RunProvenance.empty)
 
 
+_OK = "ok"
+_PARSE_FAILED = "parse_failed"
+_NOT_EXECUTED = "not_executed"
+_ABORTED = "aborted"
+
+
+@dataclass(frozen=True)
+class _ChunkOutcome:
+    """What one sub-prompt produced: a payload, or the reason there is none."""
+
+    state: str
+    parsed: dict[str, Any] | None = None
+
+
+@dataclass
+class _RunTally:
+    """The run's mutable counters, gathered in one place.
+
+    They used to be two dozen locals in ``run()``. Collecting them lets the
+    per-cluster and per-sub-prompt steps be separate methods without either
+    growing a twenty-argument signature or returning a tuple nobody can read.
+    """
+
+    products: list[TeamProduct] = field(default_factory=list)
+    skipped_clusters: int = 0
+    fallback_attempts: int = 0
+    parse_failures: int = 0
+    citation_failures: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    replay_hits: int = 0
+    replay_misses: int = 0
+    estimated_cost_usd: float = 0.0
+    clusters_attempted: int = 0
+    citations_emitted: int = 0
+    citations_resolved: int = 0
+    fallback_accepted: int = 0
+    evidence_rule_rejections: int = 0
+    raw_texts: list[str] = field(default_factory=list)
+    parse_error_details: list[str] = field(default_factory=list)
+    # Every actual call, in invocation order, primary and fallback alike --
+    # the fallback lane is precisely what makes a run's provenance "mixed".
+    call_responses: list[LLMResponse] = field(default_factory=list)
+    redaction_hits: list[RuleHit] = field(default_factory=list)
+    seen_topics: set[tuple[str, str]] = field(default_factory=set)
+
+
 class DistillationPipeline:
     def __init__(
         self,
@@ -105,6 +152,7 @@ class DistillationPipeline:
         categories: list[str] | None = None,
         min_citations_by_category: dict[str, int] | None = None,
         min_contributors_by_category: dict[str, int] | None = None,
+        max_records_per_prompt: int | None = None,
         context: RunContext | None = None,
     ) -> None:
         self.provider = provider
@@ -123,6 +171,12 @@ class DistillationPipeline:
         self.output_cost_per_mtok_usd = output_cost_per_mtok_usd
         self.dbscan_eps = dbscan_eps
         self.dbscan_min_samples = dbscan_min_samples
+        # None, not a default number: an unset second split has to leave the
+        # prompt exactly as it was, because a cluster sent as several prompts is
+        # a different set of calls and a different recording (DISTILL-001).
+        self.max_records_per_prompt = (
+            None if max_records_per_prompt is None else int(max_records_per_prompt)
+        )
         self.min_citations_by_category = {
             canonical_category(category): value
             for category, value in (min_citations_by_category or {}).items()
@@ -155,198 +209,251 @@ class DistillationPipeline:
             }
             for index, cluster in enumerate(clusters)
         ]
-        products: list[TeamProduct] = []
-        skipped_clusters = 0
-        fallback_attempts = 0
-        parse_failures = 0
-        citation_failures = 0
-        input_tokens = 0
-        output_tokens = 0
-        raw_texts: list[str] = []
-        parse_error_details: list[str] = []
-        estimated_cost_usd = 0.0
-        seen_topics: set[tuple[str, str]] = set()
-        clusters_attempted = 0
-        citations_emitted = 0
-        citations_resolved = 0
-        fallback_accepted = 0
-        evidence_rule_rejections = 0
-        replay_hits = 0
-        replay_misses = 0
-        redaction_hits: list[RuleHit] = []
-        # Every actual call, in invocation order, primary and fallback alike —
-        # the fallback lane is precisely what makes a run's provenance "mixed".
-        call_responses: list[LLMResponse] = []
+        tally = _RunTally()
 
         for cluster_records in clusters:
-            if self._budget_exhausted(estimated_cost_usd):
-                skipped_clusters += 1
-                continue
-            clusters_attempted += 1
-            try:
-                response = self._generate_cluster(
-                    self.provider,
-                    system_prompt=system_prompt,
-                    template=template,
-                    records=cluster_records,
-                    run_id=run_id,
-                )
-            except NotExecuted:
-                # A gate refused before the call went out -- the run budget, or
-                # the cross-run attempt ceiling. Respect the refusal rather
-                # than re-deriving it: this cluster is skipped, and every later
-                # one will be refused the same way.
-                clusters_attempted -= 1
-                skipped_clusters += 1
-                continue
-            call_responses.append(response)
-            estimated_cost_usd += self._estimate_response_cost(response)
-            input_tokens += int(response.usage.get("input_tokens", 0))
-            output_tokens += int(response.usage.get("output_tokens", 0))
-            replay_hits += int(response.usage.get("replay_hits", 0))
-            replay_misses += int(response.usage.get("replay_misses", 0))
-            raw_texts.append(response.text)
-            try:
-                parsed = parse_json_response(response.text)
-            except (json.JSONDecodeError, ValueError) as first_exc:
-                if self.fallback_provider is None or self._budget_exhausted(
-                    estimated_cost_usd
-                ):
-                    parse_failures += 1
-                    skipped_clusters += 1
-                    continue
-                fallback_attempts += 1
-                try:
-                    fallback_response = self._generate_cluster(
-                        self.fallback_provider,
-                        system_prompt=system_prompt,
-                        template=template,
-                        records=cluster_records,
-                        run_id=run_id,
-                    )
-                except NotExecuted:
-                    # A gate refused before the call went out: the shared budget
-                    # is spent, or the cross-run attempt ceiling is reached.
-                    # Either way the primary lane's calls consumed what the
-                    # fallback would have needed.
-                    fallback_attempts -= 1
-                    parse_failures += 1
-                    skipped_clusters += 1
-                    continue
-                call_responses.append(fallback_response)
-                estimated_cost_usd += self._estimate_response_cost(fallback_response)
-                input_tokens += int(fallback_response.usage.get("input_tokens", 0))
-                output_tokens += int(fallback_response.usage.get("output_tokens", 0))
-                replay_hits += int(fallback_response.usage.get("replay_hits", 0))
-                replay_misses += int(fallback_response.usage.get("replay_misses", 0))
-                raw_texts.append(fallback_response.text)
-                try:
-                    parsed = parse_json_response(fallback_response.text)
-                except (json.JSONDecodeError, ValueError) as second_exc:
-                    detail = _parse_failure_detail(first_exc, second_exc)
-                    try:
-                        # The parser quotes model-controlled fragments (a
-                        # candidate key name, the position of the failure), and
-                        # this string is published in metrics.json. It is the
-                        # one piece of model output that reaches an artifact
-                        # without having been parsed first, so it is scanned
-                        # like any other.
-                        self._scan_parse_detail(detail)
-                    except RedactionViolation as exc:
-                        redaction_hits.extend(exc.hits)
-                        break
-                    parse_error_details.append(detail)
-                    parse_failures += 1
-                    skipped_clusters += 1
-                    continue
-                fallback_accepted += 1
-            try:
-                # Parsed into an object, nothing written yet: the last moment at
-                # which refusing costs nothing but the run.
-                self._scan_parsed(parsed)
-            except RedactionViolation as exc:
-                redaction_hits.extend(exc.hits)
+            aborted = self._run_cluster(
+                cluster_records,
+                tally=tally,
+                system_prompt=system_prompt,
+                template=template,
+                run_id=run_id,
+            )
+            if aborted:
                 # The whole loop, not this cluster: this input and this prompt
                 # just produced sensitive content, which says nothing good about
                 # the clusters after it either.
                 break
-            emitted, resolved = _count_citation_resolution(parsed, cluster_records)
-            citations_emitted += emitted
-            citations_resolved += resolved
-            try:
-                rendered = render_products(
-                    parsed,
-                    cluster_records,
-                    run_id=run_id,
-                    start_index=len(products) + 1,
-                    min_citations_by_category=self.min_citations_by_category,
-                    min_contributors_by_category=self.min_contributors_by_category,
-                    allowed_categories=(
-                        set(self.categories) if self.categories else None
-                    ),
-                    seen_topics=seen_topics,
-                    now=self._now,
-                )
-            except EvidenceRuleRejection:
-                evidence_rule_rejections += 1
-                citation_failures += 1
-                skipped_clusters += 1
-                continue
-            except ValueError:
-                citation_failures += 1
-                skipped_clusters += 1
-                continue
-            products.extend(rendered)
 
         response = LLMResponse(
-            text="\n".join(raw_texts),
+            text="\n".join(tally.raw_texts),
             model=self.model,
             usage={
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "skipped_clusters": skipped_clusters,
-                "estimated_cost_microusd": round(estimated_cost_usd * 1_000_000),
+                "input_tokens": tally.input_tokens,
+                "output_tokens": tally.output_tokens,
+                "skipped_clusters": tally.skipped_clusters,
+                "estimated_cost_microusd": round(tally.estimated_cost_usd * 1_000_000),
             },
         )
         category_distribution: dict[str, int] = {}
-        for product in products:
+        for product in tally.products:
             category_distribution[product.category] = (
                 category_distribution.get(product.category, 0) + 1
             )
         rule_counts: dict[str, int] = {}
-        for hit in redaction_hits:
+        for hit in tally.redaction_hits:
             rule_counts[hit.rule] = rule_counts.get(hit.rule, 0) + 1
         output = DistillationOutput(
-            products=products,
+            products=tally.products,
             response=response,
-            skipped_clusters=skipped_clusters,
-            estimated_cost_usd=estimated_cost_usd,
+            skipped_clusters=tally.skipped_clusters,
+            estimated_cost_usd=tally.estimated_cost_usd,
             cluster_assignments=cluster_assignments,
-            fallback_attempts=fallback_attempts,
-            parse_failures=parse_failures,
-            citation_failures=citation_failures,
-            parse_error_details=parse_error_details,
-            clusters_attempted=clusters_attempted,
-            citations_emitted=citations_emitted,
-            citations_resolved=citations_resolved,
-            fallback_accepted=fallback_accepted,
-            evidence_rule_rejections=evidence_rule_rejections,
+            fallback_attempts=tally.fallback_attempts,
+            parse_failures=tally.parse_failures,
+            citation_failures=tally.citation_failures,
+            parse_error_details=tally.parse_error_details,
+            clusters_attempted=tally.clusters_attempted,
+            citations_emitted=tally.citations_emitted,
+            citations_resolved=tally.citations_resolved,
+            fallback_accepted=tally.fallback_accepted,
+            evidence_rule_rejections=tally.evidence_rule_rejections,
             category_distribution=dict(sorted(category_distribution.items())),
-            replay_hits=replay_hits,
-            replay_misses=replay_misses,
-            redaction_failures=len(redaction_hits),
+            replay_hits=tally.replay_hits,
+            replay_misses=tally.replay_misses,
+            redaction_failures=len(tally.redaction_hits),
             redaction_rule_counts=dict(sorted(rule_counts.items())) or None,
             # The synthesized aggregate ``response`` above is not a call, so it
             # is deliberately not part of the fold.
-            provenance=aggregate(call_responses),
+            provenance=aggregate(tally.call_responses),
         )
-        if redaction_hits:
+        if tally.redaction_hits:
             raise DistillationAborted(
                 output,
-                f"output scanner refused {len(redaction_hits)} value(s): "
+                f"output scanner refused {len(tally.redaction_hits)} value(s): "
                 + ", ".join(sorted(rule_counts)),
             )
         return output
+
+    def _run_cluster(
+        self,
+        cluster_records: list[dict[str, Any]],
+        *,
+        tally: _RunTally,
+        system_prompt: str,
+        template: str,
+        run_id: str,
+    ) -> bool:
+        """Distil one cluster into the tally; ``True`` means "stop the run".
+
+        One cluster is one *rendered* unit even when it is sent as several
+        sub-prompts: the split exists to keep a prompt inside the model's
+        context window, not to turn one cluster into several products, so the
+        payloads are merged before render and the cluster-level counters move
+        exactly once.
+        """
+        if self._budget_exhausted(tally.estimated_cost_usd):
+            tally.skipped_clusters += 1
+            return False
+        payloads: list[dict[str, Any]] = []
+        for chunk in self._split_cluster(cluster_records):
+            outcome = self._chunk_payload(
+                chunk,
+                tally=tally,
+                system_prompt=system_prompt,
+                template=template,
+                run_id=run_id,
+            )
+            if outcome.state == _ABORTED:
+                return True
+            if outcome.state == _PARSE_FAILED:
+                # One sub-prompt failing fails the cluster: rendering the
+                # remainder would publish a product whose evidence is a subset
+                # of its cluster, and nothing downstream could tell that apart
+                # from the whole.
+                tally.parse_failures += 1
+                tally.skipped_clusters += 1
+                return False
+            if outcome.state == _NOT_EXECUTED:
+                # A gate refused before the call went out -- the run budget, or
+                # the cross-run attempt ceiling. Respect the refusal rather than
+                # re-deriving it: every later cluster is refused the same way.
+                break
+            if outcome.parsed is not None:
+                payloads.append(outcome.parsed)
+        if not payloads:
+            tally.skipped_clusters += 1
+            return False
+        parsed = payloads[0] if len(payloads) == 1 else _merge_payloads(payloads)
+        emitted, resolved = _count_citation_resolution(parsed, cluster_records)
+        tally.citations_emitted += emitted
+        tally.citations_resolved += resolved
+        try:
+            rendered = render_products(
+                parsed,
+                cluster_records,
+                run_id=run_id,
+                start_index=len(tally.products) + 1,
+                min_citations_by_category=self.min_citations_by_category,
+                min_contributors_by_category=self.min_contributors_by_category,
+                allowed_categories=(set(self.categories) if self.categories else None),
+                seen_topics=tally.seen_topics,
+                now=self._now,
+            )
+        except EvidenceRuleRejection:
+            tally.evidence_rule_rejections += 1
+            tally.citation_failures += 1
+            tally.skipped_clusters += 1
+            return False
+        except ValueError:
+            tally.citation_failures += 1
+            tally.skipped_clusters += 1
+            return False
+        tally.products.extend(rendered)
+        return False
+
+    def _chunk_payload(
+        self,
+        chunk: list[dict[str, Any]],
+        *,
+        tally: _RunTally,
+        system_prompt: str,
+        template: str,
+        run_id: str,
+    ) -> _ChunkOutcome:
+        """One sub-prompt: call, parse, fall back once, scan.
+
+        Every counter touched here is a *call* counter rather than a cluster
+        one, so it stays correct however many sub-prompts a cluster is sent as.
+        """
+        tally.clusters_attempted += 1
+        try:
+            response = self._generate_cluster(
+                self.provider,
+                system_prompt=system_prompt,
+                template=template,
+                records=chunk,
+                run_id=run_id,
+            )
+        except NotExecuted:
+            tally.clusters_attempted -= 1
+            return _ChunkOutcome(state=_NOT_EXECUTED)
+        self._absorb(response, tally=tally)
+        try:
+            parsed = parse_json_response(response.text)
+        except (json.JSONDecodeError, ValueError) as first_exc:
+            if self.fallback_provider is None or self._budget_exhausted(
+                tally.estimated_cost_usd
+            ):
+                return _ChunkOutcome(state=_PARSE_FAILED)
+            tally.fallback_attempts += 1
+            try:
+                fallback_response = self._generate_cluster(
+                    self.fallback_provider,
+                    system_prompt=system_prompt,
+                    template=template,
+                    records=chunk,
+                    run_id=run_id,
+                )
+            except NotExecuted:
+                # A gate refused before the call went out: the shared budget is
+                # spent, or the cross-run attempt ceiling is reached. Either way
+                # the primary lane's calls consumed what the fallback needed.
+                tally.fallback_attempts -= 1
+                return _ChunkOutcome(state=_PARSE_FAILED)
+            self._absorb(fallback_response, tally=tally)
+            try:
+                parsed = parse_json_response(fallback_response.text)
+            except (json.JSONDecodeError, ValueError) as second_exc:
+                detail = _parse_failure_detail(first_exc, second_exc)
+                try:
+                    # The parser quotes model-controlled fragments (a candidate
+                    # key name, the position of the failure), and this string is
+                    # published in metrics.json. It is the one piece of model
+                    # output that reaches an artifact without having been parsed
+                    # first, so it is scanned like any other.
+                    self._scan_parse_detail(detail)
+                except RedactionViolation as exc:
+                    tally.redaction_hits.extend(exc.hits)
+                    return _ChunkOutcome(state=_ABORTED)
+                tally.parse_error_details.append(detail)
+                return _ChunkOutcome(state=_PARSE_FAILED)
+            tally.fallback_accepted += 1
+        try:
+            # Parsed into an object, nothing written yet: the last moment at
+            # which refusing costs nothing but the run.
+            self._scan_parsed(parsed)
+        except RedactionViolation as exc:
+            tally.redaction_hits.extend(exc.hits)
+            return _ChunkOutcome(state=_ABORTED)
+        return _ChunkOutcome(state=_OK, parsed=parsed)
+
+    def _absorb(self, response: LLMResponse, *, tally: _RunTally) -> None:
+        """Fold one real call's usage into the run's counters."""
+        tally.call_responses.append(response)
+        tally.estimated_cost_usd += self._estimate_response_cost(response)
+        tally.input_tokens += int(response.usage.get("input_tokens", 0))
+        tally.output_tokens += int(response.usage.get("output_tokens", 0))
+        tally.replay_hits += int(response.usage.get("replay_hits", 0))
+        tally.replay_misses += int(response.usage.get("replay_misses", 0))
+        tally.raw_texts.append(response.text)
+
+    def _split_cluster(
+        self, cluster_records: list[dict[str, Any]]
+    ) -> list[list[dict[str, Any]]]:
+        """Chunk a cluster's records for the prompt, or hand it back whole.
+
+        Without ``max_records_per_prompt`` this is the identity, which is what
+        keeps a profile that never mentions the split byte for byte on the
+        behaviour it had before the split existed.
+        """
+        limit = self.max_records_per_prompt
+        if limit is None or len(cluster_records) <= limit:
+            return [cluster_records]
+        return [
+            cluster_records[start : start + limit]
+            for start in range(0, len(cluster_records), limit)
+        ]
 
     def _scan_parse_detail(self, detail: str) -> None:
         """Scan a parse-failure description before it can reach metrics."""
@@ -589,6 +696,63 @@ def _response_schema(categories: list[str]) -> dict[str, Any]:
             }
         },
     }
+
+
+def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fold one cluster's sub-prompt payloads into a single payload.
+
+    Keyed by ``(category, canonical topic key)``, which is what ``topic_id`` is
+    derived from: two sub-prompts describing the same topic must not become two
+    products, because the render stage would reject the second as a duplicate
+    active topic and lose a whole sub-prompt's evidence with it.
+
+    First occurrence wins for the prose fields -- a merge cannot concatenate
+    summaries without inventing text no model produced -- while citations are
+    unioned (deduplicated by ``memory_id@revision_hash``, order preserved) and
+    conflicts appended. Anything that is not an object is passed through so the
+    render stage still raises on it rather than having it silently dropped here.
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    passthrough: list[Any] = []
+    for payload in payloads:
+        for raw in payload.get("products") or []:
+            if not isinstance(raw, dict):
+                passthrough.append(raw)
+                continue
+            category = canonical_category(str(raw.get("category") or ""))
+            topic = _slug(str(raw.get("topic_key") or raw.get("title") or category))
+            key = (category, topic)
+            existing = merged.get(key)
+            if existing is None:
+                existing = dict(raw)
+                existing["citations"] = []
+                existing["conflicts"] = list(raw.get("conflicts") or [])
+                merged[key] = existing
+                order.append(key)
+            else:
+                existing["conflicts"].extend(raw.get("conflicts") or [])
+            seen = {
+                _raw_citation_ref(item)
+                for item in existing["citations"]
+                if isinstance(item, dict)
+            }
+            for citation in raw.get("citations") or []:
+                ref = (
+                    _raw_citation_ref(citation) if isinstance(citation, dict) else None
+                )
+                if ref is not None and ref in seen:
+                    continue
+                if ref is not None:
+                    seen.add(ref)
+                existing["citations"].append(citation)
+    products: list[Any] = [merged[key] for key in order]
+    products.extend(passthrough)
+    return {"products": products}
+
+
+def _raw_citation_ref(citation: dict[str, Any]) -> str:
+    return f"{citation.get('memory_id')}@{citation.get('revision_hash')}"
 
 
 def _parse_failure_detail(first_exc: Exception, second_exc: Exception) -> str:

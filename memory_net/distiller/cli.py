@@ -276,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
             categories=_category_names(distill_config),
             min_citations_by_category=_min_citations_by_category(distill_config),
             min_contributors_by_category=_min_contributors_by_category(distill_config),
+            max_records_per_prompt=_max_records_per_prompt(distill_config),
         )
         result = DistillOrchestrator(
             context=context,
@@ -681,6 +682,25 @@ def _cost_budget_usd(config: dict[str, Any]) -> float | None:
     if isinstance(cost_budget, dict) and cost_budget.get("budget_usd") is not None:
         return float(cost_budget["budget_usd"])
     return None
+
+
+def _max_records_per_prompt(config: dict[str, Any]) -> int | None:
+    """The second split's threshold, or ``None`` when the profile is silent.
+
+    Silence is not a default value here: splitting a cluster into sub-prompts
+    changes the call sequence, and therefore the recording, of every run. A
+    profile has to ask for that (§7.2 DISTILL-001).
+    """
+    llm = config.get("llm")
+    if not isinstance(llm, dict) or llm.get("max_records_per_prompt") is None:
+        return None
+    value = int(llm["max_records_per_prompt"])
+    if value < 1:
+        raise SystemExit(
+            "llm.max_records_per_prompt must be at least 1; "
+            f"got {llm['max_records_per_prompt']!r}"
+        )
+    return value
 
 
 def _run_budget(config: dict[str, Any]) -> RunBudget | None:
