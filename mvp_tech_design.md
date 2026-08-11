@@ -802,6 +802,15 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 预算是 **run 级共享**的（由 CLI 把同一实例注入 primary 与 fallback 两条 lane），
 因此 primary 吃掉的额度 fallback 拿不到。
 
+**逃逸出 provider 的异常必须改写为 `ProviderCallError`**：SDK 的异常文本是按它刚发出的
+那次请求拼出来的，可能带上 endpoint URL 乃至已鉴权请求的片段；而 orchestrator 会把失败 run 的
+`str(exc)` 写进 failure health 与 metrics 文件，这些是 CI 会发布的 artifact。
+因此对外只暴露**异常类型 + HTTP 状态码 + 尝试次数**，原异常仅挂在 `__cause__` 上
+（交互式 traceback 可见，但不落盘）。两个例外：
+`BudgetExhausted` 原样上抛（pipeline 要按类型识别它），
+非 `Exception` 的 `BaseException`（如 `KeyboardInterrupt`）也原样上抛——
+把中断包成 `RuntimeError` 会让它看起来像一次 provider 故障而被 run 的错误处理吞掉。
+
 依赖：`openai` 放进 `[project.optional-dependencies]` 的 **`llm` extra**，
 不进硬依赖——生产后端是可选装的，不该让每个只跑 mock 路径的安装都被迫拉上它。
 

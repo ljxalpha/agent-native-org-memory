@@ -51,6 +51,20 @@ API_KEY_ENV = "DEEPSEEK_API_KEY"
 BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 
 
+class ProviderCallError(RuntimeError):
+    """A transport/API failure, restated without the SDK's own message.
+
+    The SDK's exception text is built from the request it just made, so it can
+    carry the endpoint URL and, depending on the client, fragments of the
+    authenticated request. That text does not stay in memory: a failed run has
+    ``str(exc)`` written into its failure health and metrics files by the
+    orchestrator, which are artifacts the CI publishes. So the message that
+    escapes this provider names only the exception type and the HTTP status --
+    enough to act on -- while the original stays reachable as ``__cause__`` for
+    an interactive traceback that never reaches disk.
+    """
+
+
 @dataclass(frozen=True)
 class _Outcome:
     """How one failed attempt should be retried and charged.
@@ -156,6 +170,12 @@ class OpenAICompatProvider(LLMProvider):
                 self._close(reservation, billable=outcome.billable, started=started)
                 last_exc = exc
                 if not outcome.retryable or attempt == self.max_retries:
+                    # Only ``Exception`` is restated. Wrapping a
+                    # ``KeyboardInterrupt`` in a ``RuntimeError`` would make an
+                    # interrupt look like a provider failure and let the run's
+                    # error handling swallow it.
+                    if isinstance(exc, Exception):
+                        raise _sanitized(exc, attempts=attempt + 1) from exc
                     raise
                 continue
 
@@ -299,6 +319,16 @@ class OpenAICompatProvider(LLMProvider):
             provider_backend=PROVIDER_BACKEND,
             raw_meta=raw_meta,
         )
+
+
+def _sanitized(exc: Exception, *, attempts: int) -> ProviderCallError:
+    """Restate a transport failure using only its type and HTTP status."""
+    status = getattr(exc, "status_code", None)
+    detail = f" status={status}" if isinstance(status, int) else ""
+    return ProviderCallError(
+        f"{PROVIDER_BACKEND} call failed after {attempts} attempt(s): "
+        f"{type(exc).__name__}{detail}"
+    )
 
 
 def _usage_of(completion: Any, text: str) -> tuple[dict[str, int], str]:

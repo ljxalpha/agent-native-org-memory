@@ -14,6 +14,7 @@ from memory_net.distiller.llm.base import LLMRequest
 from memory_net.distiller.llm.openai_compat import (
     PROVIDER_BACKEND,
     OpenAICompatProvider,
+    ProviderCallError,
 )
 from memory_net.distiller.runctx import BudgetExhausted, RunBudget
 
@@ -321,7 +322,7 @@ def test_retries_stop_at_the_configured_ceiling() -> None:
         [_HTTPError(500), _HTTPError(500), _HTTPError(500)], max_retries=2
     )
 
-    with pytest.raises(_HTTPError):
+    with pytest.raises(ProviderCallError):
         provider.generate(_request())
 
     assert len(client.calls) == 3
@@ -331,10 +332,40 @@ def test_a_client_error_is_not_retried() -> None:
     """A 400 was rejected before inference; sending it again changes nothing."""
     provider, client = _provider([_HTTPError(400), _Completion()])
 
-    with pytest.raises(_HTTPError):
+    with pytest.raises(ProviderCallError):
         provider.generate(_request())
 
     assert len(client.calls) == 1
+
+
+def test_the_escaping_error_restates_the_failure_without_the_sdk_message() -> None:
+    """A failed run has str(exc) written into its failure health and metrics
+    files, which CI publishes. The SDK builds its message from the request it
+    just made, so that message must not be the one that escapes."""
+
+    class _Chatty(Exception):
+        def __init__(self) -> None:
+            super().__init__(
+                "POST https://secret-endpoint.invalid/v1/chat/completions "
+                "failed (Authorization: Bearer sk-live-topsecret)"
+            )
+            self.status_code = 503
+
+    provider, _ = _provider([_Chatty(), _Chatty(), _Chatty()], max_retries=2)
+
+    with pytest.raises(ProviderCallError) as raised:
+        provider.generate(_request())
+
+    message = str(raised.value)
+    assert "sk-live-topsecret" not in message
+    assert "secret-endpoint.invalid" not in message
+    # Still actionable: the type, the status and how many attempts were made.
+    assert "_Chatty" in message
+    assert "status=503" in message
+    assert "3 attempt(s)" in message
+    # The original stays reachable for an interactive traceback, which never
+    # reaches disk -- only str(exc) does.
+    assert isinstance(raised.value.__cause__, _Chatty)
 
 
 def test_an_exhausted_budget_stops_the_call_from_being_made_at_all() -> None:
@@ -361,9 +392,9 @@ def test_a_timeout_keeps_its_hold_but_a_rejected_request_gets_it_back() -> None:
     )
     rejected_provider, _ = _provider([_HTTPError(401)], budget=released_budget)
 
-    with pytest.raises(_TimeoutError):
+    with pytest.raises(ProviderCallError):
         timeout_provider.generate(_request())
-    with pytest.raises(_HTTPError):
+    with pytest.raises(ProviderCallError):
         rejected_provider.generate(_request())
 
     assert unknown_budget.snapshot()["spent_usd"] > 0.0
@@ -380,7 +411,7 @@ def test_three_attempts_count_three_and_stay_inside_the_ceiling() -> None:
         max_retries=2,
     )
 
-    with pytest.raises(_TimeoutError):
+    with pytest.raises(ProviderCallError):
         provider.generate(_request())
 
     assert len(client.calls) == 3
