@@ -225,6 +225,24 @@ class DistillOrchestrator:
         payload.update(self._profile_provenance())
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
+    def _run_configuration_fields(self) -> dict[str, Any]:
+        """Which profile ran, and whether the vectors were the stand-in.
+
+        Written to metrics on the success *and* the failure path, since a failed
+        run is exactly when someone needs to know what it was configured with.
+        ``embedding_test_only`` is here because the stand-in leaves no other
+        trace: its products validate and its metrics look ordinary, so without
+        this field nothing distinguishes them from a real run's.
+        """
+        fields: dict[str, Any] = dict(self._profile_provenance())
+        # Nested getattr: the pipeline is a collaborator, and a test double
+        # standing in for it is not obliged to grow an embedder.
+        embedder = getattr(self.pipeline, "embedder", None)
+        policy = getattr(embedder, "policy", None)
+        if policy is not None:
+            fields["embedding_test_only"] = bool(policy.test_only)
+        return fields
+
     def _profile_provenance(self) -> dict[str, str]:
         """Which profile bytes this run used, or nothing when none was injected.
 
@@ -397,6 +415,7 @@ class DistillOrchestrator:
             provider_backends=output.provenance.provider_backends,
             usage_source=output.provenance.usage_source,
             usage_source_counts=output.provenance.usage_source_counts,
+            **self._run_configuration_fields(),
         )
 
     def _write_failure_outputs(
@@ -488,6 +507,7 @@ class DistillOrchestrator:
             provider_backends=provenance.provider_backends,
             usage_source=provenance.usage_source,
             usage_source_counts=provenance.usage_source_counts,
+            **self._run_configuration_fields(),
             status="failed",
             recent_errors=[error],
         )

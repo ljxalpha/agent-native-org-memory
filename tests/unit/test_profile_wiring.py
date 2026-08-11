@@ -160,13 +160,30 @@ def test_the_snapshot_artifact_is_unchanged_without_a_profile(tmp_path: Path) ->
     assert set(payload) == {"leaf_refs", "master_snapshot_sha", "run_id"}
 
 
-def test_both_snapshot_writers_share_one_payload() -> None:
-    """They used to carry duplicated literals, which is how one of them gains a
-    field the other never does."""
-    source = Path(DistillOrchestrator.__module__.replace(".", "/") + ".py")
-    text = (Path.cwd() / source).read_text(encoding="utf-8")
+def test_every_snapshot_writer_takes_its_body_from_the_shared_builder() -> None:
+    """A tripwire, not a behaviour test: the two writers used to carry
+    duplicated literals, which is how one of them gains a field the other never
+    does, and neither run fails. Asserted over the syntax tree so a reformat or
+    a third writer cannot slip past it the way a text count could.
+    """
+    import ast
+    import inspect
 
-    assert text.count("_snapshot_payload(run_id=") == 2
+    tree = ast.parse(inspect.getsource(inspect.getmodule(DistillOrchestrator)))
+    writes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "write_text"
+        and "snapshot.json" in ast.unparse(node.func.value)
+    ]
+
+    assert writes, "no snapshot.json writer found -- the tripwire lost its target"
+    for node in writes:
+        body = node.args[0] if node.args else None
+        assert isinstance(body, ast.Call)
+        assert ast.unparse(body.func) == "self._snapshot_payload"
 
 
 def _orchestrator(tmp_path: Path, provenance: ProfileProvenance | None) -> Any:
@@ -190,3 +207,99 @@ def _orchestrator(tmp_path: Path, provenance: ProfileProvenance | None) -> Any:
 
 def _git(repo: Path, *args: str) -> None:  # pragma: no cover - helper
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def test_a_production_run_cannot_be_redirected_to_the_mock_backend(
+    tmp_path: Path,
+) -> None:
+    """--provider overrides the profile. Without the effective check a
+    production profile invoked this way publishes fabricated products."""
+    repo = _repo(
+        tmp_path,
+        "profile_class: production\n"
+        "llm:\n"
+        "  provider: deepseek\n"
+        "  model: deepseek-v4-flash\n"
+        "  budget_usd: 1.0\n"
+        "  pricing:\n"
+        "    input_per_mtok_usd: 0.27\n"
+        "    output_per_mtok_usd: 1.1\n"
+        "clustering:\n"
+        "  embedding_backend: test-cheap\n"
+        "  embedding_model: x\n"
+        "output_scanner:\n"
+        "  schema_version: memory-net/output-scanner/v1\n"
+        "  mode: enforce\n",
+    )
+
+    # Refused at the profile itself (test-cheap in production), before the
+    # override is even reached -- both gates point the same way.
+    with pytest.raises(SystemExit, match="invalid profile"):
+        cli_module.main(["run", "--repo", str(repo), "--provider", "mock", "--dry-run"])
+
+
+def test_an_unknown_provider_name_is_named_rather_than_defaulted() -> None:
+    """--provider is constrained by argparse but a profile's llm.provider is
+    not, and a typo resolving to the mock produces a run that never touches a
+    model and publishes anyway."""
+    with pytest.raises(SystemExit, match="unknown provider"):
+        cli_module._base_provider("deepsek", None, budget=None)
+
+
+def test_metrics_and_the_snapshot_agree_on_which_profile_ran(tmp_path: Path) -> None:
+    """Two sinks describing the same run must not disagree about it. The
+    snapshot alone is not enough: metrics is what the tuning loop reads."""
+    provenance = ProfileProvenance.of(
+        profile_path="config/profiles/production.yaml",
+        raw="llm: {}\n",
+        master_snapshot_sha="sha",
+    )
+    orchestrator = _orchestrator(tmp_path, provenance)
+
+    fields = orchestrator._run_configuration_fields()
+    payload = json.loads(orchestrator._snapshot_payload(run_id="r", snapshot_sha="sha"))
+
+    assert fields["profile_path"] == payload["profile_path"]
+    assert fields["profile_blob_sha256"] == payload["profile_blob_sha256"]
+    # The metrics field DistillMetrics actually declares.
+    from dataclasses import fields as dataclass_fields
+
+    from memory_net.distiller.metrics import DistillMetrics
+
+    names = {field.name for field in dataclass_fields(DistillMetrics)}
+    assert {"profile_path", "profile_blob_sha256", "embedding_test_only"} <= names
+
+
+def test_a_run_on_the_stand_in_embedding_says_so_in_metrics(tmp_path: Path) -> None:
+    """The stand-in leaves no other trace: its products validate and its
+    metrics look ordinary, so nothing else distinguishes them from a real run."""
+    from memory_net.distiller.clustering.embedder import FastEmbedder
+    from memory_net.distiller.clustering.policy import EmbeddingPolicy
+    from memory_net.distiller.llm.mock import MockLLMProvider
+    from memory_net.distiller.pipeline import DistillationPipeline
+
+    system = tmp_path / "s.md"
+    user = tmp_path / "u.md"
+    system.write_text("s", encoding="utf-8")
+    user.write_text("{{ records_json }}", encoding="utf-8")
+
+    def orchestrator_with(backend: str) -> Any:
+        return DistillOrchestrator(
+            repo_path=tmp_path,
+            pipeline=DistillationPipeline(
+                provider=MockLLMProvider(),
+                embedder=FastEmbedder(
+                    policy=EmbeddingPolicy(backend, "BAAI/bge-small-en-v1.5")  # type: ignore[arg-type]
+                ),
+                system_prompt_path=system,
+                user_prompt_path=user,
+            ),
+            context=RunContext(),
+        )
+
+    assert orchestrator_with("test-cheap")._run_configuration_fields()[
+        "embedding_test_only"
+    ]
+    assert not orchestrator_with("fastembed")._run_configuration_fields()[
+        "embedding_test_only"
+    ]

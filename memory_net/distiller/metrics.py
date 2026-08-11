@@ -60,6 +60,12 @@ class DistillMetrics:
     usage_source_counts: dict[str, int] = field(
         default_factory=lambda: RunProvenance.empty().usage_source_counts
     )
+    # Which profile bytes produced this run, and whether its vectors were real.
+    # Empty / False describe a run with no profile and the default backend, so
+    # a pre-provenance run serializes exactly as it always did.
+    profile_path: str = ""
+    profile_blob_sha256: str = ""
+    embedding_test_only: bool = False
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

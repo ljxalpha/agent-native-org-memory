@@ -1109,7 +1109,14 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 `distill_runs/<run_id>/snapshot.json` 与 `metrics.json` 时直接取用。
 `blob_sha256` 是**profile 原始字节**的 sha256（不是解析后的 YAML），
 因为要回答的问题是"这次 run 到底读了哪几个字节"，而解析会丢掉注释、键序与格式。
-`context.profile` 为 `None` 时**不写这三个键**，与今天完全一致。
+`context.profile` 为 `None` 时 `snapshot.json` **不写这三个键**，与今天完全一致。
+
+`metrics.json` 侧另加三个字段，缺省空串 / `False`，因此不带 profile 的旧 run 字面不变：
+`profile_path`、`profile_blob_sha256`，以及 `embedding_test_only`——
+后者取自本次 run 实际用的 `EmbeddingPolicy.test_only`（§5.5.7），
+回答的是"这一跑的向量是不是那 3 维替身"。它必须落在 metrics 里而不是只在日志里：
+用替身向量跑出来的产物与真向量产物在结构上完全一致，事后无从分辨。
+键值取自 profile 溯源与 policy 两个真实来源，不重新解析 profile。
 
 #### 5.5.7 `EmbeddingPolicy`：embedding 后端的单一判定结果
 
