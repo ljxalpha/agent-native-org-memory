@@ -1327,6 +1327,13 @@ stage-2（落盘前）：response = provider.generate(request)
 带命中的 `enforce` 判定书递到 `record()` 一律拒写。
 `context` 为 `None` 时行为与接线前逐字相同（此时 recorder 收到的是显式的"未扫描"判定书）。
 
+**不录制的通道同样有出站扫描**：stage-1 过去只存在于 `RecordingProvider` 里，
+于是"prompt 出站前被扫"这件事实际上成了 `--record` 的附属品——而不录制只是不把 prompt
+写下来，并不是不把它发出去，且 prompt 正是承载叶子记录的那个载体。
+因此 `_wrap_record()` 对没有 recorder 的通道也包一层 `ScanningProvider`：
+只做 stage-1（响应不在本通道落盘，解析后的产物由发布闸扫）。
+两个包装器共用同一个 `scan_request()`，避免两套口径各自漂移。
+
 **"无规则集 + 录制"在 CLI 侧一律拒绝启动**：`_output_scanner()` 只在
 "profile 未声明 `output_scanner` 块**且**快照里没有默认规则文件"时返回 `None`，
 而这恰好是唯一一条能让 `RecordingProvider` 带着未扫描判定书落盘的可达路径——

@@ -221,17 +221,7 @@ class RecordingProvider(LLMProvider):
             self.recorder.record(request, response, scanned=UNSCANNED)
             return response
         # Stage 1, before anything leaves this process.
-        scanner.check(
-            request.system_prompt, field_kind=PROSE, field_path="request.system_prompt"
-        )
-        scanner.check(
-            request.user_prompt, field_kind=PROSE, field_path="request.user_prompt"
-        )
-        scanner.check(
-            dict(request.metadata or {}),
-            field_kind=PROSE,
-            field_path="request.metadata",
-        )
+        scan_request(scanner, request)
         response = self.provider.generate(request)
         # Stage 2, before anything reaches disk.
         text_verdict = scanner.check(
@@ -252,6 +242,52 @@ class RecordingProvider(LLMProvider):
             ),
         )
         return response
+
+
+def scan_request(scanner: OutputScanner, request: LLMRequest) -> None:
+    """Scan everything a request is about to carry out of this process.
+
+    Shared by the recording and the non-recording wrapper so the two cannot
+    drift: the prompt is where the leaf records are, and a run that is not
+    recording still sends them.
+    """
+    scanner.check(
+        request.system_prompt, field_kind=PROSE, field_path="request.system_prompt"
+    )
+    scanner.check(
+        request.user_prompt, field_kind=PROSE, field_path="request.user_prompt"
+    )
+    scanner.check(
+        dict(request.metadata or {}), field_kind=PROSE, field_path="request.metadata"
+    )
+
+
+class ScanningProvider(LLMProvider):
+    """Stage 1 without the recording (§5.5.10).
+
+    A run that is not recording writes no prompt to disk, but it still *sends*
+    one, and the prompt is the artifact holding the leaf records. Wrapping only
+    the recorded lanes would make the outbound gate a property of ``--record``
+    rather than of the run.
+
+    The response is not scanned here: it is not persisted by this lane, and the
+    pipeline scans the parsed products before anything is rendered.
+    """
+
+    def __init__(self, provider: LLMProvider, *, context: RunContext | None) -> None:
+        self.provider = provider
+        self.context = context
+
+    @property
+    def scanner(self) -> OutputScanner | None:
+        scanner = self.context.scanner if self.context is not None else None
+        return scanner if isinstance(scanner, OutputScanner) else None
+
+    def generate(self, request: LLMRequest) -> LLMResponse:
+        scanner = self.scanner
+        if scanner is not None:
+            scan_request(scanner, request)
+        return self.provider.generate(request)
 
 
 class ReplayProvider(LLMProvider):

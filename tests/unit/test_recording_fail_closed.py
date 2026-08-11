@@ -12,11 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from memory_net.distiller import cli as cli_module
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
 from memory_net.distiller.llm.recording import (
     UNSCANNED,
     BundleRecorder,
     RecordingProvider,
+    ScanningProvider,
 )
 from memory_net.distiller.orchestrator import DistillOrchestrator
 from memory_net.distiller.output_scanner import (
@@ -251,3 +253,55 @@ def test_the_three_consumers_share_one_scanner(
     assert pipeline.context is not None and pipeline.context.scanner is scanner
     assert orchestrator.context is not None
     assert orchestrator.context.scanner is scanner
+
+
+# --------------------------------------------------------------------------
+# The lane that records nothing is still gated on the way out
+# --------------------------------------------------------------------------
+
+
+def test_a_non_recording_lane_still_scans_before_the_call(ruleset: Ruleset) -> None:
+    """Not recording means the prompt is never written down, not that it is
+    never sent -- and the prompt is what carries the leaf records."""
+    inner = _CountingProvider()
+    provider = ScanningProvider(
+        inner, context=RunContextBuilder().set_scanner(OutputScanner(ruleset)).freeze()
+    )
+
+    with pytest.raises(RedactionViolation):
+        provider.generate(_request(user_prompt=f"about {HOME_PATH}"))
+
+    assert inner.calls == 0
+
+
+def test_a_non_recording_lane_passes_a_clean_call_through(ruleset: Ruleset) -> None:
+    inner = _CountingProvider()
+    provider = ScanningProvider(
+        inner, context=RunContextBuilder().set_scanner(OutputScanner(ruleset)).freeze()
+    )
+
+    assert provider.generate(_request()).text == "clean answer"
+    assert inner.calls == 1
+
+
+def test_a_non_recording_lane_without_a_scanner_is_transparent() -> None:
+    inner = _CountingProvider()
+    provider = ScanningProvider(inner, context=None)
+
+    assert provider.generate(_request(user_prompt=f"about {HOME_PATH}")).text
+    assert inner.calls == 1
+
+
+def test_the_cli_wraps_an_unrecorded_lane_in_the_scanner(ruleset: Ruleset) -> None:
+    context = RunContextBuilder().set_scanner(OutputScanner(ruleset)).freeze()
+
+    wrapped = cli_module._wrap_record(_CountingProvider(), None, context)
+
+    assert isinstance(wrapped, ScanningProvider)
+    assert wrapped.scanner is context.scanner
+
+
+def test_the_cli_leaves_a_scannerless_lane_exactly_as_it_was() -> None:
+    inner = _CountingProvider()
+
+    assert cli_module._wrap_record(inner, None, None) is inner

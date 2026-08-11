@@ -41,6 +41,7 @@ from memory_net.distiller.llm.recording import (
     BundleRecorder,
     RecordingProvider,
     ReplayProvider,
+    ScanningProvider,
 )
 from memory_net.distiller.orchestrator import DistillOrchestrator
 from memory_net.distiller.output_scanner import (
@@ -505,13 +506,20 @@ def _wrap_record(
     recorder: BundleRecorder | None,
     context: RunContext | None = None,
 ) -> LLMProvider:
-    """Wrap a lane so its calls are scanned and recorded (§5.5.10).
+    """Wrap a lane so its calls are scanned, and recorded when asked (§5.5.10).
 
     The context is what carries the run's scanner; without it the wrapper keeps
     its pre-injection behaviour and records unscanned.
+
+    A lane with no recorder is still wrapped, for the outbound scan: not
+    recording means the prompt is never written down, not that it is never
+    sent, and the prompt is what carries the leaf records.
     """
     if recorder is None:
-        return provider
+        # Only when there is something to scan with: a run with no scanner must
+        # keep the exact call graph it had before any of this existed.
+        scanning = ScanningProvider(provider, context=context)
+        return scanning if scanning.scanner is not None else provider
     return RecordingProvider(provider, recorder=recorder, context=context)
 
 
