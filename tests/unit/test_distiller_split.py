@@ -13,6 +13,7 @@ from typing import Any
 
 from memory_net.distiller.cli import _max_records_per_prompt
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
+from memory_net.distiller.metrics import parse_failure_rate
 from memory_net.distiller.pipeline import DistillationPipeline
 
 
@@ -170,3 +171,37 @@ def test_cli_reads_the_threshold_only_when_the_profile_declares_it() -> None:
     assert _max_records_per_prompt({}) is None
     assert _max_records_per_prompt({"llm": {}}) is None
     assert _max_records_per_prompt({"llm": {"max_records_per_prompt": 4}}) == 4
+
+
+def test_the_parse_failure_rate_stays_per_cluster_under_a_split(
+    tmp_path: Path,
+) -> None:
+    """One cluster, three sub-prompts, one failure: the rate is 1/1, not 1/3."""
+
+    class BrokenProvider(LLMProvider):
+        def generate(self, request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                text="not json",
+                model="test",
+                usage={"input_tokens": 1, "output_tokens": 1},
+            )
+
+    pipeline = _pipeline(tmp_path, BrokenProvider(), max_records_per_prompt=1)
+
+    output = pipeline.run([_record(1), _record(2), _record(3)], run_id="run")
+
+    assert output.parse_failures == 1
+    assert output.clusters_prompted == 1
+    # The call counter keeps counting calls: total_calls and the replay
+    # counters are derived from it.
+    assert output.clusters_attempted == 1
+    assert parse_failure_rate(output.parse_failures, output.clusters_prompted) == 1.0
+
+
+def test_without_a_split_the_two_counters_agree(tmp_path: Path) -> None:
+    provider = ChunkRecordingProvider()
+    pipeline = _pipeline(tmp_path, provider)
+
+    output = pipeline.run([_record(1), _record(2)], run_id="run")
+
+    assert output.clusters_attempted == output.clusters_prompted == 1

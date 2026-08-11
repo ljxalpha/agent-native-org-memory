@@ -651,8 +651,9 @@ class DistillOrchestrator:
             publish_branch=publish_branch or self._publish_branch(run_id),
             target_branch="master",
             clusters_attempted=output.clusters_attempted,
+            clusters_prompted=output.clusters_prompted,
             parse_failure_rate=parse_failure_rate(
-                output.parse_failures, output.clusters_attempted
+                output.parse_failures, output.clusters_prompted
             ),
             citations_emitted=output.citations_emitted,
             citations_resolved=output.citations_resolved,
@@ -765,9 +766,10 @@ class DistillOrchestrator:
             publish_branch=self._publish_branch(run_id),
             target_branch="master",
             clusters_attempted=output.clusters_attempted if output else 0,
+            clusters_prompted=output.clusters_prompted if output else 0,
             parse_failure_rate=parse_failure_rate(
                 output.parse_failures if output else 0,
-                output.clusters_attempted if output else 0,
+                output.clusters_prompted if output else 0,
             ),
             citations_emitted=output.citations_emitted if output else 0,
             citations_resolved=output.citations_resolved if output else 0,

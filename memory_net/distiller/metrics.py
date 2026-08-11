@@ -37,6 +37,11 @@ class DistillMetrics:
     # Tuning metrics (METRICS-001). Raw numerator/denominator are stored next to
     # every derived rate so a 0/0 is never silently hidden behind a bare ratio.
     clusters_attempted: int = 0
+    # Clusters that issued at least one call, which is the denominator the
+    # per-cluster ``parse_failures`` belongs over. Equal to
+    # ``clusters_attempted`` unless llm.max_records_per_prompt is set, where
+    # that counter counts sub-prompts because total_calls is derived from it.
+    clusters_prompted: int = 0
     parse_failure_rate: float = 0.0
     citations_emitted: int = 0
     citations_resolved: int = 0
@@ -204,15 +209,19 @@ class RunAccounting:
         }
 
 
-def parse_failure_rate(parse_failures: int, clusters_attempted: int) -> float:
-    """Fraction of attempted clusters whose output failed to parse.
+def parse_failure_rate(parse_failures: int, clusters_prompted: int) -> float:
+    """Fraction of prompted clusters whose output failed to parse.
 
-    ``0.0`` when no cluster was attempted (e.g. empty input or a fully
+    The denominator is *clusters*, not calls: a parse failure is recorded once
+    per cluster, and dividing it by a sub-prompt count would report a third of
+    the real failure rate on a run that split its clusters in three.
+
+    ``0.0`` when no cluster was prompted (e.g. empty input or a fully
     budget-exhausted run), so the rate never raises on a 0/0.
     """
-    if clusters_attempted <= 0:
+    if clusters_prompted <= 0:
         return 0.0
-    return round(parse_failures / clusters_attempted, 6)
+    return round(parse_failures / clusters_prompted, 6)
 
 
 def citation_resolution_rate(citations_resolved: int, citations_emitted: int) -> float:

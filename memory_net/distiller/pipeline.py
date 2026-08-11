@@ -70,6 +70,11 @@ class DistillationOutput:
     # no extra LLM calls. Raw numerator/denominator are surfaced so the derived
     # rates in metrics.json never hide a 0/0.
     clusters_attempted: int = 0
+    # Clusters that issued at least one primary call. Equal to
+    # ``clusters_attempted`` unless the second split is on, in which case that
+    # counter counts sub-prompts (it feeds total_calls) while this one still
+    # counts clusters -- which is the unit ``parse_failures`` is counted in.
+    clusters_prompted: int = 0
     citations_emitted: int = 0
     citations_resolved: int = 0
     fallback_accepted: int = 0
@@ -174,6 +179,7 @@ class _RunTally:
     prompt_cache_creation_tokens: int = 0
     prompt_cache_reported: bool = False
     clusters_attempted: int = 0
+    clusters_prompted: int = 0
     citations_emitted: int = 0
     citations_resolved: int = 0
     fallback_accepted: int = 0
@@ -364,6 +370,7 @@ class DistillationPipeline:
             citation_failures=tally.citation_failures,
             parse_error_details=tally.parse_error_details,
             clusters_attempted=tally.clusters_attempted,
+            clusters_prompted=tally.clusters_prompted,
             citations_emitted=tally.citations_emitted,
             citations_resolved=tally.citations_resolved,
             fallback_accepted=tally.fallback_accepted,
@@ -456,6 +463,7 @@ class DistillationPipeline:
         if self._budget_exhausted(tally.estimated_cost_usd):
             tally.skipped_clusters += 1
             return SKIPPED_BUDGET
+        calls_before = tally.clusters_attempted
         payloads: list[dict[str, Any]] = []
         for chunk in self._split_cluster(cluster_records):
             outcome = self._chunk_payload(
@@ -474,6 +482,7 @@ class DistillationPipeline:
                 # from the whole.
                 tally.parse_failures += 1
                 tally.skipped_clusters += 1
+                _note_prompted(tally, calls_before)
                 return SKIPPED_PARSE
             if outcome.state == _NOT_EXECUTED:
                 # A gate refused before the call went out -- the run budget, or
@@ -482,6 +491,7 @@ class DistillationPipeline:
                 break
             if outcome.parsed is not None:
                 payloads.append(outcome.parsed)
+        _note_prompted(tally, calls_before)
         if not payloads:
             tally.skipped_clusters += 1
             return SKIPPED_BUDGET
@@ -933,6 +943,18 @@ def _response_schema(categories: list[str]) -> dict[str, Any]:
             }
         },
     }
+
+
+def _note_prompted(tally: _RunTally, calls_before: int) -> None:
+    """Count this cluster once if any of its sub-prompts reached a provider.
+
+    ``clusters_attempted`` counts *calls* -- it is what ``total_calls`` and the
+    replay counters are derived from -- so with the second split enabled it
+    counts sub-prompts. ``parse_failures`` is counted per cluster, so the rate
+    between them needs a per-cluster denominator; that is this.
+    """
+    if tally.clusters_attempted > calls_before:
+        tally.clusters_prompted += 1
 
 
 def _estimated_prompt_size(cluster_records: list[dict[str, Any]]) -> int:
