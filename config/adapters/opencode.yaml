@@ -1,3 +1,19 @@
+# EXPERIMENTAL / UNVERIFIED: template only — NOT validated against a real OpenCode
+# install. No opencode CLI was available to inspect, so there is no on-disk evidence
+# behind any path here; treat every value below as a convention, not a discovery.
+# Concretely:
+#   · The managed root is the memory-net convention `${AGENT_ROOT}/memory/shared`, which
+#     memory-net itself creates. It is NOT opencode's native store, whose real location
+#     is unknown — so nothing native is read and nothing native is written.
+#   · The hint target `${AGENT_ROOT}/AGENTS.md` follows the cross-agent AGENTS.md
+#     convention; whether opencode actually consumes it is unverified.
+# Threat model for the managed root: reading anything outside
+# ${AGENT_ROOT}/memory/shared would expose the agent's private state (personal notes,
+# credentials, native stores) to the distiller. `..` patterns and symlinks that leave
+# the managed root are rejected by the adapter rather than silently skipped.
+# Promoting this adapter past `experimental` requires a real install: recorded on-disk
+# paths, a layout fixture, and one observed hint consumption. Until then loading
+# requires MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1.
 name: opencode
 support_status: experimental
 roots:
