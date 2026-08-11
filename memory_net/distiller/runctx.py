@@ -193,6 +193,13 @@ class RunBudget:
         Clamping either silently would leave a run reporting ceilings it never
         applied, so both are rejected at construction.
         """
+        for name in ("input_per_mtok_usd", "output_per_mtok_usd"):
+            price = float(getattr(self, name))
+            if not math.isfinite(price) or price < 0:
+                # A NaN price is the same defeat one level down: cost_of()
+                # returns NaN, so every `projected > max_usd` is false and the
+                # hard ceiling stops nothing, while the run still reports one.
+                raise ValueError(f"{name} must be a finite, non-negative number")
         if self.max_usd is not None and not math.isfinite(self.max_usd):
             # Same reasoning, one level up: a NaN hard ceiling defeats the
             # pre-call cost check that every paid lane depends on.

@@ -144,6 +144,18 @@ def test_two_lanes_sharing_one_budget_do_not_double_spend() -> None:
     assert budget.scope_spent("cluster-0") == pytest.approx(budget.spent_usd)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0])
+def test_a_price_that_is_not_a_finite_non_negative_number_is_refused(
+    value: float,
+) -> None:
+    """A NaN price defeats the hard ceiling from below: cost_of() is NaN, so
+    every `projected > max_usd` is false and nothing is ever refused."""
+    for name in ("input_per_mtok_usd", "output_per_mtok_usd"):
+        prices = {"input_per_mtok_usd": 1.0, "output_per_mtok_usd": 1.0, name: value}
+        with pytest.raises(ValueError, match=name):
+            RunBudget(max_usd=1.0, **prices)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
 def test_a_non_finite_ceiling_is_refused(value: float) -> None:
     """NaN compares false against every projection, so it caps nothing."""
