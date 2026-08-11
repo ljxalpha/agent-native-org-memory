@@ -3355,6 +3355,49 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 **期望值是声明的，不是导出的**（`Expectations`）：类别分布、产物数上下界、summary 最小长度、
 覆盖率阈值都写在 fixture 侧。拿"这次跑出来的结果"当期望，比较永远不会失败。
 
+### 9.13 适配器消费验证：哨兵 + 对照实验（取代 trace 取证）
+
+**要证明的命题**：注入的 team hint 不只是"写进了文件"，而是**被真实 agent 读到了**。
+写文件是我们自己做的，断言我们自己做过的事等于什么都没验证。
+
+**原设计为什么不成立**：原方案从 `${HERMES_HOME}/sessions/<id>.jsonl` 的首行取工具集、
+从后续行取工具调用序列。本机实测：**成功的 oneshot 根本不写 session 文件**；
+只有失败才留下 `request_dump_*.json`，而那个文件里带**部分掩码的密钥**。
+即"有 trace"与"跑成功"在默认 oneshot 下互斥，因此不能把 trace 当作通过条件。
+
+**改用的可机械验证证据**：
+
+- **哨兵（sentinel）**：16 位随机小写字母数字，每次验证现生成。它只存在于注入的
+  `INDEX.md` 一个地方——不在 prompt 里，不在指令文件里。现生成是必需的：
+  固定串可能由缓存响应或上一次运行的残留答出。
+- **对照实验（control）**：同一 prompt、同一沙箱、同一模型，唯独移除 hint 与 INDEX。
+  它把"读了那个文件"与"哨兵通过某条我们没想到的路径泄漏"区分开。
+- **prompt 不点名路径**：prompt 只说"读你的指令引用的那份团队记忆索引"。
+  说出路径会让一次运行靠"被告知答案在哪"而非靠"跟随指令文件的引用"通过。
+
+判定见 `memory_net/distiller/agent_trace.py::verify_consumption`，
+**部分证据一律不判通过**。哨兵车道的失败条件：哨兵形状不合规；哨兵出现在 prompt
+（模型只是复述输入）或指令文件（该文件被内联进 system prompt，没有"跟随"任何引用）；
+哨兵不在写出的 INDEX 里（说明验证器写错了文件）；正例答案里没有哨兵；
+**对照实验答出了哨兵**；目录里出现 `request_dump_*` 残留（含掩码密钥，硬失败）。
+
+trace 只在**恰好存在**时附加检查，此时 `evidence_basis` 从 `sentinel` 升为
+`sentinel+trace`，追加断言：提供的工具集等于预期；未调用任何写工具；
+存在对 INDEX 的 `read_file`；**哨兵出现在某条 tool result 里**
+（"模型说它读了"与"文件字节回来了"是两回事）；新增 session 文件恰好一个
+（多于一个就无法确定是本次的，而读到上一次的 trace 正是"没跑也能过"的路径）。
+无 trace 时判定里**显式留一条 note** 说明工具集与调用序列未经验证——
+读者不得把"没有 trace"误读成"trace 检查过且干净"。
+
+**运行侧约束**（`scripts/verify_adapter_consumption`）：命令行**绝不含 `--safe-mode`**
+（它会忽略用户配置并直接关掉指令文件与记忆注入，即关掉被验证对象本身）；
+也**不传 `-t ""`**（空工具集参数会回落到已配置的全部工具集，与字面意思相反）；
+本检查需要的 `file` 工具集**包含写工具**，因此 agent root 以 `--read-only-agentroot`
+挂载——结构性限制先于事后断言。报告**不引用 agent 的任何输出**：那是模型基于我们
+注入的文件生成的文本，值得留存的是判定本身。
+
+`--dry-run` 打印两次运行的 argv 且不写任何东西，argv 合同因此可零成本测试。
+
 ## 10. Sandbox 与权限兼容
 
 实现者必须遵守：
@@ -4291,4 +4334,17 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
 - Change reason: 原验收写的是"Hermes 路径与 mock 路径回归等价"，而该路径末端本身就是 mock，
   等价断言零信息量；同时跨后端逐字节等价在结构上不可能成立（标题由模型决定，
   一切派生标识随之改变）。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 适配器消费验证改用哨兵 + 对照实验
+
+- Change summary: 新增 §9.13。适配器"hint 被真实消费"的取证方式从"读 session trace
+  首行工具集 + 调用序列"改为"每次现生成的 16 位哨兵 + 移除 hint 的对照实验"，
+  trace 仅在恰好存在时作为附加检查（`evidence_basis` 由 `sentinel` 升为 `sentinel+trace`），
+  无 trace 时判定里显式留 note 声明工具集未经验证。判定规则落在
+  `memory_net/distiller/agent_trace.py` 的纯函数里，运行侧在 `scripts/verify_adapter_consumption`。
+- Change reason: 本机实测，**成功的 hermes oneshot 不写 session 文件**，
+  只有失败才留下带部分掩码密钥的 `request_dump_*.json`。即"有 trace"与"跑成功"互斥，
+  原取证方式在默认 oneshot 下不成立。哨兵 + 对照实验反而是更强的陈述：
+  trace 只说明文件被打开，哨兵说明文件内容到达了模型。
 - Change time: 2026-08-11

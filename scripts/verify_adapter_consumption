@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""verify_adapter_consumption — does an agent actually follow an injected hint?
+
+    verify_adapter_consumption --adapter config/adapters/hermes.yaml \
+        --runtime-root <agent source tree> [--model M --provider P] [--dry-run]
+
+Two runs inside the sandbox, identical but for one thing: the first has the team
+hint installed and an ``INDEX.md`` carrying a fresh sentinel, the second has
+neither. The sentinel is sixteen random characters that live in exactly one
+file. If it comes back in the first answer and not the second, the agent read
+that file.
+
+Python rather than shell, and not only for the usual reason. This has to mint a
+sentinel, take a before/after set difference over the session directory, and
+apply a dozen decision rules -- and every one of those rules has to be testable
+without running an agent, which means it belongs in an importable module rather
+than in a script's control flow.
+
+``--dry-run`` prints the argv of both runs and writes nothing, which is how the
+argv contract is tested at no cost.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+if __package__ in (None, ""):  # pragma: no cover - direct script execution
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from memory_net.distiller.agent_trace import (
+    ConsumptionEvidence,
+    ConsumptionVerdict,
+    verify_consumption,
+)
+from memory_net.shared.adapters import FileSystemMdAdapter
+
+SANDBOX = Path(__file__).resolve().parent / "agent_sandbox"
+
+FILE_TOOLSET = ("read_file", "search_files", "patch", "write_file")
+"""What the ``file`` toolset offers, measured. It includes write tools, which is
+why the agent root is mounted read-only for this check."""
+
+PROMPT = (
+    "Read the team memory index that your instructions reference, and reply "
+    "with the verification token it contains and nothing else."
+)
+"""Deliberately says nothing about where the file is, and contains no token.
+
+Naming the path would let a run pass by having been told the answer's location
+rather than by following the instruction file's reference.
+"""
+
+INDEX_TEMPLATE = """# Team Memory Index
+
+Verification token: {sentinel}
+
+This index is written by the adapter consumption check. The token above exists
+in this file and nowhere else.
+"""
+
+
+def new_sentinel() -> str:
+    """Sixteen lowercase alphanumerics, fresh for every verification.
+
+    Fresh matters: a fixed token could be answered from a cached response, or
+    from a previous run's state, and the check would pass without the agent
+    having read anything this time.
+    """
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "".join(secrets.choice(alphabet) for _ in range(16))
+
+
+def sandbox_argv(
+    *,
+    runtime_root: Path,
+    root: Path,
+    model: str,
+    provider: str,
+    hermes: str,
+) -> list[str]:
+    """The full command line for one verification run.
+
+    ``--read-only-agentroot`` is not optional here: the toolset this check needs
+    includes write tools, and a namespace that cannot be written to is a
+    structural limit rather than an after-the-fact check.
+
+    ``--safe-mode`` must never appear: it implies ignoring the user config, and
+    it disables the instruction-file and memory injection outright -- which is
+    the very thing being verified.
+    """
+    return [
+        sys.executable,
+        str(SANDBOX),
+        "--runtime-root",
+        str(runtime_root),
+        "--root",
+        str(root),
+        "run",
+        "--read-only-agentroot",
+        "--",
+        hermes,
+        "-z",
+        PROMPT,
+        "-m",
+        model,
+        "--provider",
+        provider,
+        # The rule files are the user's, not this check's.
+        "--ignore-rules",
+    ]
+
+
+def prepare(
+    root: Path,
+    *,
+    adapter_path: Path,
+    sentinel: str | None,
+) -> tuple[str, str]:
+    """Set up the sandbox agent root; return ``(index_text, instructions)``.
+
+    ``sentinel=None`` builds the control: same tree, no hint, no index.
+    """
+    agent_root = root / "agentroot"
+    if agent_root.exists():
+        shutil.rmtree(agent_root)
+    agent_root.mkdir(parents=True)
+    instructions = agent_root / "AGENTS.md"
+    instructions.write_text(
+        "# Agent instructions\n\nFollow the references in this file.\n",
+        encoding="utf-8",
+    )
+    if sentinel is None:
+        return "", instructions.read_text(encoding="utf-8")
+    index = agent_root / "memory" / "team" / "INDEX.md"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index_text = INDEX_TEMPLATE.format(sentinel=sentinel)
+    index.write_text(index_text, encoding="utf-8")
+    os.environ.setdefault("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    adapter = FileSystemMdAdapter.from_yaml(adapter_path, agent_root=agent_root)
+    adapter.inject_team_hint(adapter.hint_config)
+    return index_text, instructions.read_text(encoding="utf-8")
+
+
+def session_files(root: Path) -> list[str]:
+    sessions = root / "home" / ".hermes" / "sessions"
+    if not sessions.is_dir():
+        return []
+    return sorted(path.name for path in sessions.iterdir() if path.is_file())
+
+
+def state_residue(root: Path) -> list[str]:
+    """Every file under the agent's state directory, path relative to it.
+
+    Relative rather than by name: a residue's location is half of what makes it
+    diagnosable, and two same-named files in different profiles are two files.
+    """
+    home = root / "home" / ".hermes"
+    if not home.is_dir():
+        return []
+    return sorted(
+        path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file()
+    )
+
+
+def trace_lines(root: Path, names: Sequence[str]) -> list[str]:
+    sessions = root / "home" / ".hermes" / "sessions"
+    for name in names:
+        path = sessions / name
+        if path.suffix == ".jsonl" and path.is_file():
+            return path.read_text(encoding="utf-8").splitlines()
+    return []
+
+
+def run_once(argv: Sequence[str]) -> str:
+    result = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise SystemExit(
+            f"agent run failed ({result.returncode}); stderr tail: "
+            f"{result.stderr[-400:]}"
+        )
+    return result.stdout
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="verify_adapter_consumption")
+    parser.add_argument("--adapter", type=Path, required=True)
+    parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--hermes", default="hermes")
+    parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument("--provider", default="deepseek")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--report", type=Path, default=None)
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    command = sandbox_argv(
+        runtime_root=args.runtime_root,
+        root=args.root,
+        model=args.model,
+        provider=args.provider,
+        hermes=args.hermes,
+    )
+    if args.dry_run:
+        print(json.dumps({"argv": command, "prompt": PROMPT}, indent=2))
+        return 0
+
+    sentinel = new_sentinel()
+    index_text, instructions = prepare(
+        args.root, adapter_path=args.adapter, sentinel=sentinel
+    )
+    before = session_files(args.root)
+    positive = run_once(command)
+    after = session_files(args.root)
+
+    prepare(args.root, adapter_path=args.adapter, sentinel=None)
+    control = run_once(command)
+
+    verdict = verify_consumption(
+        ConsumptionEvidence(
+            sentinel=sentinel,
+            positive_output=positive,
+            control_output=control,
+            prompt=PROMPT,
+            instructions=instructions,
+            index_content=index_text,
+            sessions_before=before,
+            sessions_after=after,
+            trace_lines=trace_lines(args.root, sorted(set(after) - set(before))),
+            residue=state_residue(args.root),
+            expected_tools=FILE_TOOLSET,
+            index_path="/work/agentroot/memory/team/INDEX.md",
+        )
+    )
+    _report(verdict, path=args.report)
+    return 0 if verdict.consumed else 1
+
+
+def _report(verdict: ConsumptionVerdict, *, path: Path | None) -> None:
+    """Print, and optionally file, a verdict that quotes no agent output.
+
+    The answers are model text produced from a file we injected; the decision is
+    the thing worth keeping, and reprinting the raw output would put whatever
+    the model happened to say into a report.
+    """
+    payload = {
+        "consumed": verdict.consumed,
+        "evidence_basis": verdict.evidence_basis,
+        "failures": list(verdict.failures),
+        "notes": list(verdict.notes),
+    }
+    rendered = json.dumps(payload, indent=2, sort_keys=True)
+    print(rendered)
+    if path is not None:
+        path.write_text(rendered + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
