@@ -83,6 +83,13 @@ test -x "$MN_HOME/venv/bin/python"
 grep -q "node_id: \"$NODE_ID\"" "$MN_HOME/local.yaml"
 grep -q "package_ref: \"$ROOT\"" "$MN_HOME/local.yaml"
 
+# Exporting master config must not stage anything on the leaf branch. A dirty
+# worktree here is not cosmetic: the daemon refuses to switch branches on one.
+DIRTY="$(git -C "$MN_HOME/repo" status --porcelain)"
+test -z "$DIRTY" \
+  || { echo "[FAIL] the install left the leaf worktree dirty:" >&2; \
+       echo "$DIRTY" >&2; exit 1; }
+
 # The leaf branch and its ownership triple must be on the remote, not just local.
 git --git-dir="$MEMORY_REPO" show-ref --verify --quiet "refs/heads/leaf/$NODE_ID"
 git --git-dir="$MEMORY_REPO" show "leaf/$NODE_ID:.owner.json" > "$TMPROOT/owner.json"
@@ -238,6 +245,13 @@ MEMORY_NET_HOME="$DAEMON_HOME" "$DAEMON_HOME/venv/bin/python" \
   -m memory_net.leaf.cli status \
   --health "$DAEMON_HOME/state/post_install_health.json" >/dev/null
 
-kill "$(cat "$DAEMON_HOME/state/daemon.pid")" 2>/dev/null || true
+DAEMON_PID="$(cat "$DAEMON_HOME/state/daemon.pid")"
+kill "$DAEMON_PID" 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  kill -0 "$DAEMON_PID" 2>/dev/null || break
+  sleep 1
+done
+! kill -0 "$DAEMON_PID" 2>/dev/null \
+  || { echo "[FAIL] the daemon survived cleanup" >&2; exit 1; }
 
 echo "install_leaf_local.sh passed"

@@ -1548,8 +1548,8 @@ adapter_name=…, source_master_sha=…)`，并用「临时符号链接 + 原子
 守护进程在第一个 tick 就崩掉，安装看起来依然干净。现在在**有界等待**内验证两件事，
 通过才写 `DAEMON_STARTED`：
 
-1. 守护确实产出了健康快照（轮询 `state/last_health.json`，退避 1→2→4→5 秒，
-   默认上限 30 秒，可用 `MEMORY_NET_INSTALL_POST_VERIFY_SECONDS` 调整；
+1. 守护确实产出了健康快照（轮询 `state/last_health.json`，退避 1→2→4→8 秒后封顶，
+   默认总上限 30 秒，可用 `MEMORY_NET_INSTALL_POST_VERIFY_SECONDS` 调整；
    期间若进程已退出立即失败，不等满超时）；
 2. `memory-net-leaf status` 的**严格档**在一份新写出的 health 上通过——
    严格档要求七个运维身份字段齐全，因此这一步实际验证的是"安装布局能解析出完整身份"。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
@@ -94,6 +94,13 @@ record_stage() {
   "$PYTHON" -m memory_net.leaf.install_state record \
     --state-dir "$MN_HOME/state" --status "$1"
 }
+abort() {
+  # An explicit `exit` bypasses the ERR trap, which would leave the previous
+  # (successful) state on disk describing a run that in fact failed.
+  local code="$1"; shift
+  echo "$@" >&2
+  exit "$code"
+}
 record_failure() {
   local code=$?
   # Stage and exit code only. Command output here would carry the remote URL,
@@ -145,9 +152,8 @@ if [[ ! -d "$MN_HOME/repo/.git" ]]; then
 else
   cd "$MN_HOME/repo"
   EXISTING="$(git remote get-url origin)"
-  [[ "$EXISTING" == "$MEMORY_REPO" ]] || {
-    echo "[ABORT] existing repo origin differs: $EXISTING" >&2; exit 4;
-  }
+  [[ "$EXISTING" == "$MEMORY_REPO" ]] \
+    || abort 4 "[ABORT] existing repo origin differs: $EXISTING"
 fi
 
 cd "$MN_HOME/repo"
@@ -161,6 +167,7 @@ ADAPTER_YAML="$(git show "origin/master:config/adapters/$AGENT.yaml")"
 # including one representative team product -- before adopting them, so an
 # incompatible or corrupted master is refused here instead of surfacing during
 # the first sync, far from its cause.
+STAGE="SCHEMA_PROBE"
 PROBE_DIR="$(mktemp -d "$MN_HOME/.probe.XXXXXX")"
 git show origin/master:bootstrap_state.json > "$PROBE_DIR/bootstrap_state.json"
 git show origin/master:manifest.json > "$PROBE_DIR/manifest.json"
@@ -168,8 +175,11 @@ PROBE_ARGS=(
   --bootstrap-state "$PROBE_DIR/bootstrap_state.json"
   --manifest "$PROBE_DIR/manifest.json"
 )
-SAMPLE_PRODUCT="$(git ls-tree -r --name-only origin/master -- team \
-  | grep -E '\.md$' | head -n 1 || true)"
+# Enumerate to a file so a git failure stays distinguishable from "the team
+# has no products yet". Collapsing the two would let a broken remote skip the
+# product check entirely and still pass the probe.
+git ls-tree -r --name-only origin/master -- team > "$PROBE_DIR/team-listing"
+SAMPLE_PRODUCT="$(grep -E '\.md$' "$PROBE_DIR/team-listing" | head -n 1 || true)"
 if [[ -n "$SAMPLE_PRODUCT" ]]; then
   git show "origin/master:$SAMPLE_PRODUCT" > "$PROBE_DIR/product.md"
   PROBE_ARGS+=(--team-product "$PROBE_DIR/product.md")
@@ -180,8 +190,7 @@ fi
 rm -rf "$PROBE_DIR"
 if grep -Eq '^support_status:[[:space:]]*experimental[[:space:]]*$' <<<"$ADAPTER_YAML"; then
   if [[ "${MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER:-}" != "1" ]]; then
-    echo "[ABORT] adapter '$AGENT' is experimental; set MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1 to opt in" >&2
-    exit 4
+    abort 4 "[ABORT] adapter '$AGENT' is experimental; set MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1 to opt in"
   fi
 fi
 
@@ -212,8 +221,7 @@ print(owner.get("host", ""))
 PY
 )"
   if [[ "$REMOTE_INSTALL_ID" != "$INSTALL_ID" || "$REMOTE_OWNER_FP" != "$OWNER_FP" || "$REMOTE_HOST" != "$(hostname)" ]]; then
-    echo "[ABORT] leaf/$NODE_ID is owned by another install" >&2
-    exit 5
+    abort 5 "[ABORT] leaf/$NODE_ID is owned by another install"
   fi
   git switch -C "leaf/$NODE_ID" "origin/leaf/$NODE_ID"
 else
@@ -260,7 +268,13 @@ MASTER_SHA="$(git rev-parse origin/master)"
   --package-ref "$PACKAGE_REF" \
   --master-sha "$MASTER_SHA" \
   --installed-at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-git --work-tree="$TMP_GEN" checkout origin/master -- bootstrap_state.json config prompts >/dev/null
+# Export through a throwaway index. `git checkout -- <paths>` stages what it
+# writes, and this repository is sitting on the leaf branch, so exporting master
+# config this way left the leaf worktree permanently dirty -- which the daemon
+# then refuses to switch branches on.
+GIT_INDEX_FILE="$TMP_GEN/.export-index" \
+  git --work-tree="$TMP_GEN" checkout origin/master -- bootstrap_state.json config prompts >/dev/null
+rm -f "$TMP_GEN/.export-index"
 
 # Materialize through the shared implementation rather than by hand. The
 # previous inline mktemp -> hash -> mv -> ln sequence was a second, unprotected
@@ -273,6 +287,7 @@ GEN_REVISION="$(
   "$PYTHON" - "$TMP_GEN" "$MN_HOME/config.generations" "$AGENT" "$MASTER_SHA" <<'PY'
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from memory_net.shared.config.generation import materialize_generation
@@ -286,11 +301,15 @@ generation = materialize_generation(
 # Activate through a temporary link plus an atomic replace, so a reader never
 # observes config-current missing.
 current = Path(sys.argv[2]).parent / "config-current"
-tmp = current.with_name(".config-current.tmp")
-if tmp.exists() or tmp.is_symlink():
-    tmp.unlink()
-os.symlink(generation, tmp)
-os.replace(tmp, current)
+# A unique temporary name, removed in `finally`: a fixed one left behind by an
+# interrupted run would be inherited by the next one.
+tmp = current.with_name(f".config-current.{uuid.uuid4().hex}.tmp")
+try:
+    os.symlink(generation, tmp)
+    os.replace(tmp, current)
+finally:
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
 print(generation.name)
 PY
 )"
@@ -304,11 +323,17 @@ ADAPTER_CONFIG="$MN_HOME/config-current/adapters/$AGENT.yaml"
   --adapter "$ADAPTER_CONFIG" \
   --state-dir "$MN_HOME/state" \
   --config-revision "$GEN_REVISION" \
-  inject >/dev/null 2>&1 || true
+  inject >/dev/null 2>&1 \
+  || echo "[WARN] team hint injection did not succeed; the leaf is installed but agent-side hints are absent" >&2
 
 record_stage HINTS_INSTALLED
 
-DAEMON_CMD="MEMORY_NET_HOME=$MN_HOME $PYTHON -m memory_net.leaf.cli start --node-id $NODE_ID --state-dir $MN_HOME/state --repo $MN_HOME/repo --adapter $ADAPTER_CONFIG --agent-root $AGENT_ROOT"
+# cron re-parses this string as a shell command, so every value that can
+# contain a space or a metacharacter is escaped. --home and --agent-root are
+# caller-supplied paths; the foreground invocation below quotes them, and the
+# crontab entry has to be equally careful.
+DAEMON_CMD="$(printf 'MEMORY_NET_HOME=%q %q -m memory_net.leaf.cli start --node-id %q --state-dir %q --repo %q --adapter %q --agent-root %q' \
+  "$MN_HOME" "$PYTHON" "$NODE_ID" "$MN_HOME/state" "$MN_HOME/repo" "$ADAPTER_CONFIG" "$AGENT_ROOT")"
 # Escape valve: the crontab write is the first of two steps that leave
 # $MEMORY_NET_HOME and touch the machine itself.
 if [[ "$NO_CRON" != "1" ]] && command -v crontab >/dev/null 2>&1; then
@@ -333,6 +358,16 @@ if [[ "$NO_DAEMON" != "1" ]]; then
     > "$MN_HOME/state/daemon.log" 2>&1 &
   DAEMON_PID="$!"
   echo "$DAEMON_PID" > "$MN_HOME/state/daemon.pid"
+  # An install that exits non-zero must not leave a daemon behind: the operator
+  # was told the install failed, and a surviving process contradicts that.
+  POST_VERIFY_OK=0
+  cleanup_daemon() {
+    if [[ "$POST_VERIFY_OK" != "1" ]]; then
+      kill "$DAEMON_PID" 2>/dev/null || true
+      rm -f "$MN_HOME/state/daemon.pid"
+    fi
+  }
+  trap cleanup_daemon EXIT
 
   # POST_VERIFY. Starting a process is not the same as installing a working
   # leaf: the script used to declare DAEMON_STARTED the instant nohup returned,
@@ -347,16 +382,14 @@ if [[ "$NO_DAEMON" != "1" ]]; then
   DELAY=1
   while [[ ! -f "$MN_HOME/state/last_health.json" ]]; do
     if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-      echo "[ABORT] the leaf daemon exited before reporting health" >&2
-      exit 6
+      abort 6 "[ABORT] the leaf daemon exited before reporting health"
     fi
     if (( WAITED >= POST_VERIFY_TIMEOUT )); then
-      echo "[ABORT] the leaf daemon did not report health within ${POST_VERIFY_TIMEOUT}s" >&2
-      exit 6
+      abort 6 "[ABORT] the leaf daemon did not report health within ${POST_VERIFY_TIMEOUT}s"
     fi
     sleep "$DELAY"
     WAITED=$(( WAITED + DELAY ))
-    (( DELAY < 5 )) && DELAY=$(( DELAY * 2 ))
+    if (( DELAY < 8 )); then DELAY=$(( DELAY * 2 )); fi
   done
 
   MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli health \
@@ -365,6 +398,7 @@ if [[ "$NO_DAEMON" != "1" ]]; then
   MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli status \
     --health "$POST_VERIFY_HEALTH" >/dev/null
 
+  POST_VERIFY_OK=1
   record_stage DAEMON_STARTED
 fi
 
