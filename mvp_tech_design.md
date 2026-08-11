@@ -1240,10 +1240,17 @@ team 目录 / bundle / CI artifact 之前**没有任何扫描**。叶子侧的 `
      落在 3.94 以下，而随机字节的 base64 从 4.22 起步。阈值取 **4.1** 落在两个总体之间。
      这不是可选流量——系统自己就把 40 位 commit sha 写进**每一条 prompt 与每一条 citation**，
      阈值低于 4.0 等于拒绝每一次真实运行，而一个永远拒绝的闸门会被整个关掉。
-   - **路径形状**：`/` 属于 base64 字母表，因此 `memories/<category>/<stem>-<rev>.md`
-     整条被当成一个 token，且密度与密钥无异。豁免条件是**两条同时成立**：
-     整体匹配"由 `/` 连接、且不含 `+` 与 `=` 的段"，**且每一段都短于长度阈值**。
-     只判形状会放走带 `/` 的 blob，只判长度会放走任何长路径。
+   - **分隔符不进 token**：`-` / `_` / `/` 是**分隔符**而非 token 字符。
+     标准 base64 不含 `-` 与 `_`，而本项目自己的名字全由它们拼成——产物文件名是
+     `<title-slug>-<evidence_hash>.md`，一整段普通英文 slug 整体测得 4.1–4.4 bits/char，
+     把 `-` 算进 token 就等于让规则对"模型给这条知识起了什么标题"开火。
+     代价是 base64url（用 `-`/`_` 替代 `+`/`/`）会被切开，该形状由 `jwt` 规则按结构覆盖。
+     `/` 另配一条**路径形状豁免**：整体匹配"由 `/` 连接、且不含 `+` 与 `=` 的段"，
+     **且每一段都短于长度阈值**。只判形状会放走带 `/` 的 blob，只判长度会放走任何长路径。
+
+   规则的**分词与豁免语义变化必须版本化**：`Ruleset.version` 是 `output_scanner_thresholds`
+   等四个块的哈希，只改代码不改 YAML 会让"两种判定共用一个 version"——
+   因此该块里有一个 `high_entropy_rule_revision`，语义一变就必须递增。
 
    **残余风险（显式登记，不隐藏）**：hex 编码的密钥、以及恰好被 `/` 切成两段短片段的
    base64 blob，这两类不会被本规则命中。两者都由上方 25 条厂商 pattern 按**前缀形状**覆盖；
@@ -4170,4 +4177,15 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   整条路径被当成一个高密度 token）。以合成 fixture 仓实测：单次出站 prompt 命中 20 次，
   运行在 recorder 的出站闸处直接失败。阈值取 4.1 是因为实测两个总体不重叠
   （hex 摘要 ≤3.94，随机字节 base64 ≥4.22）。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 熵规则分词与规则版本键
+
+- Change summary: §5.5.8 把 `-` / `_` / `/` 定为熵规则的**分隔符**（`_ENTROPY_ALPHABET`
+  收窄为 `A-Za-z0-9+/=` 并保留路径形状豁免），并在 `output_scanner_thresholds` 增加
+  `high_entropy_rule_revision`，把"规则语义变化"纳入 `Ruleset.version`。
+- Change reason: 以假 transport 全程演练一次生产录制后发现，产物文件名
+  `team/<category>/<title-slug>-<evidence_hash>.md` 的 slug 段整体熵实测 4.14–4.35，
+  高于阈值——规则会因**模型给产物起的标题**而拒绝整个 run（演练中 manifest 扫描命中 6 次）。
+  另外只改代码不改 YAML 会让同一个 `version` 对应两种判定，故补一个显式的规则修订键。
 - Change time: 2026-08-11

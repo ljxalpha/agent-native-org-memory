@@ -305,3 +305,25 @@ def test_scanner_clean_payload_returns_a_clean_verdict(ruleset: Ruleset) -> None
 def test_scanner_rejects_leaf_side_mode_vocabulary(ruleset: Ruleset) -> None:
     with pytest.raises(ValueError, match="mode"):
         OutputScanner(ruleset, mode="audit")
+
+
+def test_a_product_filename_does_not_trip_the_entropy_rule(ruleset: Ruleset) -> None:
+    """The model picks the title, and the title becomes a path segment.
+
+    A product is written to ``team/<category>/<title-slug>-<evidence_hash>.md``.
+    Measured as one token an ordinary English slug reaches 4.1 to 4.4 bits per
+    character, above the threshold -- so with ``-`` counted as a token
+    character this rule refuses a run because of what the model chose to call
+    something.
+    """
+    payload = {
+        "products_active": {
+            "distill-20260810T101010Z-a1b2c3d4-001": {
+                "relative_path": (
+                    "team/common_knowledge/"
+                    "search-index-rebuild-after-schema-change-9f8a7b6c.md"
+                ),
+            }
+        }
+    }
+    assert scan(payload, field_kind=PROSE, ruleset=ruleset) == []

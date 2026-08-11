@@ -85,7 +85,19 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "high_entropy_min_bits_per_char": 4.1,
 }
 
-_ENTROPY_ALPHABET = "A-Za-z0-9+/=_-"
+_ENTROPY_ALPHABET = "A-Za-z0-9+/="
+"""What counts as one token: an *unseparated* run.
+
+``-`` and ``_`` are separators here, not token characters. Standard base64 uses
+neither, while this project's own names are built from them -- a product file is
+``<title-slug>-<evidence_hash>.md``, and measured whole a slug of ordinary
+English words reaches 4.1 to 4.4 bits per character. Keeping them in the
+alphabet makes the rule fire on the model's choice of title.
+
+The cost is the base64url alphabet, which substitutes ``-`` and ``_`` for ``+``
+and ``/``. That shape is covered by name: the ``jwt`` pattern above matches it
+structurally rather than by density.
+"""
 
 _PATH_SHAPED = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+")
 """A repo-relative path: segments joined by ``/``, and no base64 punctuation.

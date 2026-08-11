@@ -109,6 +109,15 @@ output_scanner_thresholds:
   # project's credentials never reach an artifact by construction: they are
   # read by key name into a process environment and are never written.
   high_entropy_min_bits_per_char: 4.1
+  # Bumped whenever the rule's *tokenisation or exemptions* change, not just
+  # its numbers. Ruleset.version is a hash of this block, so without a key that
+  # moves, a semantic change to the rule leaves two different judgements
+  # sharing one version string -- and a bundle recorded under the old one would
+  # claim to have been gated by the new.
+  #   1: initial rule.
+  #   2: `-`, `_` and `/` became separators rather than token characters, and
+  #      path-shaped tokens gained an exemption.
+  high_entropy_rule_revision: 2
 output_scanner_dynamic_rules:
   # Values are injected by the caller at load time, never stored here: writing
   # the real hostname into a tracked file is the leak this rule exists to catch.

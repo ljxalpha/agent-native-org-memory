@@ -27,7 +27,7 @@ ASSETS = REPO_ROOT / "tests" / "fixtures" / "golden_repo"
 SHIPPED_PROFILE = REPO_ROOT / "config" / "distill.deepseek.yaml"
 PATTERNS_PATH = REPO_ROOT / "config" / "redaction_patterns.yaml"
 
-MASTER_SHA = "db77ae5848049b3afb45ff200deb46adf9a2b99e"
+MASTER_SHA = "85a2cc07eec5c92a9296004e1893eb5d508ca70f"
 LEAF_SHAS = {
     "auth_retry": "13f8821e0ffcea4cd5ff96a0cd7062b9d8857c7c",
     "deploy_window": "e6314c11c44d80a0a64cf77d978972454c445bb0",
