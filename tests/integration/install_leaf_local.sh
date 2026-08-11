@@ -115,4 +115,72 @@ state = json.loads(open(sys.argv[1], encoding="utf-8").read())
 assert state["status"] == "HINTS_INSTALLED", state
 PY
 
+# --- Failure staging and dirty recovery -------------------------------------
+# Break the remote so a *second* install fails after the venv but before the
+# repo is usable, then assert the state machine says which stage broke and that
+# the failure record leaks nothing about the environment.
+BROKEN_HOME="$TMPROOT/home-broken"
+mv "$MEMORY_REPO" "$MEMORY_REPO.moved"
+set +e
+MEMORY_NET_HOME="$BROKEN_HOME" "$ROOT/scripts/install_leaf.sh" \
+  --repo "$MEMORY_REPO" \
+  --agent claude-code \
+  --node-id "$NODE_ID" \
+  --agent-root "$AGENT_ROOT" \
+  --package-ref "$ROOT" \
+  --home "$BROKEN_HOME" \
+  --no-cron \
+  --no-daemon > "$TMPROOT/broken.out" 2> "$TMPROOT/broken.err"
+BROKEN_EXIT=$?
+set -e
+mv "$MEMORY_REPO.moved" "$MEMORY_REPO"
+test "$BROKEN_EXIT" -ne 0 \
+  || { echo "[FAIL] a broken remote did not fail the install" >&2; exit 1; }
+
+python3 - "$BROKEN_HOME/state/install_state.json" <<'PY'
+import json
+import re
+import sys
+
+raw = open(sys.argv[1], encoding="utf-8").read()
+state = json.loads(raw)
+assert state["status"].startswith("FAILED:"), state
+assert state["status"] == "FAILED:VENV_READY", state
+assert isinstance(state["exit_code"], int) and state["exit_code"] != 0, state
+# The failure record is pasted into support issues: stage and code only.
+assert set(state) == {"status", "exit_code", "at"}, state
+forbidden = re.compile(r"https?://|git@|ssh://|/home/|/Users/|Traceback", re.I)
+assert not forbidden.search(raw), raw
+PY
+
+# Re-running against the repaired remote must leave evidence of the dirty home
+# and then succeed, without silently overwriting what was there.
+MEMORY_NET_HOME="$BROKEN_HOME" "$ROOT/scripts/install_leaf.sh" \
+  --repo "$MEMORY_REPO" \
+  --agent claude-code \
+  --node-id "$NODE_ID-b" \
+  --agent-root "$AGENT_ROOT" \
+  --package-ref "$ROOT" \
+  --home "$BROKEN_HOME" \
+  --no-cron \
+  --no-daemon > "$TMPROOT/recover.out" 2> "$TMPROOT/recover.err"
+
+python3 - "$BROKEN_HOME" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+inventories = sorted(home.glob("state/dirty_recovery/*/inventory.json"))
+assert inventories, "no dirty recovery evidence was recorded"
+inventory = json.loads(inventories[0].read_text(encoding="utf-8"))
+assert inventory["reasons"], inventory
+assert inventory["entries"], inventory
+# Evidence is an inventory, not a copy: no file contents anywhere in it.
+raw = inventories[0].read_text(encoding="utf-8")
+assert "node_id" not in raw, raw
+state = json.loads((home / "state" / "install_state.json").read_text(encoding="utf-8"))
+assert state["status"] == "HINTS_INSTALLED", state
+PY
+
 echo "install_leaf_local.sh passed"

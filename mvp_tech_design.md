@@ -1484,6 +1484,36 @@ CI 以阻塞步骤运行该 harness。
 `build_id` 与 `build_id_source` 由 `identity.build_id_from_package_ref()` 推导——
 **与运行期 health 采集用的是同一个函数**。两处各推一遍会让审计线索自相矛盾。
 
+#### 6.6.4 安装状态机与 dirty recovery（`memory_net.leaf.install_state`）
+
+`install_state.json` 原先只有两个写入点：靠前的 `VENV_READY` 与最末的 `DAEMON_STARTED`。
+`set -euo pipefail` 下两者之间任何一步失败都**什么都不写**，留在盘上的要么是上一次运行的
+陈旧值、要么是空——恰恰是最需要知道"这次走到哪"的时刻。
+
+阶段枚举（有序，位置本身有语义）：
+
+`PREFLIGHT → VENV_READY → REPO_READY → BRANCH_READY → GENERATION_READY →
+HINTS_INSTALLED → DAEMON_STARTED`，失败记为 `FAILED:<STAGE>`。
+
+- 脚本装 `trap … ERR`，任何一步失败即**原子**写入 `FAILED:<STAGE>`。
+- **失败记录只含阶段名与退出码，别无其他。** 安装命令经手远端 URL、绝对家目录路径、
+  乃至凭据片段，而这个文件会被贴进 issue。阶段名足以定位失败，命令输出不值这份泄露。
+  该约束由一条正则负向断言固定（禁 `https?://` / `git@` / `ssh://` / `/home/` /
+  `/Users/` / `Traceback`），单测与 harness 各一条。
+- 未知阶段名一律 `InstallStageError`：脚本里写错一个阶段名，不能变成一条谁也解释不了的状态。
+
+**dirty recovery**：安装开始时读上次状态，若为 `FAILED:*`、或盘上物件与状态自相矛盾
+（状态说 venv/repo 就位但不在、`config-current` 是悬空符号链接等），先把
+`local.yaml` / `config-current` / `state/*` 的**清单**留证到
+`<state>/dirty_recovery/<ts>/inventory.json`：只记路径、大小、内容 sha256，
+**绝不复制内容**（清单小到可以永久保留，拷贝则会把 state 里的密钥与本机路径再复制一份），
+然后**继续安装**——在这里拒绝会让这台机器再也修不好。
+**全过程不删不移任何文件。**
+
+（`install_state.json` 不再冗余记录 `node_id` / `agent` / `generation`：
+这三者的真相源分别是 `local.yaml` 与 `config-current/config_revision`，
+在状态文件里存副本只会制造第二个可能过期的答案。）
+
 生产级 one-command hardening 仍作为后续任务跟踪：平台/依赖探针、
 `build_info` / approved build ID 校验、安装失败阶段状态、远端 manifest
 兼容校验、代表性 schema probe、同机 dirty recovery 留证、generation quarantine、

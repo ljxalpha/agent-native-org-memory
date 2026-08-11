@@ -84,12 +84,42 @@ PYTHON="$MN_HOME/venv/bin/python"
 "$PYTHON" -m pip install --upgrade pip >/dev/null
 "$PYTHON" -m pip install "$PACKAGE_REF" >/dev/null
 
+# From here on every failure records which stage it happened in. Under
+# `set -euo pipefail` the script used to die silently between its two state
+# writes, leaving a file that described a previous run -- exactly when someone
+# needs to know how far this one got.
+STAGE="PREFLIGHT"
+record_stage() {
+  STAGE="$1"
+  "$PYTHON" -m memory_net.leaf.install_state record \
+    --state-dir "$MN_HOME/state" --status "$1"
+}
+record_failure() {
+  local code=$?
+  # Stage and exit code only. Command output here would carry the remote URL,
+  # absolute paths and possibly a credential fragment into a file that gets
+  # pasted into support issues.
+  "$PYTHON" -m memory_net.leaf.install_state record \
+    --state-dir "$MN_HOME/state" --status "FAILED:$STAGE" --exit-code "$code" \
+    >/dev/null 2>&1 || true
+  exit "$code"
+}
+trap record_failure ERR
+
 # PREFLIGHT. Placed here rather than at the very top because the probe ships
 # with the package, and because the interpreter that matters is the venv's --
 # it is the one that will run the daemon. Everything still to come (clone,
 # orphan-branch push, cron, daemon) is either expensive or hard to undo, so an
 # environment that cannot support the install is refused before any of it.
 "$PYTHON" -m memory_net.leaf.install_probe preflight --home "$MN_HOME"
+
+# Dirty recovery: a previous run may have left the home inconsistent. Record an
+# inventory (paths, sizes, hashes -- never contents) before proceeding, so a
+# state this run is about to replace can still be reasoned about afterwards.
+# Nothing is deleted or moved here.
+"$PYTHON" -m memory_net.leaf.install_state recover --home "$MN_HOME"
+
+record_stage VENV_READY
 INSTALL_ID_FILE="$MN_HOME/state/install_id"
 if [[ -f "$INSTALL_ID_FILE" ]]; then
   INSTALL_ID="$(cat "$INSTALL_ID_FILE")"
@@ -122,6 +152,7 @@ fi
 
 cd "$MN_HOME/repo"
 git fetch origin
+record_stage REPO_READY
 git show origin/master:bootstrap_state.json >/dev/null
 git show origin/master:manifest.json >/dev/null
 ADAPTER_YAML="$(git show "origin/master:config/adapters/$AGENT.yaml")"
@@ -213,9 +244,7 @@ memory_repo: "$MEMORY_REPO"
 package_ref: "$PACKAGE_REF"
 YAML
 
-cat > "$MN_HOME/state/install_state.json" <<JSON
-{"status":"VENV_READY","node_id":"$NODE_ID","agent":"$AGENT"}
-JSON
+record_stage BRANCH_READY
 
 TMP_GEN="$(mktemp -d "$MN_HOME/config.generations/.gen.XXXXXX")"
 mkdir -p "$TMP_GEN"
@@ -271,6 +300,8 @@ fi
 rm -rf "$TMP_GEN"
 ln -sfn "$GEN_DIR" "$MN_HOME/config-current"
 
+record_stage GENERATION_READY
+
 ADAPTER_CONFIG="$MN_HOME/config-current/adapters/$AGENT.yaml"
 "$PYTHON" -m memory_net.leaf.cli hints \
   --agent-root "$AGENT_ROOT" \
@@ -278,6 +309,8 @@ ADAPTER_CONFIG="$MN_HOME/config-current/adapters/$AGENT.yaml"
   --state-dir "$MN_HOME/state" \
   --config-revision "$GEN_REVISION" \
   inject >/dev/null 2>&1 || true
+
+record_stage HINTS_INSTALLED
 
 DAEMON_CMD="MEMORY_NET_HOME=$MN_HOME $PYTHON -m memory_net.leaf.cli start --node-id $NODE_ID --state-dir $MN_HOME/state --repo $MN_HOME/repo --adapter $ADAPTER_CONFIG --agent-root $AGENT_ROOT"
 # Escape valve: the crontab write is the first of two steps that leave
@@ -303,13 +336,7 @@ if [[ "$NO_DAEMON" != "1" ]]; then
     --agent-root "$AGENT_ROOT" \
     > "$MN_HOME/state/daemon.log" 2>&1 &
   echo "$!" > "$MN_HOME/state/daemon.pid"
-  INSTALL_STATUS="DAEMON_STARTED"
-else
-  INSTALL_STATUS="HINTS_INSTALLED"
+  record_stage DAEMON_STARTED
 fi
-
-cat > "$MN_HOME/state/install_state.json" <<JSON
-{"status":"$INSTALL_STATUS","node_id":"$NODE_ID","agent":"$AGENT","generation":"$GEN_REVISION"}
-JSON
 
 echo "Installed memory-net leaf $NODE_ID at $MN_HOME"
