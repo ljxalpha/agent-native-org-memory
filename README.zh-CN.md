@@ -125,10 +125,13 @@ flowchart TB
 
 这张图刻意点明两件事：
 
-- **叶子从不读取 agent 的私有记忆。** 只有声明为 `scope: shared` 的根会被列入汇报范围；
-  `personal` 根（例如 Claude Code 的 `~/.claude/CLAUDE.md`）会被解析，但 `report` 从不
-  读它（`memory_net/shared/adapters/filesystem_md.py`）。私有记忆与共享知识的隔离是
-  **位置上的**——两个互不相交的目录；这里既没有 ACL 也没有加密，README 不应暗示有。
+- **私有与共享的分界画在配置里，代码负责遵守它。** `report` 只列出声明为 `scope: shared`
+  的根；`personal` 根（例如 Claude Code 的 `~/.claude/CLAUDE.md`）会被解析，但从不被读取
+  （`memory_net/shared/adapters/filesystem_md.py`）。但**标签本身就是边界**——adapter
+  采信自己 YAML 里写的东西，所以一份把私有目录标成 `shared` 的 adapter 同样会被照办。
+  这正是叶子所依据的 adapter YAML 不是一个本地文件、而是从共享仓 `master` 物化出来的
+  **内容寻址 config generation** 的一部分的原因。隔离是**位置上的**——互不相交的目录，
+  加上经过评审的配置；这里既没有 ACL 也没有加密，README 不应暗示有。
 - **回流是整目录替换。** `subscribe` 先在临时目录里构建新的 `team/`，再用 `os.replace`
   原子换入，因此 agent 永远读不到写了一半的状态；目标目录里原有的内容会被整体替换
   （`filesystem_md.write_team`）。
@@ -257,11 +260,16 @@ agent CLI 只接受一段文本 prompt，`system` / `user` 的角色边界在链
 
 **2. 泄漏判定发生在任何持久化之前，绝不在之后。**
 出站扫描发生在调用内层 provider *之前*：prompt 一旦离开进程，再拒绝把它写下来已经保护
-不了任何东西。**每一条 lane 都会被包上这道出站扫描**，无论是否录制——不录制只意味着 prompt
-不会被写下来，而不意味着它不会被发出去。相比之下，对**原始响应**的扫描只存在于录制运行中，
-因为那是唯一会把原始响应落盘的运行；而在**每一次**运行里，模型输出都会在解析成对象之后、
-渲染之前再过一道闸。而且写入方不会假设上游有人扫过——`BundleRecorder.record` 强制要求
-调用方出示一份 `ScanVerdict`，并拒绝带命中的判定书。
+不了任何东西。**只要这次 run 有规则集，每一条 lane 都会被包上这道出站扫描**，无论是否录制
+——不录制只意味着 prompt 不会被写下来，而不意味着它不会被发出去。相比之下，对**原始响应**
+的扫描只存在于录制运行中，因为那是唯一会把原始响应落盘的运行；模型输出则是在解析成对象
+之后、渲染之前再过一道闸。而且写入方不会假设上游有人扫过——`BundleRecorder.record` 强制
+要求调用方出示一份 `ScanVerdict`，并拒绝带命中的判定书。
+
+“只要有规则集”是一句实打实的限定，不是托词。一个既不随附规则文件、profile 又没有声明
+`output_scanner` 块的仓库，会跑出一次**没有 scanner、因而没有这些闸**的 run——这条路径可达，
+并且会打一条 warning。但它在生产下**不可达**：生产 profile 必须声明该块，而声明了块却在冻结
+快照里找不到规则文件，会直接让 run 起不来。
 → `memory_net/distiller/llm/recording.py`、`memory_net/distiller/output_scanner.py`
 
 **3. 扫描命中会让整个 run 失败，而不是跳过这个 cluster。**
@@ -438,10 +446,12 @@ python3 -m memory_net.distiller.cli --help  # run [--provider mock|anthropic|her
 此处的 `config/` 与 `prompts/` 仅为引导模板与测试夹具；运行时的唯一事实来源始终是共享
 仓库的 `master`。
 
-录制下来的调用 bundle 不在该白名单之内。它包含完整的 prompt 与完整的 response，因此
-`--record-dir` 在文档中被规定指向仓库**之外**的 staging 目录（见 `docs/tuning_loop.md`）。
-这是一条**流程约定，而不是 CLI 强制的约束**：该参数接受任意路径。代码真正保证的是更窄的
-一条——发布步骤只暂存白名单内的路径，且一旦工作区里出现白名单之外的内容就直接拒绝发布。
+录制下来的调用 bundle 不在该白名单之内，而且它是最值得把话说白的那个产物：它包含完整的
+prompt 与完整的 response，是整个系统里泄漏密度最高的面。因此 `--record-dir` 在文档中被
+规定指向仓库**之外**的 staging 目录（见 `docs/tuning_loop.md`）——但那是一条**流程约定，
+而不是强制约束**：该参数接受任意路径，包括白名单前缀之下的路径，所以“别把 bundle 留在
+共享仓里”是 operator 的责任。代码真正保证的是另一件事——bundle 的**内容**确实被扫过：
+逐调用两阶段扫描，外加在原子发布之前对每一个 staged 文件的一次全量复扫。
 
 ---
 

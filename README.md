@@ -133,12 +133,16 @@ flowchart TB
 
 Two things this diagram deliberately shows:
 
-- **The leaf never reads the agent's private memory.** Only roots declared
-  `scope: shared` are listed for reporting; a `personal` root (Claude Code's
-  `~/.claude/CLAUDE.md`, for instance) is parsed and then never read by `report`
-  (`memory_net/shared/adapters/filesystem_md.py`). Private and shared memory are
-  separated *positionally*, in disjoint directories — there is no ACL and no
-  encryption, and the README should not imply one.
+- **The private/shared line is drawn in configuration, and the code honours it.**
+  `report` lists only roots declared `scope: shared`; a `personal` root (Claude
+  Code's `~/.claude/CLAUDE.md`, for instance) is parsed and then never read
+  (`memory_net/shared/adapters/filesystem_md.py`). But the label is the boundary —
+  the adapter trusts what its YAML says, so an adapter that labelled a private
+  directory `shared` would be obeyed. That is why the adapter YAML a leaf runs
+  from is not a local file but part of the content-hashed config generation
+  materialized from the shared repo's `master`. Separation is *positional* —
+  disjoint directories, reviewed configuration. There is no ACL and no encryption,
+  and this README should not imply one.
 - **Feed-back is a whole-directory replace.** `subscribe` builds the new `team/`
   in a temporary directory and `os.replace`s it into position, so a partial write
   can never be what the agent reads. Anything already sitting in the target
@@ -272,13 +276,19 @@ outright.
 
 **2. Leak detection happens before persistence, never after.**
 The outbound scan runs *before* the inner provider is called: once a prompt has left
-the process, refusing to write it down protects nothing. Every lane is wrapped for that
-scan, recording or not — not recording means the prompt is never written down, not that
-it is never sent. The raw-response scan, by contrast, exists only on a recording run,
-because that is the only run where a raw response reaches disk; on every run the model's
-output is gated once it has been parsed, before anything is rendered. And the writer does
-not trust that someone upstream scanned: `BundleRecorder.record` requires a `ScanVerdict`
-as an argument, and refuses one that carries hits.
+the process, refusing to write it down protects nothing. Once a run has a ruleset at all,
+every lane is wrapped for that scan, recording or not — not recording means the prompt is
+never written down, not that it is never sent. The raw-response scan, by contrast, exists
+only on a recording run, because that is the only run where a raw response reaches disk;
+the model's output is instead gated once it has been parsed, before anything is rendered.
+And the writer does not trust that someone upstream scanned: `BundleRecorder.record`
+requires a `ScanVerdict` as an argument, and refuses one that carries hits.
+
+"Once a run has a ruleset" is a real qualifier, not a hedge. A repository that ships no
+rule file and a profile that declares no `output_scanner` block produce a run with no
+scanner and therefore no gates — reachable, and logged as a warning. It is *not*
+reachable in production: a production profile must declare the block, and a declared
+block whose rule file is missing from the frozen snapshot stops the run.
 → `memory_net/distiller/llm/recording.py`, `memory_net/distiller/output_scanner.py`
 
 **3. A scanner hit fails the whole run, not the cluster.**
@@ -477,12 +487,15 @@ configuration:
 The `config/` and `prompts/` here are bootstrap templates and test fixtures; the
 runtime source of truth is always the shared repo's `master`.
 
-Recorded call bundles are not on that list. They hold complete prompts and complete
-responses, so `--record-dir` is documented to point at a staging directory *outside*
-the repository (`docs/tuning_loop.md`). That is a procedure, not a constraint the CLI
-enforces: the flag accepts any path. What the code does guarantee is narrower — the
-publish step stages only the whitelisted paths, and refuses outright if the working
-tree carries anything outside the whitelist.
+Recorded call bundles are not on that list, and they are the one artifact worth being
+blunt about: they hold complete prompts and complete responses, which is the
+highest-density leak surface the system produces. `--record-dir` is therefore
+documented to point at a staging directory *outside* the repository
+(`docs/tuning_loop.md`) — and that is a **procedure, not a constraint**. The flag
+accepts any path, including one under a whitelisted prefix, so keeping bundles out of
+the shared repo is the operator's job. What the code does instead is guarantee the
+bundle's *contents* were scanned: two stages per call, plus a full re-scan of every
+staged file immediately before the atomic publish.
 
 ---
 
