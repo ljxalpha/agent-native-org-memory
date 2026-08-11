@@ -749,8 +749,10 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
   触顶即抛 `BudgetExhausted`，**请求根本不发出**。
 - 仅对超时 / 连接中断 / 5xx / 429 重试（指数退避，默认 2 次）。
   **不对 JSON 解析失败重试**——解析发生在 pipeline，重试同一个 prompt 只是重复烧钱。
-  **退避等待必须落在该次尝试的计时窗口内**：等待重试的时间也是 run 花掉的时间，
-  漏算会让 run 实际超出 wall-clock 上限而账面看起来正常。
+  **退避必须先于 sleep 预扣，且按 `退避 + timeout` 作为该次尝试的 wall-clock 上界**：
+  一次重试的最坏耗时是"等多久 + 请求多久"，只预扣 `timeout` 会让 run 启动一个
+  最坏情况恰好超出上限的调用（剩 120.5s、timeout 120s、退避 1s → 实际可跑到 121s）。
+  sleep 本身也必须落在该 reservation 的终结范围内。
 - **每次尝试恰好一个终态，异常路径也不例外**：
   - 捕获 `BaseException` 而非 `Exception`——`KeyboardInterrupt` 落在 reserve 与 settle
     之间会漏掉一个预扣，而未终结的预扣意味着一次尝试的成本悄悄没算进上限；

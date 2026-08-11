@@ -105,6 +105,7 @@ class OpenAICompatProvider(LLMProvider):
         max_retries: int = DEFAULT_MAX_RETRIES,
         client: Any | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.api_key = api_key or os.environ.get(API_KEY_ENV)
         self.base_url = base_url or os.environ.get(BASE_URL_ENV)
@@ -118,6 +119,10 @@ class OpenAICompatProvider(LLMProvider):
         # a network call. Production leaves it None and the SDK client is built.
         self.client = client
         self.sleep = sleep
+        # Injected together: a test that fakes sleeping must be able to make
+        # the clock advance with it, or the wall-clock ledger it asserts on
+        # never moves and the assertion passes for the wrong reason.
+        self.monotonic = monotonic
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         client = self._client()
@@ -125,17 +130,18 @@ class OpenAICompatProvider(LLMProvider):
         last_exc: BaseException | None = None
 
         for attempt in range(self.max_retries + 1):
-            # The backoff is inside the attempt's own timing window, so the
-            # run's wall-clock ledger accounts for time spent waiting to retry
-            # rather than only for time spent inside the request.
-            started = time.monotonic()
-            if attempt:
-                self.sleep(_BACKOFF_BASE_S * (2 ** (attempt - 1)))
-            # Reserved before every attempt, including retries: a retry is a
-            # fresh call with a fresh cost, and a ceiling that only counted the
-            # first one would not be a ceiling.
-            reservation = self._reserve(request)
+            backoff_s = _BACKOFF_BASE_S * (2 ** (attempt - 1)) if attempt else 0.0
+            started = self.monotonic()
+            # Reserved *before* the backoff, and for the backoff plus the request
+            # timeout. Reserving only the timeout would let the run start a call
+            # whose worst case overshoots the wall-clock ceiling by exactly the
+            # time spent waiting to make it.
+            reservation = self._reserve(
+                request, wall_upper_s=backoff_s + self.timeout_s
+            )
             try:
+                if backoff_s:
+                    self.sleep(backoff_s)
                 completion = self._call(client, request=request, model=model)
             except BaseException as exc:
                 # BaseException, not Exception: a KeyboardInterrupt between the
@@ -205,7 +211,9 @@ class OpenAICompatProvider(LLMProvider):
             ) from exc
         return openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-    def _reserve(self, request: LLMRequest) -> Reservation | None:
+    def _reserve(
+        self, request: LLMRequest, *, wall_upper_s: float
+    ) -> Reservation | None:
         """Hold budget for one attempt, or let ``BudgetExhausted`` stop it.
 
         Only token upper bounds are supplied: pricing lives in the budget, so
@@ -218,7 +226,7 @@ class OpenAICompatProvider(LLMProvider):
                 request.system_prompt, request.user_prompt
             ),
             output_tokens_upper=request.max_tokens,
-            timeout_s_upper=self.timeout_s,
+            timeout_s_upper=wall_upper_s,
         )
 
     def _close(
@@ -233,7 +241,7 @@ class OpenAICompatProvider(LLMProvider):
             # Idempotent: the guard around response decoding closes the
             # reservation only if _to_response did not already get there.
             return
-        wall_s = time.monotonic() - started
+        wall_s = self.monotonic() - started
         if usage is not None:
             reservation.settle(usage=usage, wall_s=wall_s)
         elif billable:

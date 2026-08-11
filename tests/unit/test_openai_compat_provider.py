@@ -416,27 +416,75 @@ def test_an_interrupt_is_not_retried() -> None:
     assert len(client.calls) == 1
 
 
-def test_retry_backoff_counts_against_the_run_wall_clock() -> None:
-    """Time spent waiting to retry is time the run spent. Leaving it out would
-    let a run blow its wall-clock ceiling while the ledger looked fine."""
-    slept: list[float] = []
-    budget = RunBudget(1.0, 10.0, max_usd=None, max_wall_clock_s=None)
-    client = _FakeClient([_HTTPError(500), _Completion(usage=_Usage(1, 1))])
+class _FakeClock:
+    """A clock that sleeping actually advances.
+
+    Faking sleep without advancing the clock is how a wall-clock assertion
+    passes for the wrong reason: nothing moves, so anything looks in budget.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _clocked_provider(
+    outcomes: list[Any], **kwargs: Any
+) -> tuple[OpenAICompatProvider, _FakeClient, _FakeClock]:
+    clock = _FakeClock()
+    client = _FakeClient(outcomes)
     provider = OpenAICompatProvider(
         api_key="unused-because-a-client-is-injected",
         base_url="https://example.invalid/v1",
         model="deepseek-v4-flash",
         client=client,
+        sleep=clock.sleep,
+        monotonic=clock,
+        **kwargs,
+    )
+    return provider, client, clock
+
+
+def test_retry_backoff_lands_in_the_run_wall_clock_ledger() -> None:
+    """Time spent waiting to retry is time the run spent. Asserted on the
+    ledger itself, not on the shape of the source."""
+    budget = RunBudget(1.0, 10.0, max_usd=None, max_wall_clock_s=None)
+    provider, client, _ = _clocked_provider(
+        [_HTTPError(500), _Completion(usage=_Usage(1, 1))],
         budget=budget,
-        sleep=lambda seconds: slept.append(seconds),
+        max_retries=2,
     )
 
     provider.generate(_request())
 
-    assert slept, "a retryable failure must back off before retrying"
-    # The second attempt's window opens before its backoff, so the waiting time
-    # is inside the settled wall clock rather than outside every window.
-    import inspect
+    assert len(client.calls) == 2
+    # Requests take no time on the fake clock, so the whole ledger is the one
+    # 1s backoff between the two attempts.
+    assert budget.snapshot()["wall_clock_s"] == pytest.approx(1.0)
 
-    source = inspect.getsource(OpenAICompatProvider.generate)
-    assert source.index("started = time.monotonic()") < source.index("self.sleep(")
+
+def test_the_wall_clock_ceiling_accounts_for_the_backoff_before_retrying() -> None:
+    """The retry's worst case is backoff + timeout. Reserving only the timeout
+    would let a run start a call that overshoots the ceiling by exactly the time
+    it spent waiting to make it: 120.5s left, a 120s timeout and a 1s backoff
+    means the second attempt can run to 121s.
+    """
+    budget = RunBudget(1.0, 10.0, max_usd=None, max_wall_clock_s=120.5)
+    provider, client, _ = _clocked_provider(
+        [_HTTPError(500), _Completion(usage=_Usage(1, 1))],
+        budget=budget,
+        max_retries=2,
+        timeout_s=120.0,
+    )
+
+    with pytest.raises(BudgetExhausted, match="wall clock"):
+        provider.generate(_request())
+
+    # The retry was refused before it went out, not after.
+    assert len(client.calls) == 1
+    budget.assert_all_settled()
