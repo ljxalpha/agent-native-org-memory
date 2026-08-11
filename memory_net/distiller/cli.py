@@ -317,17 +317,24 @@ def _build_providers(
     the fallback then spends again.
     """
     if args.replay:
-        replay = _replay_provider(args, provider_name, budget=budget)
+        replay = _replay_provider(args, provider_name, budget=budget, context=context)
         if fallback_name == "none":
             return replay, None
         # Share one ordered cursor, but give the fallback lane its own
         # live-on-miss provider (the configured fallback) so allow-live-on-miss
         # misses do not fall through to the primary provider.
         fallback_live = (
-            _base_provider(
-                fallback_name,
-                args.model or _fallback_model(config),
-                budget=budget,
+            # Wrapped like any other live lane: a replay *miss* is a real call
+            # with a real prompt, and the gate cannot be a property of whether
+            # the bundle happened to contain the answer.
+            _wrap_record(
+                _base_provider(
+                    fallback_name,
+                    args.model or _fallback_model(config),
+                    budget=budget,
+                ),
+                None,
+                context,
             )
             if args.replay_mode == "allow-live-on-miss"
             else None
@@ -356,9 +363,13 @@ def _replay_provider(
     provider_name: str,
     *,
     budget: RunBudget | None = None,
+    context: RunContext | None = None,
 ) -> ReplayProvider:
     live_on_miss = (
-        _base_provider(provider_name, args.model, budget=budget)
+        # Same wrapper as a live run: on a miss this provider sends the prompt.
+        _wrap_record(
+            _base_provider(provider_name, args.model, budget=budget), None, context
+        )
         if args.replay_mode == "allow-live-on-miss"
         else None
     )

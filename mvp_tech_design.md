@@ -1330,6 +1330,8 @@ stage-2（落盘前）：response = provider.generate(request)
 **不录制的通道同样有出站扫描**：stage-1 过去只存在于 `RecordingProvider` 里，
 于是"prompt 出站前被扫"这件事实际上成了 `--record` 的附属品——而不录制只是不把 prompt
 写下来，并不是不把它发出去，且 prompt 正是承载叶子记录的那个载体。
+`--replay-mode allow-live-on-miss` 的两条 live-on-miss 通道同样包装：
+一次 miss 就是一次带真实 prompt 的真实调用，闸门不能变成"bundle 里恰好有没有这条答案"的函数。
 因此 `_wrap_record()` 对没有 recorder 的通道也包一层 `ScanningProvider`：
 只做 stage-1（响应不在本通道落盘，解析后的产物由发布闸扫）。
 两个包装器共用同一个 `scan_request()`，避免两套口径各自漂移。

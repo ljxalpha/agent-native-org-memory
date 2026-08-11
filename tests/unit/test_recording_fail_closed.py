@@ -305,3 +305,55 @@ def test_the_cli_leaves_a_scannerless_lane_exactly_as_it_was() -> None:
     inner = _CountingProvider()
 
     assert cli_module._wrap_record(inner, None, None) is inner
+
+
+def test_a_replay_miss_still_scans_before_it_calls_the_model(
+    tmp_path: Path, ruleset: Ruleset
+) -> None:
+    """A replay *miss* is a real call with a real prompt: the gate cannot be a
+    property of whether the bundle happened to hold the answer."""
+    import argparse
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "calls.jsonl").write_text("", encoding="utf-8")
+    context = RunContextBuilder().set_scanner(OutputScanner(ruleset)).freeze()
+    args = argparse.Namespace(
+        replay=bundle,
+        replay_strict=False,
+        replay_mode="allow-live-on-miss",
+        model=None,
+        record=None,
+        record_dir=None,
+    )
+
+    replay = cli_module._replay_provider(args, "mock", context=context)
+
+    assert isinstance(replay.fallback_provider, ScanningProvider)
+
+
+def test_both_replay_lanes_get_the_scanner(tmp_path: Path, ruleset: Ruleset) -> None:
+    import argparse
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "calls.jsonl").write_text("", encoding="utf-8")
+    context = RunContextBuilder().set_scanner(OutputScanner(ruleset)).freeze()
+    args = argparse.Namespace(
+        replay=bundle,
+        replay_strict=False,
+        replay_mode="allow-live-on-miss",
+        model=None,
+        record=None,
+        record_dir=None,
+        provider="mock",
+        fallback_provider="mock",
+    )
+
+    primary, fallback = cli_module._build_providers(
+        args, "mock", "mock", {}, context=context
+    )
+
+    assert isinstance(primary.fallback_provider, ScanningProvider)
+    assert fallback is not None
+    assert isinstance(fallback.fallback_provider, ScanningProvider)
