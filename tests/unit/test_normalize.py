@@ -181,17 +181,39 @@ def test_a_changed_word_in_a_product_body_fails_the_comparison() -> None:
     assert any("content_hash" in item.path for item in differences)
 
 
-def test_a_missed_backref_remapping_fails_the_comparison() -> None:
-    """Proves the whole-tree walk is load-bearing: leave one nested identifier
-    behind and the comparison must notice."""
-    first = normalize(_first_run())
-    second = normalize(_second_run())
-    stale = "20260811T222222Z-99887766"
-    key = next(iter(second["manifest"]["citation_backrefs"]))
-    second["manifest"]["citation_backrefs"][key] = [f"distill-{stale}-001"]
+def test_an_identifier_from_another_run_fails_the_comparison() -> None:
+    """The raw assets are mutated, not the normalized ones: a test that injects
+    a difference *after* normalization proves only that the comparator can see
+    it, and would still pass if the remapping never ran."""
+    stale = "distill-20260101T000000Z-deadbeef-001"
+    second_assets = _second_run()
+    key = next(iter(second_assets.manifest["citation_backrefs"]))
+    second_assets.manifest["citation_backrefs"][key] = [stale]
 
-    with pytest.raises(AssertionError, match="citation_backrefs"):
-        assert_normalized_equal(second, first)
+    differences = diff_normalized(normalize(second_assets), normalize(_first_run()))
+
+    # The injected value survives untouched while its counterpart was remapped:
+    # both halves matter, since a run whose identifiers were never remapped at
+    # all would also produce a difference here.
+    assert [(item.actual, item.expected) for item in differences] == [
+        (stale, "distill-002")
+    ]
+
+
+def test_a_run_id_that_appears_only_deep_in_the_tree_is_remapped() -> None:
+    """The collection walk descends. This id is nowhere near the top level and
+    is not the run's own, so a shallow collector never sees it and leaves it in
+    the normalized output as a literal."""
+    historical = "20260709T090909Z-cafebabe"
+    assets = _second_run()
+    assets.manifest["subject_index"] = {
+        "token": {"entries": [{"last_contribution_at": historical}]}
+    }
+
+    text = serialize(normalize(assets))
+
+    assert historical not in text
+    assert '"last_contribution_at": "run-' in text
 
 
 def test_reordering_a_products_citations_fails_the_comparison() -> None:
@@ -273,24 +295,55 @@ def test_an_ambiguous_ordering_key_is_refused() -> None:
         normalize(assets)
 
 
+def _write_run(repo: Path, assets: RunAssets, *, run_id: str) -> None:
+    """Lay a run's artifacts out the way the orchestrator does."""
+    run_dir = repo / "distill_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (repo / "manifest.json").write_text(json.dumps(assets.manifest), encoding="utf-8")
+    (run_dir / "snapshot.json").write_text(
+        json.dumps(assets.snapshot), encoding="utf-8"
+    )
+    (run_dir / "metrics.json").write_text(json.dumps(assets.metrics), encoding="utf-8")
+    for relative_path, text in assets.products.items():
+        # The per-run snapshot drops the leading ``team/`` segment, exactly as
+        # ``_write_run_product_snapshot`` does.
+        path = run_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
 def test_collect_reads_the_four_assets(tmp_path: Path) -> None:
     run_id = "20260810T101010Z-a1b2c3d4"
     assets = _first_run()
-    (tmp_path / "distill_runs" / run_id).mkdir(parents=True)
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(assets.manifest), encoding="utf-8"
-    )
-    (tmp_path / "distill_runs" / run_id / "snapshot.json").write_text(
-        json.dumps(assets.snapshot), encoding="utf-8"
-    )
-    (tmp_path / "distill_runs" / run_id / "metrics.json").write_text(
-        json.dumps(assets.metrics), encoding="utf-8"
-    )
-    for relative_path, text in assets.products.items():
-        path = tmp_path / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+    _write_run(tmp_path, assets, run_id=run_id)
 
     collected = RunAssets.collect(tmp_path, run_id=run_id)
 
     assert_normalized_equal(normalize(collected), normalize(assets))
+
+
+def test_collect_reads_the_runs_own_products_not_the_latest_publication(
+    tmp_path: Path,
+) -> None:
+    """``team/`` at the repository root holds only the most recent run, so
+    reading it would give both sides of a comparison the same files."""
+    run_id = "20260810T101010Z-a1b2c3d4"
+    assets = _first_run()
+    _write_run(tmp_path, assets, run_id=run_id)
+    for relative_path in assets.products:
+        published = tmp_path / relative_path
+        published.parent.mkdir(parents=True, exist_ok=True)
+        published.write_text("# a later run overwrote this\n", encoding="utf-8")
+
+    collected = RunAssets.collect(tmp_path, run_id=run_id)
+
+    assert collected.products == assets.products
+
+
+def test_a_run_without_a_product_snapshot_is_refused(tmp_path: Path) -> None:
+    """Falling back to the repository root here is how the defect above would
+    come back silently."""
+    (tmp_path / "distill_runs" / "20260810T101010Z-a1b2c3d4").mkdir(parents=True)
+
+    with pytest.raises(NormalizationError, match="product snapshot"):
+        RunAssets.collect(tmp_path, run_id="20260810T101010Z-a1b2c3d4")

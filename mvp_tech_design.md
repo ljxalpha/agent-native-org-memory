@@ -2947,6 +2947,20 @@ normalize(assets):
   被当作语义的是**资产内部的 list 顺序**（citations / contributors / 索引列表），
   负向测试对的是这一类。
 
+**资产从哪里读**（`RunAssets.collect`）：`manifest.json` 取仓库根，
+`snapshot.json` / `metrics.json` 取 `distill_runs/<run_id>/`，
+产物取 **`distill_runs/<run_id>/team/`——即该 run 自己的产物快照**，
+而不是仓库根的 `team/`。后者只保留**最后一次** run 的发布结果：
+拿它比较"上一次 run 与这一次 run"，两边读到的会是同一批文件，
+比较必然相等，而这正是比较器要发现的那类问题。
+key 仍保持仓库相对形态 `team/<...>`，与 manifest 里的 `relative_path` 对齐
+（第 5 步的 content_hash 回填就是按这个 key 匹配的）。
+
+第 1 步的 run_id 收集是**全树递归**的（dict 与 list 都要下钻）：
+只看顶层 mapping 的话，嵌在 `subject_index` 之类结构里的历史 run_id
+不会进入重映射表，于是它原样穿过规范化，最后以"两次 run 不相等"的形式报出来，
+而原因与产物无关。
+
 比较器 `assert_normalized_equal()` 输出**结构化 diff**（路径 + 两侧值），
 而不是一个布尔断言：几百个字段的两棵树"不相等"这句话，读的人无法据此定位。
 

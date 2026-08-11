@@ -32,6 +32,7 @@ from typing import Any
 
 from memory_net.shared.util.frontmatter import split_frontmatter
 from memory_net.shared.util.hashing import short_hash
+from memory_net.shared.util.paths import TEAM_PREFIX
 
 PLACEHOLDER_TIMESTAMP = "1970-01-01T00:00:00Z"
 PLACEHOLDER_SHA = "0" * 40
@@ -71,9 +72,22 @@ class RunAssets:
         catching.
         """
         run_dir = repo / "distill_runs" / run_id
+        # This run's own product snapshot, not the repository's ``team/``. The
+        # latter holds only the *latest* run's publication, so comparing an
+        # earlier run against a later one would read the same files for both
+        # sides and report equality no matter what changed.
+        products_dir = run_dir / TEAM_PREFIX
+        if not products_dir.is_dir():
+            raise NormalizationError(
+                f"run {run_id} has no product snapshot at {products_dir}"
+            )
         products = {
-            path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
-            for path in sorted((repo / "team").rglob("*.md"))
+            f"{TEAM_PREFIX}/{path.relative_to(products_dir).as_posix()}": path.read_text(
+                encoding="utf-8"
+            )
+            # Keyed repo-relative so the manifest's ``relative_path`` still
+            # matches (that is what the content-hash restatement joins on).
+            for path in sorted(products_dir.rglob("*.md"))
         }
         return cls(
             manifest=_read_json(repo / "manifest.json"),
@@ -210,10 +224,11 @@ def _replacements(assets: RunAssets) -> dict[str, str]:
                 ),
             )
         run_ids.update(_run_ids(frontmatter))
+    # Recursive, so the manifest's nested structures (subject index, tombstone
+    # entries, backrefs) are covered by the same walk rather than by a list of
+    # the places someone remembered.
     run_ids.update(_run_ids(assets.manifest))
     run_ids.update(_run_ids(assets.snapshot))
-    for entry in active.values():
-        run_ids.update(_run_ids(entry))
 
     ordered = sorted(keys.items(), key=lambda item: item[1])
     for (first_id, first_key), (second_id, second_key) in pairwise(ordered):
@@ -239,12 +254,23 @@ def _replacements(assets: RunAssets) -> dict[str, str]:
 
 
 def _run_ids(value: Any) -> set[str]:
+    """Every run id in the subtree, at any depth.
+
+    Recursive, not one level: ``subject_index`` and the tombstone entries nest
+    the fields, and a run id that never enters the replacement table survives
+    normalization and is then reported as a product difference it has nothing
+    to do with.
+    """
     found: set[str] = set()
     if isinstance(value, dict):
-        for field in _RUN_ID_FIELDS:
-            raw = value.get(field)
-            if isinstance(raw, str) and raw:
-                found.add(raw)
+        for key, item in value.items():
+            if key in _RUN_ID_FIELDS and isinstance(item, str) and item:
+                found.add(item)
+            else:
+                found.update(_run_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_run_ids(item))
     return found
 
 
