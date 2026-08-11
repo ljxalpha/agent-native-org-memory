@@ -1744,9 +1744,30 @@ MVP 强校验字段为 `schema_version`、`node_id`、`role`、`status`、
 `redaction_incidents.blocked_reports` 与 `redaction_incidents.scanner_hits`。
 `config_revision`、`last_report_at`、`last_pull_at`、`memory_count`、
 `redaction_pattern_version` 是有真实来源时写入的可选诊断字段。
+
+#### 8.7.1 运维身份字段
+
 `adapter`、`install_id`、`code_version`、`host`、`build_id`、
-`config_source_master_sha`、`started_at` 保留为后续运维增强字段，不作为当前
-MVP health schema 的必填项。
+`config_source_master_sha`、`started_at` 为运维身份字段。它们由 `build_health()` 的
+七个同名 keyword-only 可选参数写入：**未传入的字段不会出现在输出中**，因此不传任何运维
+身份参数时 `.health.json` 的内容与扩展前逐字节一致（向后兼容既有安装）。传入时必须是
+非空字符串——空串抛 `ValueError`、非 `str` 抛 `TypeError`。
+
+`build_health()` 是纯函数：它**不读取主机名、环境变量或任何文件**。运维身份的采集是独立
+职责（见 § 8.7.2），这样健康快照的构造在测试与回放中完全可确定。
+
+| 字段 | 语义 |
+|---|---|
+| `adapter` | 该叶子所用 adapter 配置的 `name` |
+| `install_id` | 安装时生成并持久化的安装实例标识 |
+| `code_version` | 运行中的 `memory_net` 包版本 |
+| `host` | 运行主机名 |
+| `build_id` | 安装所用代码的 commit sha（不可得时回落 `code_version`） |
+| `config_source_master_sha` | 物化该配置代次时的 master 快照 sha |
+| `started_at` | 进程/守护启动时刻（由调用方注入） |
+
+`HEALTH_SCHEMA_VERSION` 保持 `memory-net/health/v1` 不变：这些字段只增不必填，
+既有安装的 `bootstrap_state.json` 协议版本校验不受影响。
 
 ### 8.8 `platform.yaml`（平台元信息，兼容替换）
 

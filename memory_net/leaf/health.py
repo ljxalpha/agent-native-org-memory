@@ -5,9 +5,36 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+#: Operational identity keys written by :func:`build_health` when supplied.
+#: Order is the documented order in mvp_tech_design.md § 8.7.1.
+OPS_IDENTITY_FIELDS: tuple[str, ...] = (
+    "adapter",
+    "install_id",
+    "code_version",
+    "host",
+    "build_id",
+    "config_source_master_sha",
+    "started_at",
+)
+
 
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _checked_ops_field(name: str, value: str | None) -> str | None:
+    """Validate an optional operational identity value.
+
+    Returns ``None`` (meaning "do not write this key") when the caller omitted
+    the field. A supplied value must be a non-empty ``str``.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be str")
+    if not value:
+        raise ValueError(f"{name} must not be empty")
+    return value
 
 
 def build_health(
@@ -24,7 +51,36 @@ def build_health(
     extra: dict[str, Any] | None = None,
     published: bool = True,
     published_at: str | None = None,
+    adapter: str | None = None,
+    install_id: str | None = None,
+    code_version: str | None = None,
+    host: str | None = None,
+    build_id: str | None = None,
+    config_source_master_sha: str | None = None,
+    started_at: str | None = None,
 ) -> dict[str, Any]:
+    """Build a ``.health.json`` payload.
+
+    This is a pure function over its arguments: it never reads the hostname,
+    the environment or the filesystem. Operational identity collection is the
+    responsibility of :mod:`memory_net.leaf.identity`.
+
+    The seven operational identity parameters (see mvp_tech_design.md § 8.7.1)
+    are optional; an omitted one is not written at all, so callers that pass
+    none of them get exactly the pre-existing payload.
+    """
+    ops_identity = {
+        name: _checked_ops_field(name, value)
+        for name, value in (
+            ("adapter", adapter),
+            ("install_id", install_id),
+            ("code_version", code_version),
+            ("host", host),
+            ("build_id", build_id),
+            ("config_source_master_sha", config_source_master_sha),
+            ("started_at", started_at),
+        )
+    }
     now = utc_now()
     incidents: dict[str, Any] = {
         "blocked_reports": 0,
@@ -57,6 +113,10 @@ def build_health(
         health["last_pull_at"] = last_pull_at
     if redaction_pattern_version is not None:
         health["redaction_pattern_version"] = redaction_pattern_version
+    for name in OPS_IDENTITY_FIELDS:
+        value = ops_identity[name]
+        if value is not None:
+            health[name] = value
     if extra:
         health.update(extra)
     return health
