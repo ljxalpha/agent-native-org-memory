@@ -301,6 +301,10 @@ class DistillationPipeline:
             vectors,
             eps=self.dbscan_eps,
             min_samples=self.dbscan_min_samples,
+            # Taken from the embedder that produced these very vectors, rather
+            # than resolved a second time. Two lookups of the same policy can
+            # disagree; reading it off the producer cannot (§5.5.7).
+            policy=self.embedder.policy,
         )
         grouped: dict[int, list[dict[str, Any]]] = {}
         for label, record in zip(labels, records, strict=True):

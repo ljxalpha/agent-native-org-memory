@@ -1122,6 +1122,24 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 未传 policy 的兼容路径保留 `MEMORY_NET_USE_FASTEMBED` 作为**开发便利开关**并标注 deprecated，
 使这一步可以独立合并。
 
+**接线方式：`cluster_vectors()` 的 policy 取自"产出这批向量的那个 embedder"**
+（`pipeline.py` 传 `policy=self.embedder.policy`），而不是再查一次 profile。
+"注入两次"仍然可能两处不一致；"从生产者身上读回来"在结构上不可能不一致。
+
+**两个前置检查的时机（这是本节最容易写错的地方）**：
+
+`main()` 的既有顺序是 `_freeze_master_snapshot()`（内含 `fetch` + `rev-parse origin/master`）
+→ 从冻结 sha 读 profile。也就是说 **profile 在 fetch 之后才可得**，
+因此"探针必须先于任何 fetch"这个说法**在当前调用图下不可能成立**。真正成立的是两条：
+
+| 检查 | 位置 | 覆盖什么 | 为什么只能在这 |
+|---|---|---|---|
+| `_preflight(args)` | `main()` 最开头，**fetch 之前** | 仅**不依赖 profile** 的失败：`--provider deepseek` 时 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` 非空、`openai` 可 import | 这些只看命令行就能判，所以可以真正前置 |
+| `EmbeddingPolicy.probe()` | **解析出 profile 之后、任何叶子分支读取与任何 LLM 调用之前** | embedding 后端能否真的加载 | 后端名写在 profile 里，而 profile 来自冻结快照，快照要 fetch 之后才有 |
+
+写死的判据：**LLM 调用与叶子读取一定在 probe 之后**；master fetch 一定在 preflight 之后。
+`_preflight` 按 `--provider` 而非解析后的 provider 名判断，理由同上：解析要 profile。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区

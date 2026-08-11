@@ -15,6 +15,14 @@ import yaml  # type: ignore[import-untyped]
 
 from memory_net import __version__
 from memory_net.distiller.categories import canonical_category
+from memory_net.distiller.clustering.embedder import FastEmbedder
+from memory_net.distiller.clustering.policy import (
+    DEFAULT_MODEL_NAME as DEFAULT_EMBEDDING_MODEL,
+)
+from memory_net.distiller.clustering.policy import (
+    TEST_CHEAP,
+    EmbeddingPolicy,
+)
 from memory_net.distiller.golden_eval import evaluate_golden_fixture
 from memory_net.distiller.llm.anthropic_sdk import (
     DEFAULT_ANTHROPIC_MODEL,
@@ -25,10 +33,12 @@ from memory_net.distiller.llm.budgeted import BudgetedProvider
 from memory_net.distiller.llm.hermes_tool import HermesToolProvider
 from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import (
-    DEFAULT_MODEL as DEFAULT_DEEPSEEK_MODEL,
+    API_KEY_ENV,
+    BASE_URL_ENV,
+    OpenAICompatProvider,
 )
 from memory_net.distiller.llm.openai_compat import (
-    OpenAICompatProvider,
+    DEFAULT_MODEL as DEFAULT_DEEPSEEK_MODEL,
 )
 from memory_net.distiller.llm.recording import (
     BundleRecorder,
@@ -112,6 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
+        # Before the fetch, because these need no profile and every one of them
+        # is a reason the run cannot possibly succeed.
+        _preflight(args)
         snapshot_sha = _freeze_master_snapshot(args.repo)
         _setup_runtime(args, snapshot_sha=snapshot_sha)
         _validate_bootstrap_state_from_repo(args.repo, snapshot_sha)
@@ -119,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
         profile_text = _read_profile_text(args.repo, snapshot_sha, profile=profile.path)
         distill_config = _parse_profile(profile_text, profile.path)
         _validated_profile(distill_config, profile.path)
+        embedding = _embedding_policy(distill_config)
+        # After the profile (which is where the backend is named) and before
+        # any leaf branch is read or any model is called. A backend that cannot
+        # load is fatal, and discovering it later means the run has already
+        # done the expensive, and possibly billed, part for nothing.
+        embedding.probe()
         provider_name = _provider_name(args, distill_config)
         fallback_name = _fallback_provider_name(args, distill_config)
         # One assembly, one freeze, before any consumer exists (§5.5.4). The
@@ -149,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
             context=context,
             provider=provider,
             fallback_provider=fallback_provider,
+            # The clusterer reads its policy back off this embedder, so the
+            # vectors and the grouping cannot end up on different backends.
+            embedder=FastEmbedder(policy=embedding),
             system_prompt_path=_resolve_prompt(
                 args.repo,
                 _prompt_path(
@@ -713,6 +735,56 @@ def _selected_profile(args: argparse.Namespace) -> SelectedProfile:
     except ValueError as exc:
         raise SystemExit(f"profile path must stay inside the repo: {raw!r}") from exc
     return SelectedProfile(path=safe.as_posix(), explicit=True)
+
+
+def _embedding_policy(config: dict[str, Any]) -> EmbeddingPolicy:
+    """The run's one embedding decision, taken from the profile (§5.5.7).
+
+    Absent keys keep the pre-policy default -- the test stand-in -- because a
+    profile that says nothing about embeddings is a development profile, and a
+    production one cannot say nothing: the schema refuses it.
+    """
+    clustering = config.get("clustering")
+    clustering = clustering if isinstance(clustering, dict) else {}
+    backend = clustering.get("embedding_backend")
+    model_name = clustering.get("embedding_model")
+    try:
+        return EmbeddingPolicy.of(
+            str(backend) if backend else TEST_CHEAP,
+            str(model_name) if model_name else DEFAULT_EMBEDDING_MODEL,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"invalid clustering configuration: {exc}") from exc
+
+
+def _preflight(args: argparse.Namespace) -> None:
+    """Checks that need no profile, run before anything is fetched.
+
+    Deliberately the only work placed this early. Everything else -- the
+    embedding probe included -- depends on the profile, and the profile is read
+    out of the frozen snapshot, which does not exist until the fetch has
+    happened. So this covers exactly the failures that are knowable from the
+    command line alone, and the profile-dependent ones fail immediately after
+    the profile is parsed instead.
+
+    Scoped to ``--provider deepseek`` rather than the resolved provider name for
+    the same reason: resolving that requires the profile.
+    """
+    if getattr(args, "provider", None) != "deepseek":
+        return
+    missing = [name for name in (API_KEY_ENV, BASE_URL_ENV) if not os.environ.get(name)]
+    if missing:
+        raise SystemExit(
+            "production backend selected but its credentials are absent: "
+            + ", ".join(missing)
+        )
+    try:
+        import openai  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "production backend selected but the 'openai' package is missing; "
+            "install the 'llm' extra"
+        ) from exc
 
 
 def _read_profile_text(

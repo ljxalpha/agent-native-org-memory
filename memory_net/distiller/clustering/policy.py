@@ -52,6 +52,24 @@ class EmbeddingPolicy:
         if self.backend == FASTEMBED and not self.model_name:
             raise ValueError("fastembed requires a model name")
 
+    @classmethod
+    def of(cls, backend: str, model_name: str) -> EmbeddingPolicy:
+        """Build from plain strings, as a parsed profile supplies them.
+
+        The narrowing lives here rather than at each call site so a profile
+        value never has to be cast past the type checker, which is exactly where
+        an unchecked backend name would slip through.
+        """
+        if backend not in EMBEDDING_BACKENDS:
+            raise ValueError(
+                f"embedding backend must be one of {EMBEDDING_BACKENDS}, "
+                f"got {backend!r}"
+            )
+        narrowed: Literal["fastembed", "test-cheap"] = (
+            FASTEMBED if backend == FASTEMBED else TEST_CHEAP
+        )
+        return cls(backend=narrowed, model_name=model_name)
+
     @property
     def test_only(self) -> bool:
         """Whether this run's vectors are the stand-in rather than real ones."""
