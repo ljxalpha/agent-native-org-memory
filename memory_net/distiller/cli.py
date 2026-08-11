@@ -30,6 +30,7 @@ from memory_net.distiller.llm.base import LLMProvider
 from memory_net.distiller.llm.budgeted import BudgetedProvider
 from memory_net.distiller.llm.hermes_tool import HermesToolProvider
 from memory_net.distiller.llm.ledger import AttemptLedger
+from memory_net.distiller.llm.ledgered import LedgeredProvider
 from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import (
     API_KEY_ENV,
@@ -597,7 +598,19 @@ def _base_provider(
         # the one lane where a real request is billed (§5.5.14).
         return OpenAICompatProvider(model=model, budget=budget, ledger=AttemptLedger())
     if provider_name == "anthropic":
-        return _budgeted(AnthropicSDKProvider(model=model), budget)
+        # Ledgered as well as budgeted. A run budget lives and dies with one
+        # process, so without the ledger this billable lane has no ceiling
+        # across runs at all -- and a project-wide guarantee is only as
+        # strong as its weakest billable lane.
+        return _budgeted(
+            LedgeredProvider(
+                AnthropicSDKProvider(model=model),
+                ledger=AttemptLedger(),
+                provider="anthropic",
+                model=model,
+            ),
+            budget,
+        )
     if provider_name == "hermes_tool":
         return _budgeted(HermesToolProvider(), budget)
     if provider_name == "mock":

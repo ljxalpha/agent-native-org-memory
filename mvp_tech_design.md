@@ -4410,3 +4410,14 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   `<root>/agentroot` 指向 `~/.hermes` 的符号链接会被 bwrap 跟随挂载其目标——
   两种情况下 manifest 打印出来仍然完全正确，这正是它危险的地方。
 - Change time: 2026-08-11
+
+## Change Record - 2026-08-11 计费车道统一接入 attempt ledger
+
+- Change summary: 新增 `memory_net/distiller/llm/ledgered.py::LedgeredProvider`，
+  在 `cli.py` 的 provider 工厂里给 `anthropic` 车道套上项目级 attempt ledger
+  （`deepseek` 仍自行预留，因为它要与自身重试循环交错）。调用前预留、调用后结算，
+  异常路径结算为 `failed` 而非留在 `reserved`。
+- Change reason: run budget 随进程生灭，N 次顺序运行就是 N 份预算；ledger 是唯一跨进程、
+  跨运行存活的天花板。此前 `anthropic` 只有 run budget，即这条计费车道在跨运行维度上
+  **完全没有上限**，而"项目级 50 次上限"的强度等于其最弱的那条计费车道。
+- Change time: 2026-08-11
