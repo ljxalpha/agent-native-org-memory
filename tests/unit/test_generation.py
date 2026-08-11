@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from memory_net.shared.config import (
     canonical_generation_hash,
     materialize_generation,
@@ -303,3 +305,37 @@ def test_source_master_sha_marker_write_leaves_no_temporary_file(
     assert (generation / "config_source_master_sha").read_text(
         encoding="utf-8"
     ) == "c" * 40
+
+
+def test_a_failed_marker_refresh_leaves_the_previous_sha_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh must be all-or-nothing on a shared, reusable generation.
+
+    A direct write would truncate the marker before writing, so an interrupted
+    refresh would leave an empty or partial sha behind for whoever reads it next.
+    """
+    _config_tree(tmp_path)
+    generations = tmp_path / "generations"
+    generation = materialize_generation(
+        tmp_path,
+        generations,
+        adapter_name="claude-code",
+        source_master_sha="a" * 40,
+    )
+
+    def exploding_replace(self: Path, _target: object) -> Path:
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(Path, "replace", exploding_replace)
+    with pytest.raises(OSError, match="interrupted"):
+        materialize_generation(
+            tmp_path,
+            generations,
+            adapter_name="claude-code",
+            source_master_sha="b" * 40,
+        )
+
+    assert (generation / "config_source_master_sha").read_text(
+        encoding="utf-8"
+    ) == "a" * 40

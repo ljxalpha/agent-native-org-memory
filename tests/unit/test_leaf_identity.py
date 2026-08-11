@@ -175,7 +175,15 @@ HOSTNAME_SOURCES = {
     ("socket", "getfqdn"),
     ("os", "uname"),
 }
-HOSTNAME_ENV_VARS = {"HOSTNAME", "HOST", "COMPUTERNAME"}
+#: Bare ``HOST`` is deliberately absent: it is a common substring of unrelated
+#: configuration keys, and a tripwire that cries wolf gets deleted.
+HOSTNAME_ENV_VARS = {"HOSTNAME", "COMPUTERNAME"}
+#: Attribute names that yield a hostname when reached dynamically, e.g.
+#: ``getattr(platform, "node")()``.
+HOSTNAME_ATTRS = {attribute for _module, attribute in HOSTNAME_SOURCES}
+#: Reached without touching any of the APIs above: a subprocess, a dynamic
+#: import, or the file the kernel exposes the name in.
+HOSTNAME_LITERALS = {"hostname", "/etc/hostname", "/proc/sys/kernel/hostname"}
 
 
 class _HostnameReadFinder(ast.NodeVisitor):
@@ -212,16 +220,38 @@ class _HostnameReadFinder(ast.NodeVisitor):
             and isinstance(func.value, ast.Name)
             and (self.module_aliases.get(func.value.id), func.attr) in HOSTNAME_SOURCES
         )
-        if bare_alias or qualified:
+        if bare_alias or qualified or self._is_dynamic_read(node):
             self.hits.append(node.lineno)
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
-        # ``os.environ["HOSTNAME"]`` / ``os.getenv("HOSTNAME")`` read the same
-        # material without calling any of the APIs above.
-        if isinstance(node.value, str) and node.value in HOSTNAME_ENV_VARS:
+        # ``os.environ["HOSTNAME"]`` reads the same material without calling any
+        # of the APIs above; so does reading the file the kernel exposes it in.
+        if isinstance(node.value, str) and (
+            node.value in HOSTNAME_ENV_VARS or node.value in HOSTNAME_LITERALS
+        ):
             self.hits.append(node.lineno)
         self.generic_visit(node)
+
+    @staticmethod
+    def _is_dynamic_read(node: ast.Call) -> bool:
+        """Catch ``getattr(platform, "node")`` and ``import_module("socket")``.
+
+        Resolving the module or the attribute at runtime bypasses every static
+        name check above, so the guard has to look at the literal arguments.
+        """
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        literals = {
+            argument.value
+            for argument in node.args
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+        }
+        if name == "getattr":
+            return bool(literals & HOSTNAME_ATTRS)
+        if name in {"import_module", "__import__"}:
+            return bool(literals & {module for module, _ in HOSTNAME_SOURCES})
+        return False
 
 
 def test_the_hostname_is_read_in_exactly_one_module() -> None:
@@ -255,6 +285,10 @@ def test_the_hostname_is_read_in_exactly_one_module() -> None:
         "import os\nos.uname().nodename\n",
         'import os\nos.environ["HOSTNAME"]\n',
         'import os\nos.getenv("COMPUTERNAME")\n',
+        'import platform\ngetattr(platform, "node")()\n',
+        'from importlib import import_module\nimport_module("socket").gethostname()\n',
+        'import subprocess\nsubprocess.run(["hostname"])\n',
+        'from pathlib import Path\nPath("/etc/hostname").read_text()\n',
     ],
 )
 def test_the_hostname_guard_catches_every_equivalent_read(source: str) -> None:
@@ -263,6 +297,22 @@ def test_the_hostname_guard_catches_every_equivalent_read(source: str) -> None:
     finder.visit(ast.parse(source))
 
     assert finder.hits, source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'CONFIG = {"host": "example.invalid"}\n',
+        'os.environ.get("OPENAI_BASE_URL")\n',
+        "node = tree.body[0]\nnode.lineno\n",
+    ],
+)
+def test_the_hostname_guard_does_not_cry_wolf(source: str) -> None:
+    """A tripwire that fires on unrelated code gets deleted, so it must not."""
+    finder = _HostnameReadFinder()
+    finder.visit(ast.parse(source))
+
+    assert finder.hits == [], source
 
 
 def _layout(
