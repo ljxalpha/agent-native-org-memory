@@ -37,6 +37,11 @@ from memory_net.distiller.llm.recording import (
 )
 from memory_net.distiller.orchestrator import DistillOrchestrator
 from memory_net.distiller.pipeline import DistillationPipeline
+from memory_net.distiller.profile import (
+    ProfileError,
+    ProfileProvenance,
+    validate_profile,
+)
 from memory_net.distiller.runctx import (
     RunBudget,
     RunContextBuilder,
@@ -111,7 +116,9 @@ def main(argv: list[str] | None = None) -> int:
         _setup_runtime(args, snapshot_sha=snapshot_sha)
         _validate_bootstrap_state_from_repo(args.repo, snapshot_sha)
         profile = _selected_profile(args)
-        distill_config = _distill_config(args.repo, snapshot_sha, profile=profile.path)
+        profile_text = _read_profile_text(args.repo, snapshot_sha, profile=profile.path)
+        distill_config = _parse_profile(profile_text, profile.path)
+        _validated_profile(distill_config, profile.path)
         provider_name = _provider_name(args, distill_config)
         fallback_name = _fallback_provider_name(args, distill_config)
         # One assembly, one freeze, before any consumer exists (§5.5.4). The
@@ -121,6 +128,18 @@ def main(argv: list[str] | None = None) -> int:
             RunContextBuilder()
             .set_identity(RunIdentity.system())
             .set_budget(_run_budget(distill_config))
+            # None when no profile file was found at all, which keeps the run
+            # artifacts byte-identical to what they were before provenance
+            # existed rather than recording a hash of nothing.
+            .set_profile(
+                None
+                if profile_text is None
+                else ProfileProvenance.of(
+                    profile_path=profile.path,
+                    raw=profile_text,
+                    master_snapshot_sha=snapshot_sha,
+                )
+            )
             .freeze()
         )
         provider, fallback_provider = _build_providers(
@@ -696,20 +715,28 @@ def _selected_profile(args: argparse.Namespace) -> SelectedProfile:
     return SelectedProfile(path=safe.as_posix(), explicit=True)
 
 
-def _distill_config(
+def _read_profile_text(
     repo_path: Path,
     snapshot_sha: str | None = None,
     *,
     profile: str = DEFAULT_PROFILE_PATH,
-) -> dict[str, Any]:
-    """Load the profile out of the frozen snapshot (§5.5.5)."""
+) -> str | None:
+    """The profile's raw bytes from the frozen snapshot (§5.5.5).
+
+    Returns the text rather than the parsed mapping because the provenance hash
+    is taken over exactly these bytes: parsing discards comments, key order and
+    formatting, so hashing the mapping could not answer "which bytes ran".
+
+    ``None`` means the default profile is simply absent, which a brand-new repo
+    and any non-git working directory must both survive.
+    """
     explicit = profile != DEFAULT_PROFILE_PATH
     if snapshot_sha is not None and (repo_path / ".git").exists():
         repo = GitRepo(repo_path)
         spec = f"{snapshot_sha}:{profile}"
         result = repo.run("show", spec, check=False)
         if result.returncode == 0 and result.stdout.strip():
-            return _load_yaml_text(result.stdout, spec)
+            return str(result.stdout)
         if explicit:
             raise SystemExit(f"profile is not in the frozen snapshot: {spec}")
     if explicit:
@@ -717,7 +744,34 @@ def _distill_config(
         # request cannot be honoured as specified. Falling back to the default
         # would run something other than what was asked for.
         raise SystemExit(f"profile is not in the frozen snapshot: {profile}")
-    return _load_optional_yaml_mapping(repo_path / DEFAULT_PROFILE_PATH)
+    path = repo_path / DEFAULT_PROFILE_PATH
+    if not path.exists():
+        LOGGER.info("using default config; file not found: %s", path)
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+def _distill_config(
+    repo_path: Path,
+    snapshot_sha: str | None = None,
+    *,
+    profile: str = DEFAULT_PROFILE_PATH,
+) -> dict[str, Any]:
+    """The parsed profile; ``{}`` when the default one is absent."""
+    raw = _read_profile_text(repo_path, snapshot_sha, profile=profile)
+    return _parse_profile(raw, profile)
+
+
+def _parse_profile(raw: str | None, profile: str) -> dict[str, Any]:
+    return {} if raw is None else _load_yaml_text(raw, profile)
+
+
+def _validated_profile(config: dict[str, Any], profile: str) -> None:
+    """Stop the run on a profile that must not start one (§5.5.6)."""
+    try:
+        validate_profile(config)
+    except ProfileError as exc:
+        raise SystemExit(f"invalid profile {profile}: {exc}") from exc
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:

@@ -211,6 +211,42 @@ class DistillOrchestrator:
             ),
         )
 
+    def _snapshot_payload(self, *, run_id: str, snapshot_sha: str) -> str:
+        """The run's snapshot.json body, shared by the dry-run and live writers.
+
+        The two used to carry duplicated literals, which is how one of them
+        gains a field the other never does.
+        """
+        payload: dict[str, Any] = {
+            "leaf_refs": self.leaf_refs,
+            "master_snapshot_sha": snapshot_sha,
+            "run_id": run_id,
+        }
+        payload.update(self._profile_provenance())
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+    def _profile_provenance(self) -> dict[str, str]:
+        """Which profile bytes this run used, or nothing when none was injected.
+
+        Absent rather than null-valued: a run that predates profile provenance,
+        or one with no profile file at all, must produce the same artifact bytes
+        it always did rather than three keys describing nothing.
+
+        ``master_snapshot_sha`` is deliberately not taken from here -- the
+        provenance carries its own copy and the caller already has the run's,
+        and letting the profile's copy win would silently rename what that field
+        means depending on whether a profile was injected.
+        """
+        profile = self.context.profile if self.context is not None else None
+        if profile is None:
+            return {}
+        as_dict = getattr(profile, "as_dict", None)
+        if as_dict is None:  # pragma: no cover - defensive, see §5.5.6
+            return {}
+        fields = dict(as_dict())
+        fields.pop("master_snapshot_sha", None)
+        return fields
+
     def _assert_budget_settled(self) -> None:
         """Fail a *succeeding* run that leaked a budget reservation.
 
@@ -263,16 +299,7 @@ class DistillOrchestrator:
             publish_branch="dry_run",
         ).write(root / "metrics.json")
         (root / "snapshot.json").write_text(
-            json.dumps(
-                {
-                    "leaf_refs": self.leaf_refs,
-                    "master_snapshot_sha": snapshot_sha,
-                    "run_id": run_id,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            self._snapshot_payload(run_id=run_id, snapshot_sha=snapshot_sha),
             encoding="utf-8",
         )
 
@@ -310,16 +337,7 @@ class DistillOrchestrator:
         self._write_run_product_snapshot(run_id, output.products)
         self._write_clusters(run_id, output.cluster_assignments or [])
         (self.repo_path / "distill_runs" / run_id / "snapshot.json").write_text(
-            json.dumps(
-                {
-                    "leaf_refs": self.leaf_refs,
-                    "master_snapshot_sha": snapshot_sha,
-                    "run_id": run_id,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            self._snapshot_payload(run_id=run_id, snapshot_sha=snapshot_sha),
             encoding="utf-8",
         )
 
