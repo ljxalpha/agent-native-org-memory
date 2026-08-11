@@ -290,7 +290,7 @@ class FileSystemMdAdapter(MemoryAdapter):
                 if _is_hidden_path(path.relative_to(root.base_dir)):
                     continue
                 if any(
-                    fnmatch.fnmatch(rel, pat)
+                    _exclude_matches(rel, pat)
                     for pat in (*DEFAULT_EXCLUDES, *root.exclude)
                 ):
                     continue
@@ -386,6 +386,30 @@ def _remove_anchor_block(content: str, start: str, end: str) -> str:
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _exclude_matches(rel: str, pattern: str) -> bool:
+    """Match a base_dir-relative posix path against one exclude pattern.
+
+    ``include`` is evaluated by :meth:`pathlib.Path.glob`, where a leading ``**/``
+    means "zero or more path segments". ``fnmatch`` disagrees: it translates
+    ``**/`` into a form that has to consume a real separator, so ``**/draft/**``
+    matches ``a/draft/x.md`` but *not* the top-level ``draft/x.md``. Left as-is
+    the two sides drift, and the drift is unsafe in one direction only — a
+    top-level directory an adapter explicitly excluded would still be collected
+    and handed to the distiller.
+
+    So the zero-segment case is restored here rather than in each adapter YAML.
+    Spelling both ``draft/**`` and ``**/draft/**`` in a config would paper over
+    the same defect and the next adapter would reintroduce it.
+    """
+    if fnmatch.fnmatch(rel, pattern):
+        return True
+    while pattern.startswith("**/"):
+        pattern = pattern[3:]
+        if fnmatch.fnmatch(rel, pattern):
+            return True
+    return False
 
 
 def _is_hidden_path(path: Path) -> bool:

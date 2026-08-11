@@ -502,6 +502,19 @@ class MemoryAdapter(ABC):
 **约束**：
 - 多 root adapter 必须给每个 root 一个稳定 `alias` 与稳定 `base_dir`；`source_locator` 由 `alias:path_relative_to_base_dir` 组成，后续 `memory_id` 复用与 rename/move 判断都以它为准。修改 alias 或把 `base_dir` 指向另一棵逻辑目录，视为破坏兼容性的配置变更。
 - adapter YAML 禁止把 glob pattern 直接当 root。必须写成 `base_dir + include[] + exclude[]`，所有命中的文件路径都先相对 `base_dir` 规范化，再生成 `source_locator`。这样 `**/*.md`、单文件和多目录扫描都共享同一套稳定定位规则。
+- **`include[]` 与 `exclude[]` 的 `**` 必须是同一套语义**：都表示"零个或多个路径段"。
+  这条不是风格约定，而是安全约束——两侧语义不一致时，一条看起来生效的 exclude 会在
+  某些深度上静默失效，而失效方向是"多收"，即把本该留在 agent 私有侧的文件送进蒸馏输入。
+  实现上 include 走 `Path.glob`（`**/` 本就匹配零段），exclude 走 `fnmatch`，而 `fnmatch`
+  会把 `**/` 翻译成必须吃掉一个真实分隔符的形式，因此 `**/draft/**` 匹配 `a/draft/x.md`
+  却**匹配不到受管根顶层的** `draft/x.md`。匹配器必须显式补齐这个零段情形，禁止靠在 YAML 里
+  同时写 `draft/**` 和 `**/draft/**` 来绕过——双写只是把缺陷藏进配置，下一份 adapter YAML
+  会原样再踩一次。回归测试对每条目录型 exclude 都必须同时覆盖**顶层与嵌套**两个位置。
+- exclude 是**纵深防御，不是第一道闸**。文件在到达 exclude 之前已被两层过滤：`include[]`
+  的 glob，以及 `file_pattern`（默认 `*.md`）对文件名的匹配；隐藏路径（任一路径段以 `.` 开头）
+  也在 exclude 之前被跳过。因此对非 `*.md` 后缀（如 `*.sqlite` / `*.lock`）或隐藏文件（如 `.env`）
+  写 exclude 只有声明价值，运行期不会被执行到——**文档与测试不得把这类条目说成"被 exclude 拒绝"**，
+  否则会造出一条无人验证却被当作有效的防线。
 - `inject_team_hint` / `remove_team_hint` 是 § 6.4 hint 状态机的唯一合法入口，实现必须幂等（重复调用同 `hint_spec` 返回相同结果），并保证"只动 anchor 块内，不碰 anchor 外的用户内容"。
 - `iter_entries_with_hash` 的粒度默认为**整文件**（MVP 可用）；对 Hermes `MEMORY.md` / Claude Code 单文件多段记忆这类"append-only 笔记"场景，adapter YAML 可声明 `split_by: heading_h2` / `marker: "^---$"` 让 adapter 按二级标题或自定义分隔符切成多个 `MemoryEntry`，每个 entry 独立计算 `revision_hash`，避免一段局部改动翻新整文件。`split_by` 的具体语义与兼容性保证见 § 13.1。
 
@@ -1866,6 +1879,26 @@ collect_ops_identity(
 不进 health schema 的校验面）。
 
 `ops_identity` 为 `None` 时不写任何相关键，`.health.json` 与扩展前逐字节一致。
+
+#### 8.7.4 CLI 接线与 `memory-net-leaf status`
+
+`memory-net-leaf` 写 health 时按安装布局采集运维身份：`<MEMORY_NET_HOME>/state`、
+`<MEMORY_NET_HOME>/local.yaml`、`<MEMORY_NET_HOME>/config-current`，adapter YAML 取
+`--adapter`（若该子命令有该参数），否则按 `local.yaml` 的 `agent` 落到
+`config-current/adapters/<agent>.yaml`。`started_at` 取**进程启动时刻**（进程内只取一次），
+因此同一个 daemon 进程写出的所有 health 快照 `started_at` 相同。
+
+采集是**尽力而为**：安装布局不完整（例如未经 `install_leaf.sh` 的开发运行）时记一条
+warning 并照旧写出不含运维身份的 health，而不是让 `report` / `daemon` 失败。
+真正的把关点在 `status`。
+
+`status` 不再是 `cat`：它执行「读 → `validate_health(require_ops_identity=True)` → 打印」。
+
+- 校验失败 → 退出码 `1`，stderr 打印缺失/非法的具体字段名；
+- health 文件不存在或 JSON 损坏 → 退出码 `1` 加一行明确错误，而不是 traceback；
+- `--lenient` 显式降级为宽松档，供尚未重装的既有安装过渡使用；**默认严格**。
+
+这样"安装完成后 `status` 为零"才真正等价于"这个叶子可被运维定位"。
 
 ### 8.8 `platform.yaml`（平台元信息，兼容替换）
 

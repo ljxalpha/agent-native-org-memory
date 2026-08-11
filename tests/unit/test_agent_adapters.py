@@ -8,9 +8,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTERS_DIR = REPO_ROOT / "config" / "adapters"
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "adapters"
 
+CALIBRATION_MODULE = Path(__file__).with_name("test_adapter_calibration.py")
+
 # Experimental adapters whose paths are pinned to a real on-disk layout by
 # tests/unit/test_adapter_calibration.py rather than by a layout fixture dir.
-# Adding a name here is a claim that recorded provenance exists for it.
+# An entry here is not a free pass: test_calibration_allowlist_is_backed_by_tests
+# requires the name to be exercised by that module, so adding a name without
+# recording the evidence fails instead of silently widening the exemption.
 CALIBRATED_WITHOUT_FIXTURE = frozenset({"codex", "hermes"})
 
 
@@ -118,3 +122,59 @@ def test_uncalibrated_experimental_adapters_declare_themselves_unverified() -> N
 
     # The rule is only meaningful while at least one such adapter exists.
     assert "opencode" in checked
+
+
+def test_calibration_allowlist_is_backed_by_tests() -> None:
+    """Every allowlist entry must be a checkable claim, not a written promise.
+
+    Without this, the exemption above is a backdoor: the cheapest way to make the
+    banner rule pass for a brand-new adapter is to add its name to
+    CALIBRATED_WITHOUT_FIXTURE, and nothing would notice that no calibration
+    evidence was ever recorded. Tie each name to a config that exists and to a
+    calibration test that actually names it.
+    """
+    calibration = CALIBRATION_MODULE.read_text(encoding="utf-8")
+    for name in sorted(CALIBRATED_WITHOUT_FIXTURE):
+        assert (ADAPTERS_DIR / f"{name}.yaml").is_file(), (
+            f"{name}: allowlisted but config/adapters/{name}.yaml does not exist; "
+            "a stale exemption silently disables the UNVERIFIED banner rule"
+        )
+        assert f'"{name}"' in calibration, (
+            f"{name}: allowlisted as calibrated-without-fixture, but "
+            f"{CALIBRATION_MODULE.name} never exercises it — either record the "
+            "calibration there or ship a layout fixture"
+        )
+
+
+@pytest.mark.parametrize("depth", ["top-level", "nested"])
+def test_directory_excludes_apply_at_every_depth(
+    depth: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``**/<dir>/**`` exclude must hold at the managed root itself, too.
+
+    ``include`` is matched with :meth:`Path.glob`, where ``**/`` means "zero or
+    more segments", while ``exclude`` is matched with ``fnmatch``, where ``**/``
+    demands a real separator. Under the raw semantics ``**/draft/**`` dropped
+    ``auth/draft/wip.md`` but let ``draft/wip.md`` straight through into the
+    distiller input — an exclusion that looks enforced and is not. Both depths
+    are pinned so the asymmetry cannot come back.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    agent_root = tmp_path / "agent"
+    shared = agent_root / "memory" / "shared"
+    parent = shared if depth == "top-level" else shared / "auth"
+    (parent / "draft").mkdir(parents=True)
+    (parent / "keep.md").write_text("team-facing note\n", encoding="utf-8")
+    (parent / "draft" / "wip.md").write_text("not ready\n", encoding="utf-8")
+
+    adapter = FileSystemMdAdapter.from_yaml(
+        ADAPTERS_DIR / "claude-code.yaml",
+        agent_root=agent_root,
+    )
+    records = list(adapter.list_shared())
+
+    expected = "keep.md" if depth == "top-level" else "auth/keep.md"
+    assert [r.source_locator for r in records] == [f"claude-project-shared:{expected}"]
+    assert all("not ready" not in r.content for r in records)
