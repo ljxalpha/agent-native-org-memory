@@ -67,7 +67,16 @@ def _load_builder() -> ModuleType:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # No bytecode beside a fixture. A `.pyc` embeds the absolute path of the
+    # source it was compiled from, so importing this file writes one machine's
+    # username into the fixture tree -- gitignored, but present in any archive
+    # or support bundle taken from a working copy.
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
