@@ -98,6 +98,34 @@ def test_present_keys_are_serialized(tmp_path: Path, ruleset: Ruleset) -> None:
     assert payload["redaction_observations"] == {"abs_home_path": {"prose": 1}}
 
 
+def test_the_enforce_counters_are_optional_too(tmp_path: Path) -> None:
+    """A run that was never refused says nothing about refusals."""
+    written = tmp_path / "metrics.json"
+    DistillMetrics(run_id="r", input_records=0, products=0).write(written)
+    payload = json.loads(written.read_text(encoding="utf-8"))
+
+    assert "redaction_failures" not in payload
+    assert "redaction_rule_counts" not in payload
+
+
+def test_a_refused_run_reports_rule_names_and_counts(tmp_path: Path) -> None:
+    written = tmp_path / "metrics.json"
+    DistillMetrics(
+        run_id="r",
+        input_records=0,
+        products=0,
+        status="failed",
+        redaction_failures=2,
+        redaction_rule_counts={"abs_home_path": 2},
+    ).write(written)
+
+    payload = json.loads(written.read_text(encoding="utf-8"))
+
+    assert payload["redaction_failures"] == 2
+    assert payload["redaction_rule_counts"] == {"abs_home_path": 2}
+    assert HOME_PATH not in json.dumps(payload)
+
+
 def test_the_two_sinks_agree_on_the_mode(
     tmp_path: Path, ruleset: Ruleset, monkeypatch: Any
 ) -> None:

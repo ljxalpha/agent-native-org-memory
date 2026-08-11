@@ -73,6 +73,11 @@ class DistillMetrics:
     output_scanner_mode: str | None = None
     output_scanner_ruleset_version: str | None = None
     redaction_observations: dict[str, dict[str, int]] | None = None
+    # The enforce-mode counterpart: how many hits refused this run, and which
+    # rules produced them. Written on the failure path, where "which rules
+    # fired" is the only thing that can be said without quoting the content.
+    redaction_failures: int | None = None
+    redaction_rule_counts: dict[str, int] | None = None
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +103,8 @@ OPTIONAL_KEYS = (
     "output_scanner_mode",
     "output_scanner_ruleset_version",
     "redaction_observations",
+    "redaction_failures",
+    "redaction_rule_counts",
 )
 """Keys written only when they apply. See ``DistillMetrics.as_dict``."""
 
