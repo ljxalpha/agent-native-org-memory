@@ -2051,6 +2051,11 @@ collect_ops_identity(
 配置同步后消失，严格档 `status` 从此恒为失败。该链路由一条驱动**真实**
 `materialize_generation()` 的守护侧回归固定，而不是靠桩断言参数。
 
+反过来，`config_sync_task` 还有一条**不从 master 快照物化**的回落分支（repo 不是 git 仓的
+开发/夹具路径，此时取不到 `origin/master`）：它从工作区物化，**刻意不写该 marker**。
+把上一次的 master sha 抄进这份代次会给一份并非来自该 commit 的配置贴上伪造的 provenance，
+而这个字段的全部价值恰恰是"这份配置来自哪个 master commit"。宁可缺，不可假。
+
 #### 8.7.3 上报 / 守护侧接线
 
 `report()` 与 `daemon.run_foreground()` 都接受可选的 `ops_identity: dict[str, str] | None`
