@@ -937,12 +937,16 @@ profile 没写 `budget_usd`（即 `RunBudget` 为 `None`）时不包，保持注
 
 | profile 键 | `RunBudget` 字段 | 缺省 |
 |---|---|---|
-| `llm.budget_usd` | `max_usd` | 无 → **整个 `RunBudget` 不构造** |
+| `llm.budget_usd` | `max_usd` | 无 → `None`（该维度不设限） |
 | `llm.max_attempts` | `max_attempts` | 无 → `None`（该维度不设限） |
 | `llm.max_wall_clock_s` | `max_wall_clock_s` | 无 → `None`（该维度不设限） |
 
 只有成本上界而没有另外两个，等于放任"无限重试"与"卡在慢端点上"两种失控；
 这里**不给静默默认值**，否则会去封顶没人要求封顶的 run。
+
+**三者只要配了任意一个就构造 `RunBudget`**，三个全缺才返回 `None`。
+只按 `budget_usd` 判断会把 profile 确实配了的 attempt / wall-clock 上界**悄悄丢掉**，
+让所有付费 lane 退回"完全没有调用前闸门"的状态——正是这两个上界要防的那件事。
 
 #### 5.5.3 消费方的注入契约与"禁止自读时钟"
 

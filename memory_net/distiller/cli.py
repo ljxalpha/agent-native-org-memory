@@ -392,18 +392,24 @@ def _run_budget(config: dict[str, Any]) -> RunBudget | None:
     new one that nobody asked for.
     """
     max_usd = _cost_budget_usd(config)
-    if max_usd is None:
+    max_attempts = _budget_limit_int(config, "max_attempts")
+    max_wall_clock_s = _budget_limit_float(config, "max_wall_clock_s")
+    # Any one of the three is enough to build the budget. Keying only off the
+    # cost ceiling would silently discard an attempt or wall-clock limit the
+    # profile did configure, leaving every paid lane with no pre-call guard at
+    # all -- the exact failure the limits were written to prevent.
+    if max_usd is None and max_attempts is None and max_wall_clock_s is None:
         return None
     return RunBudget(
         input_per_mtok_usd=_input_cost_per_mtok_usd(config),
         output_per_mtok_usd=_output_cost_per_mtok_usd(config),
+        # Each dimension stays None unless the profile names it. A cost ceiling
+        # alone leaves a run that retries forever, or one that wedges against a
+        # slow endpoint, with nothing to stop it; and a silent default here
+        # would cap runs nobody asked to cap.
         max_usd=max_usd,
-        # Both stay None unless the profile names them. A cost ceiling alone
-        # leaves a run that retries forever, or one that wedges against a slow
-        # endpoint, with nothing to stop it: they are separate dimensions and
-        # each has to be configured to exist.
-        max_attempts=_budget_limit_int(config, "max_attempts"),
-        max_wall_clock_s=_budget_limit_float(config, "max_wall_clock_s"),
+        max_attempts=max_attempts,
+        max_wall_clock_s=max_wall_clock_s,
     )
 
 

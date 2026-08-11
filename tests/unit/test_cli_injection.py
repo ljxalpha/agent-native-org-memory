@@ -188,6 +188,24 @@ def test_the_ceilings_also_read_from_the_cost_budget_section() -> None:
     assert budget.max_wall_clock_s == pytest.approx(5.0)
 
 
+@pytest.mark.parametrize(
+    "limits",
+    [
+        pytest.param({"max_attempts": 3}, id="attempts-only"),
+        pytest.param({"max_wall_clock_s": 30}, id="wall-clock-only"),
+    ],
+)
+def test_a_non_cost_ceiling_alone_still_builds_a_budget(
+    limits: dict[str, Any],
+) -> None:
+    """Keying only off budget_usd would silently discard a limit the profile
+    did configure, leaving every paid lane with no pre-call guard at all."""
+    budget = cli_module._run_budget({"llm": dict(limits)})
+
+    assert budget is not None
+    assert budget.max_usd is None
+
+
 def test_unnamed_ceilings_stay_unset_rather_than_defaulting() -> None:
     """A silent default here would cap runs nobody asked to cap."""
     budget = cli_module._run_budget({"llm": {"budget_usd": 1.0}})
