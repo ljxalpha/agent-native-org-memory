@@ -769,7 +769,10 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
             index += 1
             continue
         try:
-            value, end = decoder.raw_decode(text[index:])
+            # Decoded in place rather than from ``text[index:]``: slicing at
+            # every brace copies a suffix each time, so a brace-dense response
+            # costs O(n^2) in both time and memory.
+            value, end = decoder.raw_decode(text, index)
         except json.JSONDecodeError as exc:
             if first_error is None:
                 first_error = exc
@@ -779,7 +782,7 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
         # candidates. Scanning every brace would descend into the payload's own
         # nesting, and a product carrying a nested "products" key would then
         # look like a second, rival payload.
-        index += end
+        index = end
         if not isinstance(value, dict):
             continue
         candidates.append(value)
