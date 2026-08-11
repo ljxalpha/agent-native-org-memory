@@ -13,8 +13,7 @@
 </div>
 
 > **每个 agent 都在习得值得保留的东西——而你的组织对此一无所见。**
-> aomt 把散落的 agent 记忆，变成实时的运营情报：共性故障、潜在风险、最佳实践、重复
-> 造轮子，都自动浮现；而蒸馏出的经验，又回流给真正需要它的 agent。
+> aomt 把散落在各个 agent 里的记忆蒸馏成可共享的组织知识，再回灌给每一个 agent。
 
 你的公司里，正运行着一支不断壮大的 AI agent 队伍，而它们每一个都在**独自**学习。一个
 agent 花两小时调试换来的教训，永远到不了明天撞上同一堵墙的另一个 agent；三个团队各自
@@ -46,13 +45,19 @@ agent 花两小时调试换来的教训，永远到不了明天撞上同一堵�
 孤岛化的 agent 记忆，不是一个小小的低效问题。它是新的组织瓶颈——而且你每加一个 agent，
 它就更昂贵一分。
 
+完整的论述——向“人 + agent”单元的转变、为何手工维护的知识库无法替代它、以及飞轮效应的
+细节——都在 **[VISION.md](VISION.md)** 中。
+
 ---
 
-## 解法：一条回路，两种产出
+## 回路：蒸馏一次，回流所有
 
 <div align="center">
 <img src="docs/images/architecture.svg" alt="aomt 架构（目标形态）：任何会产生记忆的 agent 都可以成为一个叶子节点；它自动、脱敏、带来源引用地，经由一个带审核/发布关卡的共享 Git 仓库向上汇报到蒸馏根；蒸馏根用可插拔的 LLM 聚类并蒸馏；蒸馏出的团队知识按相关性排序回流给每个 agent；同一份蒸馏还产出组织级洞察——浮现共性问题、提前预警潜在风险、扩散最佳实践、暴露效率瓶颈；整个网络可扩展为团队→部门→组织的树状结构，且 agent 原生、基于 Git、由配置驱动可插拔。" width="960">
 </div>
+
+*（上图是**目标**形态。今天真正接通的部分，画在下面的 Mermaid 图里；那些图中的每一个
+方框，都能在代码里找到对应文件。）*
 
 aomt 汇聚你的 agent 本就在产生的工作记忆，用 LLM 将其蒸馏为**带来源引用、已做敏感信息
 脱敏的组织知识**。同一条回路，产出两样东西。
@@ -69,79 +74,279 @@ aomt 汇聚你的 agent 本就在产生的工作记忆，用 LLM 将其蒸馏为
 
 **面向每个 agent —— 让知识回流。**
 每个 agent（一个*叶子*）自动汇报其记忆中可共享的部分；*蒸馏根*将这些汇报聚类、精炼为团队
-知识，再按相关性排序回流到每个 agent 的本地记忆中。没有人写文档，没有人抄笔记。
-**蒸馏一次，回流所有。**
-
-> **架构目标：任何会产生记忆的 agent 都可以成为叶子** —— 编码、调研、客服、运维，不局限于
-> 编码 agent。当前 MVP 先用 CLI 编码 agent 跑通这条回路；随着各自的记忆载体可被接入，新的
-> 领域只需编写一份 adapter YAML 即可插入。架构还可扩展为一棵树：一个团队的根，本身可以是
-> 部门根的一个叶子，从而让组织的每一层都拥有属于它自身粒度的记忆。
-
-### 为什么是现在，以及为什么会复利
-
-agent 的执行已坍缩到分钟级；而知识在人与人之间的传递，仍需小时到天。你每多部署一个 agent，
-这道鸿沟就更宽一分——而它恰恰就是 aomt 要填平的鸿沟。填平它还会复利：更多使用 → 更丰富的
-agent 记忆 → 更优质的蒸馏知识 → 更聪明、更少需要人工干预的 agent → 更多使用。这是一个按
-复利计息的飞轮：越早转起来，领先优势就越难被追上。
-
-完整的论述——向“人 + agent”单元的转变、为何手工维护的知识库无法替代它、以及飞轮效应的
-细节——都在 **[VISION.md](VISION.md)** 中。
+知识，再回流到每个 agent 的本地记忆中。没有人写文档，没有人抄笔记。
 
 ---
 
-## 当前已交付的能力
+## 架构：已经实现的部分
 
-aomt 是一个**早期、可运行的 MVP**：设计已相当完备，实现正按里程碑逐步推进。当下已经在
-运行的部分：
+三条性质支撑起整个设计：**agent 原生**（从 agent 本就产生的记忆中收割）、**基于 Git**
+（溯源、历史、审核关卡与回滚都免费获得），以及**由配置驱动的可插拔**（汇报策略、蒸馏
+profile、产物格式、记忆后端与回流策略全部外置）。
 
-- 一条**基于 Git 的流水线**——叶子将各节点报告推送到 `leaf/<node-id>` 分支；distiller
-  通过一道审核/发布关卡将团队知识发布到 `master`；叶子再将其订阅回本地记忆。
-- 上行途中的**敏感信息脱敏**，以及每份蒸馏产物上的**来源溯源**。
-- **面向 CLI 编码 agent 的 adapter。** Claude Code 是经过测试的路径；Codex、Hermes、
-  OpenClaw、OpenCode 以 adapter YAML 形式随附。当前的 adapter 读取文件系统中的 Markdown
-  记忆，因此接入一个新的“文件型” agent 只需编写一份 **adapter YAML**，无需新增代码；而
-  非文件型的记忆载体仍需实现对应的 adapter。
-- 一个**可插拔的 LLM** 层（`LLMProvider`）：包含 Anthropic SDK provider、零 token 消耗的
-  `mock` provider（用于测试与通过 `--record` / `--replay` 调优 prompt），以及 Hermes-tool
-  桥接 provider。
+> 下面四张图与英文版**共用同一份 Mermaid 源**，以保证两个语言版本永不漂移。
 
-更宏大的愿景——非编码 agent、部门/组织级的根节点、以及一块实时的组织洞察看板——属于
-**路线图**，尚非已交付的产品。预期仍有粗糙之处。
+```mermaid
+flowchart TB
+  subgraph LEAF["Leaf node — one per person-and-agent pair"]
+    direction TB
+    A["agent memory on disk<br/>Markdown files"]
+    ADP["FileSystemMdAdapter<br/>config/adapters/*.yaml<br/>reads scope: shared roots only"]
+    RED["Redactor<br/>26 patterns + blocklist terms<br/>substitute, then re-scan for residue"]
+    SCN["leaf scanner<br/>audit / warn / block"]
+    OUT["memories/CATEGORY/SLUG-REV.md<br/>manifest.json · .health.json"]
+    A --> ADP --> RED --> SCN --> OUT
+  end
+
+  OUT -->|"git push HEAD:leaf/NODE-ID"| BR["shared repo<br/>branch leaf/NODE-ID"]
+
+  subgraph ROOT["Distillation root — memory-net-distiller run"]
+    direction TB
+    FZ["freeze origin/master into a snapshot sha<br/>profile, prompts and rules all read from it"]
+    LD["load every leaf branch<br/>schema + manifest/frontmatter consistency<br/>bad leaf quarantined, run continues"]
+    EM["embed: fastembed or the test stand-in<br/>DBSCAN over the vectors"]
+    DS["per cluster: budget scope → scan → call → parse → scan → render"]
+    GT["quality gate: parse / citation failures,<br/>scanner refusals, accounting identity"]
+    FZ --> LD --> EM --> DS --> GT
+  end
+
+  BR --> ROOT
+
+  GT -->|pass| REL["branch release/RUN_ID<br/>team/ · manifest.json · distill_runs/RUN_ID/"]
+  GT -->|fail| DEAD["failure metrics + health written<br/>nothing published, bundle staging aborted"]
+
+  REL --> MG["CI merge-gate<br/>re-derives schema / citation / evidence<br/>from the branch, not from the run's report"]
+  MG -->|human merges| MST["shared repo master<br/>team/ + manifest.json"]
+
+  MST --> SUB["memory-net-leaf subscribe<br/>verify content hash + schema,<br/>then atomically replace memory/team/"]
+  SUB --> IDX["agent's memory/team/ + INDEX.md"]
+  IDX -.->|"hint block in AGENTS.md / CLAUDE.md"| A
+```
+
+这张图刻意点明两件事：
+
+- **叶子从不读取 agent 的私有记忆。** 只有声明为 `scope: shared` 的根会被列入汇报范围；
+  `personal` 根（例如 Claude Code 的 `~/.claude/CLAUDE.md`）会被解析，但 `report` 从不
+  读它（`memory_net/shared/adapters/filesystem_md.py`）。私有记忆与共享知识的隔离是
+  **位置上的**——两个互不相交的目录；这里既没有 ACL 也没有加密，README 不应暗示有。
+- **回流是整目录替换。** `subscribe` 先在临时目录里构建新的 `team/`，再用 `os.replace`
+  原子换入，因此 agent 永远读不到写了一半的状态；目标目录里原有的内容会被整体替换
+  （`filesystem_md.write_team`）。
+
+### 一次蒸馏 run 的全过程
+
+这张图里的**顺序就是设计本身**。每一道闸都放在它现在的位置，因为往后挪一步，它就再也
+拦不住它本来要拦的那件事。
+
+```mermaid
+flowchart TD
+  S(["memory-net-distiller run --repo REPO"]) --> PF
+
+  PF["preflight — needs no profile:<br/>credentials + the openai extra,<br/>only when --provider deepseek can actually call out"]
+  PF --> FZ["freeze origin/master → snapshot sha"]
+  FZ --> PB["read the profile as raw bytes from the snapshot<br/>sha256 of those bytes lands in metrics.json"]
+  PB --> VP["validate_profile — production has no defaults:<br/>9 keys required; mock and hermes_tool refused;<br/>the test embedding stand-in refused; mode must be enforce"]
+  VP --> VE["validate the EFFECTIVE provider:<br/>--provider, --fallback-provider, and a replayed<br/>bundle's own per-call backends"]
+  VE --> EP["EmbeddingPolicy.probe — load the real model now,<br/>before any leaf is read or any token is spent"]
+  EP --> CTX["build and freeze one RunContext:<br/>run identity+clock · RunBudget · OutputScanner · BundleRecorder"]
+  CTX --> CLU["cluster the leaf records"]
+
+  CLU --> LOOP{"for each cluster"}
+  LOOP --> SOFT["open a per-cluster budget scope<br/>soft ceiling reached → skipped_budget, no new cluster"]
+  SOFT --> S1["SCAN 1 — outbound: system prompt, user prompt, metadata<br/>a hit here stops the prompt from ever leaving the process"]
+  S1 --> RSV["RunBudget.reserve, then AttemptLedger.reserve<br/>both strictly before the request is issued"]
+  RSV --> CALL["POST /chat/completions<br/>system+user as two messages · response_format=json_object<br/>· max_tokens honoured · SDK retries disabled"]
+  CALL --> STL["settle / settle_unknown / release<br/>exactly one terminal state per attempt"]
+  STL --> S2["SCAN 2 — inbound: response text + raw_meta<br/>then the recorder demands that verdict before it writes"]
+  S2 --> PARSE["parse: take the sibling object that carries a products array<br/>two candidates → refuse rather than guess"]
+  PARSE --> S3["SCAN 3 — parsed products, still in memory, nothing on disk"]
+  S3 --> RENDER["render: every citation resolved against the frozen<br/>snapshot; per-category min_citations / min_contributors"]
+  RENDER --> LOOP
+
+  LOOP -->|all clusters done| GATE{"quality + accounting gate"}
+  GATE -->|"parse / citation failures, scanner refusal,<br/>or counts that do not add up"| FAIL["write failure metrics.json + .health.json<br/>abort the staged bundle · publish nothing"]
+  GATE -->|pass| MAN["build master manifest.json → SCAN 4"]
+  MAN --> BUNDLE["commit the record bundle:<br/>re-scan every staged file — path string, size, and the<br/>full content of every regular file — then os.replace"]
+  BUNDLE --> WRITE["atomically replace team/<br/>write distill_runs/RUN_ID/ — metrics, snapshot, clusters,<br/>unclustered, product snapshot, manifest copy"]
+  WRITE --> PUB["write review_request.json into the release commit<br/>git add the whitelisted paths → push release/RUN_ID"]
+  PUB --> PR["--open-pr, off by default:<br/>opening a pull request is an outward action"]
+```
+
+### 数据与信任边界
+
+```mermaid
+flowchart LR
+  subgraph HOST["Operator machine"]
+    direction TB
+    PRIV["agent private memory<br/>never listed for reporting"]
+    SHARED["agent shared memory<br/>the only thing report reads"]
+    ENVF["credential file, e.g. ~/.hermes/.env<br/>read-only, never copied"]
+  end
+
+  subgraph LEAFP["Leaf process — the ONLY place content is rewritten"]
+    direction TB
+    R1["Redactor: substitute, then re-scan.<br/>A residual match aborts the run;<br/>a block-action rule blocks the whole report."]
+  end
+
+  subgraph SHR["Shared Git repository — the data plane"]
+    direction TB
+    LB["leaf/NODE-ID branches<br/>owned by one install, verified via .owner.json"]
+    MB["master — writable paths are a whitelist:<br/>team/ · distill_runs/ · config/ · prompts/ ·<br/>manifest.json · .health.json · bootstrap_state.json"]
+  end
+
+  subgraph DIST["Distiller process — DECIDES, never rewrites"]
+    direction TB
+    OS["OutputScanner: regex rules + per-token entropy.<br/>A finding records rule, field path and line —<br/>never the matched text."]
+    STG["bundle staging beside its target<br/>published by one atomic rename"]
+  end
+
+  subgraph SBX["bwrap sandbox — real-agent verification only"]
+    direction TB
+    NB["the four real agent directories are never bound<br/>/proc is off by default<br/>neutral in-namespace paths /home/agent, /work/agentroot"]
+  end
+
+  SHARED --> LEAFP --> LB --> DIST --> MB
+  PRIV -.->|"never read by report"| LEAFP
+  ENVF -->|"allowlisted keys only, via the env argument of execve — never argv"| DIST
+  ENVF -->|same launcher| SBX
+  MB --> SHARED
+```
+
+两个 scanner 的差别正是关键所在。**叶子侧改写**——它必须改写，因为那条记录马上就要被
+发布出去；**输出侧只做判定**——改写模型的回答，会让录制下来的 bundle 不再是模型真正
+说过的话，而那恰恰是 bundle 存在的唯一意义。
+
+### record / replay 的双轨
+
+```mermaid
+flowchart LR
+  subgraph LIVE["Track A — recording, costs real quota"]
+    L1["--provider deepseek --record-dir DIR"] --> L2["every call scanned in two stages"]
+    L2 --> L3["staging dir beside DIR"]
+    L3 --> L4["commit: full re-scan, then atomic rename"]
+    L4 --> L5["bundle: calls.jsonl · requests/NNNN-HASH.json ·<br/>cluster_assignment.json · snapshot.json · record_metrics.json"]
+  end
+
+  subgraph OFFLINE["Track B — replay, costs nothing"]
+    R1["--replay BUNDLE --replay-mode strict"] --> R2["ordered cursor, positional match;<br/>a differing prompt is a mismatch, not a silent live call"]
+    R2 --> R3["replay_hits / replay_misses / replay_live_calls<br/>in metrics.json"]
+    R3 --> R4["17-clause contract compared against a mock run"]
+  end
+
+  L5 -->|"tests/fixtures/golden_bundle/vNNN"| R1
+  R4 --> CI["blocking in CI on every PR<br/>no credentials, green on fork pull requests"]
+```
+
+生产 profile **只有在 bundle 中每一次调用都申报了可接受的后端时**，才允许回放它——依据
+是 bundle 自带的逐调用溯源信息，回放会原样保留而不会改写它。用 mock 录出来的 bundle，
+或者根本说不清自己来自哪里的 bundle，一律拒绝。正因如此，这条离线回归才是关于**真实
+后端**的证据，而不是关于它自己的。
 
 ---
 
-## 它是如何工作的
+## 为什么这样设计
 
-1. **汇报（Report）。** 每个叶子扫描其 agent 的共享记忆，对密钥脱敏，并按策略自动将各
-   节点报告推送到 `leaf/<node-id>` 分支——无需任何人决定“把它写下来”。
-2. **蒸馏（Distill）。** 蒸馏根定期对这些报告聚类，并请求 LLM 将其精炼为团队知识：共性
-   知识、共同问题及其解法、最佳实践、早期风险信号——每一条都带来源溯源。
-3. **回流（Feed back）。** 蒸馏后的 `team/` 知识按相关性与优先级排序后回流，避免 agent
-   被信息淹没。
-4. **本地存储（Store）。** 每个叶子将团队知识折叠进本地记忆，并在*私有个人记忆*与*共享
-   团队知识*之间保持清晰的分隔。
+十个塑造了代码形态的决策，每一条都附上承载它的文件。
 
-三条性质让它得以长久：**agent 原生**（从 agent 本就产生的记忆中收割，没有额外的文档负担）、
-**基于 Git**（溯源、历史、审核关卡与回滚都免费获得，数据也始终可移植），以及**由配置驱动
-的可插拔**（汇报策略、蒸馏算法、产物格式、各 agent 的记忆后端、回流策略全部外置——因此系统
-永不绑定任何一种 agent 框架或工具）。
+**1. 生产蒸馏后端是直连的 OpenAI 兼容端点，而不是把 agent CLI 当后端。**
+agent CLI 只接受一段文本 prompt，`system` / `user` 的角色边界在链路上根本不存在——而叶子
+记录是不可信输入，它可以就此改写那条本应把它当数据来处理的指令。同时也没有服务端的结构化
+输出约束，没有服务端回报的 `usage`，于是 run 只能估算自己的花费。因此生产 profile 直接
+拒绝 `mock` 与 `hermes_tool`。
+→ `memory_net/distiller/llm/openai_compat.py`、`memory_net/distiller/profile.py`
+
+**2. 泄漏判定发生在任何持久化之前，绝不在之后。**
+出站扫描发生在调用内层 provider *之前*：prompt 一旦离开进程，再拒绝把它写下来已经保护
+不了任何东西。入站扫描发生在任何字节落盘之前。而且写入方不会假设上游有人扫过——
+`BundleRecorder.record` 强制要求调用方出示一份 `ScanVerdict`，并拒绝带命中的判定书。
+→ `memory_net/distiller/llm/recording.py`、`memory_net/distiller/output_scanner.py`
+
+**3. 扫描命中会让整个 run 失败，而不是跳过这个 cluster。**
+跳过会让 run 正常退出、照常发布其余产物，只留下一个计数器作为唯一痕迹。如果这批输入和
+这条 prompt 刚刚产出了敏感内容，那么对它后面的 cluster 也说明不了什么好事。计数随异常
+一起传递，因而失败可以说清是什么拦住了它。
+→ `memory_net/distiller/pipeline.py`（`DistillationAborted`）、`orchestrator._distill_gate_error`
+
+**4. bundle 的提交是事务性的。**
+staging 目录必须与目标同父目录——`os.replace` 只在同一个文件系统内才是原子的，而放在
+`/tmp` 下的 staging 往往并不在同一个文件系统上。残留的 staging 既不复用也不清理：它可能
+属于一个仍在运行的 run。在 rename 之前，每一个 staged 文件都会被重新扫描——路径字符串，
+以及**每一个普通文件的完整正文**，而不只是那些名字以 `.json` 结尾的。事务边界到 commit
+为止：之后的发布失败会**保留** bundle，因为它记录的是已经付过费的调用，也是重跑时唯一的
+replay 素材。
+→ `memory_net/distiller/llm/recording.py`、`orchestrator._scan_staged_bundle`
+
+**5. 严格回放需要的是规范化算法，而不是一份字段清单。**
+`products_active` 是**以 `distillation_id` 为键**的，而该 id 内嵌了 run id；
+`citation_backrefs`、`subject_index` 以及每一处 `snapshot_ref` 都由这些键派生。根本没有
+哪个字段可以“删掉”。于是：收集全部标识符 → 按与时钟和 run id 都无关的事实重映射为位置化
+名称 → 在整棵树上替换（键名与内嵌子串一并替换）→ 时钟归零 → content hash 按归一化后的
+文档**重算**而不是丢弃。
+→ `memory_net/distiller/normalize.py`
+
+**6. 生产 profile 强制使用真实 embedding 后端。**
+`test-cheap` 替身产出的是三维词频向量。它与旁边那套按语义距离调过的 DBSCAN 参数搭配，会
+把真实数据聚成毫无意义的簇，而所有指标看上去都完全正常。所以生产直接拒绝它；后端在读取
+任何叶子、花掉任何 token 之前就被加载并探测；并且 `embedding_test_only` 会写进
+`metrics.json`——因为替身向量跑出的产物与真向量产物结构完全一致，事后再无别的办法分辨。
+→ `memory_net/distiller/clustering/policy.py`、`memory_net/distiller/profile.py`
+
+**7. 调用账本刻意往多了记。**
+计量单位是**一次真实请求**——重试会把它翻倍，端点也按它计费——并且在请求发出**之前**就
+预留，因为事后写下的记录能报告超支，却永远阻止不了超支。429 与 5xx 一律按“可能已计费”
+处理：响应体分不清“在门口就被拒”和“推理到一半被限流”，而往乐观方向猜正是导致超支的那个
+方向。计数靠重放一个 append-only 的 JSONL 文件恢复，因为崩溃之后，幸存的那些行是关于
+“已经花掉多少”的唯一真相。上限是代码常量；环境变量**只能调低**它。
+→ `memory_net/distiller/llm/ledger.py`、`memory_net/distiller/runctx.py`
+
+**8. 合并闸从分支内容重新推导结论。**
+distiller 已经校验过 schema、citation 与证据规则——但这道闸必须在“推出这个分支的那次 run
+有 bug / 是回放出来的 / 压根不是这份代码”的情况下依然成立。一道采信生产者自述的闸不是闸。
+它只读一个 checkout，零凭据、零网络，这正是它能在 fork 的 pull request 上保持常绿的原因。
+→ `memory_net/distiller/merge_gate.py`、`.github/workflows/ci.yml`
+
+**9. 一次 run 读到的一切都来自同一份冻结快照。**
+profile、prompt 模板、scanner 规则文件，全都用 `git show` 从快照 sha 读取，而不是从工作区
+读。读工作区会让 run 记录下来的 `master_snapshot_sha` 看上去干干净净，而真正生效的配置
+从未出现在那份快照里。profile 按**字节**读取，因为溯源哈希必须能对上仓库里的某个 blob，
+而文本通道会归一化行尾。
+→ `memory_net/distiller/cli.py`、`orchestrator._snapshot_prompts`
+
+**10. 自己的账对不平，run 就失败。**
+每个 cluster 恰好落入七个互斥终态之一；记录级则要求
+`input_records == records_cited + records_unclustered`。任一恒等式不成立，就说明有东西
+没被记账，而从外部无从判断丢掉的是一次跳过还是一整份产物——于是 run 直接失败，而不是在
+一份没人能当证据用的指标之上继续发布。
+→ `memory_net/distiller/metrics.py`、`memory_net/distiller/pipeline.py`
+
+另有两条值得点名：**凭据只经由 `execve` 的 `env` 参数传递**（`argv` 全机可读，所以启动器
+不提供任何可 `eval` 的输出模式，也没有 `env` 子命令——`memory_net/shared/env_allowlist.py`）；
+以及 **JSON 解析器拒绝歧义**——它扫描全部**同级**对象、取带 products 数组的那一个，出现
+两个就抛错，因为两种读法的产物都能通过校验，而猜错会静默地发布错误的内容
+（`pipeline._raw_decode_object`）。
 
 ---
 
-## 双仓库模型
+## 成熟度：什么已被证明，什么还没有
 
-本仓库存放**代码、测试、脚本与 CI**。在运行时，各节点与一个**独立的共享 Git 仓库**交互，
-该仓库存放实际的数据与运行时配置：
+这个项目在工程上是认真的，但“工程认真”不等于“已在真实场景验证”。逐项如实说明：
 
-| 内容 | 位置 |
-|---|---|
-| Python 包、脚本、测试、CI | 本仓库 |
-| 运行时 `config/` + `prompts/` | 共享仓库 `master` |
-| Leaf 报告 | 共享仓库 `leaf/<node-id>` 分支 |
-| 蒸馏产物（`team/`、`manifest.json`） | 共享仓库 `master` |
+| 领域 | 状态 | 确切含义 |
+|---|---|---|
+| 蒸馏后端 `deepseek` | **生产路径** | 真实端点、角色分离的双 message、服务端回报 usage、run 级预算 + 跨进程调用账本。`tests/fixtures/golden_bundle/` 里的 golden bundle 就是它一次真实运行的录制。 |
+| `hermes_tool` 桥接 | **experimental** | 它证明了 `LLMProvider` 抽象可以承载跨进程后端。参考桥接脚本的末端后端**按设计就是确定性 mock**。生产 profile 拒绝它。 |
+| `anthropic` provider | 已实现 | 带预算闸与调用账本，但不是生产基准，也不是等价性比对的参照系。 |
+| Adapter：`claude-code` | 已测试路径 | 唯一没有 `support_status: experimental` 的 adapter——它是靠加载器的默认值成为 stable 的，而不是靠一条显式声明。 |
+| Adapter：`codex`、`hermes`、`openclaw` | **experimental** | 路径依据来自对真实安装的只读实测；已交付脱敏 fixture 与读路径回归。加载它们需要 `MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1`。 |
+| Adapter：`opencode` | **experimental，路径未取得依据** | 文件顶部写明 `EXPERIMENTAL / UNVERIFIED: template only`：其路径是约定，而非实测到的布局。 |
+| 真实 agent 消费注入 hint | **一对未重复的配对实验** | 针对 `hermes`：带 hint 的实验组返回了新鲜哨兵，而在其余条件完全相同的对照组中没有返回。这是**一次**、固定顺序的观测，而模型本身是采样的——它不构成成功率，这也正是该 adapter 保持 experimental 的原因。**fixture 与工具链本身不构成消费证据。** |
+| 三叶子稳定性 | **加速档合成 soak** | CI 对三个相互隔离的合成叶子跑 5 轮，逐叶子做健康断言。24 小时档是同一个脚本加 `--duration-seconds 86400`，属 operator 事项——**加速档不等于已完成 24 小时验证**。 |
+| 审核 / 发布关卡 | 分支 + artifact + CI 闸 | run 推送 `release/RUN_ID`，把只含摘要与指针的 `review_request.json` 写进 release commit，CI 的 `merge-gate` 再从分支重新校验。**平台侧分支保护未经实证**；没有 token 时校验脚本会明确打印“未实证”并以 0 退出。 |
+| CI 中的生产回归 | 两档 | Tier A——离线 golden bundle 严格回放 + 桩契约测试——**每个 PR 阻塞**。Tier B——对真实端点的 live smoke——仅 `workflow_dispatch` 手动触发，缺凭据即 skip。 |
+| 非编码 agent、组织级根、实时看板 | **路线图** | 尚未交付。见 [VISION.md](VISION.md)。 |
 
-此处的 `config/` 与 `prompts/` 仅为引导模板与测试夹具；运行时的唯一事实来源始终是共享
-仓库的 `master`。
+测试面的量级，供校准：**1234 个测试**，与 `ruff`、`black`、`isort`、对 `memory_net` 的
+`mypy --strict` 一起，全部在 CI 中阻塞。
 
 ---
 
@@ -153,7 +358,7 @@ pytest
 ```
 
 最快地看到整条回路跑起来——汇报 → 蒸馏 → 审核/发布 → 订阅——且无网络、无 token 消耗的
-方式，是离线回归测试（这一条是真正可复制粘贴运行的）：
+方式，是离线回归测试：
 
 ```bash
 bash tests/integration/local_repo.sh
@@ -174,7 +379,7 @@ python3 -m memory_net.leaf.cli report \
 
 # 3. distiller 把团队知识蒸馏到一个 release 分支上——这就是审核/发布关卡
 git clone /tmp/team-memory.git ./distill-work
-python3 -m memory_net.distiller.cli run --repo ./distill-work --provider mock   # mock = 零 token；换成 `anthropic` 即可上线
+python3 -m memory_net.distiller.cli run --repo ./distill-work --provider mock
 
 # 4. release 经审核（合入 master）后，叶子把它订阅回本地
 python3 -m memory_net.leaf.cli subscribe \
@@ -183,15 +388,44 @@ python3 -m memory_net.leaf.cli subscribe \
   --config-revision test --state-dir ~/.memory-net/state
 ```
 
-完整命令面（含用于持续运转的 `daemon`）：
+上面第 3 步用的是随附的默认 profile，那是一次**零 token 的 mock 运行**。真实运行要改用
+生产 profile，并通过启动器从进程环境取凭据——provider 自己绝不打开任何凭据文件：
 
 ```bash
-python3 -m memory_net.leaf.cli --help        # report / subscribe / health / hints / daemon / start / stop / trigger / status
-python3 -m memory_net.distiller.cli --help    # run [--provider mock|anthropic|hermes_tool]
+python3 -m pip install -e ".[dev,llm]"       # OpenAI 客户端是可选 extra
+scripts/aomt-with-env -- memory-net-distiller run \
+  --repo ./distill-work --config config/distill.deepseek.yaml --provider deepseek
 ```
 
-默认配置位于 `config/`，adapter 配置位于 `config/adapters/`，prompt 模板位于
-`prompts/`。
+完整命令面：
+
+```bash
+python3 -m memory_net.leaf.cli --help       # report / subscribe / health / hints / daemon / start / stop / trigger / status
+python3 -m memory_net.distiller.cli --help  # run [--provider mock|anthropic|hermes_tool|deepseek]
+```
+
+安装包会同时提供 `memory-net-leaf` 与 `memory-net-distiller` 两个命令。默认配置位于
+`config/`，adapter 配置位于 `config/adapters/`，prompt 模板位于 `prompts/`。注意：随附的
+五个 adapter 中有四个是 experimental，加载它们需要 `MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1`。
+
+---
+
+## 双仓库模型
+
+本仓库存放**代码、测试、脚本与 CI**。在运行时，各节点与一个**独立的共享 Git 仓库**交互，
+该仓库存放实际的数据与运行时配置：
+
+| 内容 | 位置 |
+|---|---|
+| Python 包、脚本、测试、CI | 本仓库 |
+| 运行时 `config/` + `prompts/` | 共享仓库 `master` |
+| Leaf 报告（`memories/`、`manifest.json`、`.health.json`） | 共享仓库 `leaf/NODE-ID` 分支 |
+| 蒸馏产物（`team/`、`manifest.json`） | 共享仓库 `master` |
+| 逐 run 的证据（`metrics.json`、`snapshot.json`、`clusters.jsonl`、`unclustered.json`） | 共享仓库 `distill_runs/RUN_ID/` |
+
+此处的 `config/` 与 `prompts/` 仅为引导模板与测试夹具；运行时的唯一事实来源始终是共享
+仓库的 `master`。录制下来的调用 bundle 从不在该白名单之内——它包含完整的 prompt 与
+response，只留在仓库之外。
 
 ---
 
@@ -200,14 +434,17 @@ python3 -m memory_net.distiller.cli --help    # run [--provider mock|anthropic|h
 - **`mvp_tech_design.md`** —— 技术设计文档（架构、接口、schema、Git 布局、里程碑）。
   事实来源。
 - **`VISION.md`** —— 问题、方法论与飞轮效应。
-- **`todo.md`** —— MVP 路线图与任务追踪。
+- **`docs/runbook.md`** —— 运维与故障处置流程。
+- **`docs/tuning_loop.md`** —— 录制、改 prompt、回放、比对；以及如何刷新 golden bundle。
+- **`todo.md`** —— 路线图与任务追踪。
 - **`AGENTS.md`** —— 贡献者的工作规则与约定。
 
 ## 贡献
 
 参见 [CONTRIBUTING.md](CONTRIBUTING.md)。简而言之：保持测试套件全绿
-（`ruff` / `black` / `isort` / `mypy` / `pytest`），提交保持原子化并遵循
-`[Type] Scope: Description` 格式，且在改动代码的同时同步更新设计文档。
+（`ruff check .`、`black --check .`、`isort --check-only .`、`mypy memory_net`、
+`pytest`），提交保持原子化并遵循 `[Type] Scope: Description` 格式，且在改动代码的同时
+同步更新设计文档。
 
 ## 命名
 
