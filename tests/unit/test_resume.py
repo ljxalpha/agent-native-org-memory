@@ -141,6 +141,7 @@ def _orchestrator(
     tmp_path: Path,
     *,
     resume_from: str | None = PRIOR_RUN,
+    leaf_refs: dict[str, str] | None = None,
     scanner: OutputScanner | None = None,
     record_bundle_dir: Path | None = None,
 ) -> DistillOrchestrator:
@@ -150,13 +151,19 @@ def _orchestrator(
         .set_scanner(scanner)
         .freeze()
     )
-    return DistillOrchestrator(
+    orchestrator = DistillOrchestrator(
         repo_path=tmp_path / "repo",
         pipeline=_pipeline(tmp_path, CountingProvider()),
         resume_from=resume_from,
         record_bundle_dir=record_bundle_dir,
         context=context,
     )
+    # What this run just read off the remote, which the prior snapshot has to
+    # agree with.
+    orchestrator.leaf_refs = (
+        {"origin/leaf/alice": "b" * 40} if leaf_refs is None else leaf_refs
+    )
+    return orchestrator
 
 
 def test_no_resume_reads_nothing_and_carries_nothing(tmp_path: Path) -> None:
@@ -242,7 +249,7 @@ def test_a_finished_cluster_is_skipped_and_terminates_as_resumed(
     output = pipeline.run(
         records,
         run_id="run-new",
-        resume_completed_memory_ids={"leaf-a-mem-1"},
+        resume_completed_citations={"leaf-a-mem-1@rev00001"},
     )
 
     assert provider.calls == [["leaf-a-mem-2"]]
@@ -271,7 +278,7 @@ def test_carrying_products_keeps_the_category_distribution_whole(
     output = pipeline.run(
         [_record(1), _record(2)],
         run_id="run-new",
-        resume_completed_memory_ids={"leaf-a-mem-1"},
+        resume_completed_citations={"leaf-a-mem-1@rev00001"},
     )
 
     merged = _with_carried_products(output, carried)
@@ -306,3 +313,44 @@ def test_the_flag_defaults_to_no_resume() -> None:
         _build_parser().parse_args(["run", "--repo", ".", "--resume", "r1"]).resume
         == "r1"
     )
+
+
+def test_a_moved_leaf_refuses_the_resume(tmp_path: Path) -> None:
+    """Master can sit still while the input the products cite is edited."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _prior_run(repo)
+
+    with pytest.raises(RuntimeError, match="leaf refs drifted"):
+        _orchestrator(
+            tmp_path, leaf_refs={"origin/leaf/alice": "c" * 40}
+        )._resumed_products(SNAPSHOT_SHA)
+
+
+def test_a_resume_id_that_is_a_path_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "repo").mkdir()
+
+    for value in ("../../elsewhere", "/etc", "a/b", ".."):
+        with pytest.raises(RuntimeError, match="not a run id"):
+            _orchestrator(tmp_path, resume_from=value)._resumed_products(SNAPSHOT_SHA)
+
+
+def test_an_edited_record_is_not_treated_as_already_distilled(
+    tmp_path: Path,
+) -> None:
+    """The earlier product cites rev00001; the record now reads rev99999."""
+    provider = CountingProvider()
+    pipeline = _pipeline(tmp_path, provider)
+    edited = _record(1)
+    edited["revision_hash"] = "rev99999"
+
+    output = pipeline.run(
+        [edited],
+        run_id="run-new",
+        resume_completed_citations={"leaf-a-mem-1@rev00001"},
+    )
+
+    assert provider.calls == [["leaf-a-mem-1"]]
+    assert output.cluster_terminal_counts is not None
+    assert output.cluster_terminal_counts["resumed"] == 0
+    assert output.cluster_terminal_counts["distilled"] == 1

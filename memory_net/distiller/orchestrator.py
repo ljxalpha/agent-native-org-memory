@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -31,7 +32,7 @@ from memory_net.distiller.pipeline import (
     DistillationAborted,
     DistillationOutput,
     DistillationPipeline,
-    cited_memory_ids,
+    cited_citation_refs,
 )
 from memory_net.distiller.provenance import RunProvenance
 from memory_net.distiller.publisher import build_review_request
@@ -184,14 +185,14 @@ class DistillOrchestrator:
             records = self._load_leaf_records()
             previous_manifest = self._load_master_manifest()
             carried = self._resumed_products(snapshot_sha)
-            completed = cited_memory_ids(carried)
+            completed = cited_citation_refs(carried)
             with self._snapshot_prompts(snapshot_sha):
                 try:
                     output = (
                         self.pipeline.run(
                             records,
                             run_id=run_id,
-                            resume_completed_memory_ids=completed,
+                            resume_completed_citations=completed,
                         )
                         if self.resume_from
                         else self.pipeline.run(records, run_id=run_id)
@@ -483,6 +484,7 @@ class DistillOrchestrator:
 
         * a resume needs the earlier run's ``snapshot.json`` -- without it there
           is no way to know what that run read;
+        * the leaf refs recorded there must still be the ones just read;
         * the snapshot's ``master_snapshot_sha`` must still be what
           ``origin/master`` points at. Continuing across a drift would splice
           products derived from two different configurations and two different
@@ -498,6 +500,11 @@ class DistillOrchestrator:
         """
         if not self.resume_from:
             return []
+        if not _RUN_ID.match(self.resume_from):
+            # A run id, not a path. Joined unchecked, --resume ../../elsewhere
+            # would pull a snapshot and a product tree from outside this
+            # repository into the release path.
+            raise RuntimeError(f"cannot resume {self.resume_from!r}: not a run id")
         root = self.repo_path / "distill_runs" / self.resume_from
         snapshot_path = root / "snapshot.json"
         if not snapshot_path.exists():
@@ -515,6 +522,17 @@ class DistillOrchestrator:
             raise RuntimeError(
                 f"cannot resume {self.resume_from}: master snapshot drifted "
                 f"({recorded or 'unknown'} -> {snapshot_sha})"
+            )
+        recorded_refs = snapshot.get("leaf_refs")
+        recorded_refs = recorded_refs if isinstance(recorded_refs, dict) else {}
+        if recorded_refs != self.leaf_refs:
+            # Master alone is not the run's input. The leaves are, and a leaf
+            # that moved may have edited the very records the carried products
+            # cite -- so continuing would republish a product as evidence for
+            # text that has since changed.
+            raise RuntimeError(
+                f"cannot resume {self.resume_from}: leaf refs drifted since "
+                "that run read them"
             )
         self._refuse_leftover_staging()
         products: list[Any] = []
@@ -1761,6 +1779,10 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+
+_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+"""What ``--resume`` accepts. No separators, so it cannot leave distill_runs."""
 
 
 def _with_carried_products(

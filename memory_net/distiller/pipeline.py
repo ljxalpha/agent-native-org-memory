@@ -276,17 +276,22 @@ class DistillationPipeline:
         records: list[dict[str, Any]],
         *,
         run_id: str,
-        resume_completed_memory_ids: set[str] | None = None,
+        resume_completed_citations: set[str] | None = None,
     ) -> DistillationOutput:
         """Distil ``records``; on a resume, skip what the earlier run finished.
 
-        ``resume_completed_memory_ids`` names the records the resumed run's
-        products already cite. A cluster made entirely of those terminates as
-        ``resumed`` without a call -- and its records count as cited, because
-        the carried products cite them (§7.2 DISTILL-001).
+        ``resume_completed_citations`` holds ``memory_id@revision_hash`` refs
+        the resumed run's products already cite. A cluster made entirely of
+        those terminates as ``resumed`` without a call, and its records count
+        as cited, because the carried products cite them (§7.2 DISTILL-001).
+
+        The *revision* is part of the key on purpose. Matching on the memory id
+        alone would treat an edited record as already distilled and publish the
+        earlier product as evidence for text that has since changed -- silently,
+        because the accounting would still balance.
         """
         run_id = self._checked_run_id(run_id)
-        completed = resume_completed_memory_ids or set()
+        completed = resume_completed_citations or set()
         system_prompt = self.system_prompt_path.read_text(encoding="utf-8")
         template = self.user_prompt_path.read_text(encoding="utf-8")
         clusters = self._cluster_records(records)
@@ -304,7 +309,7 @@ class DistillationPipeline:
             self._execution_order(clusters, tally=tally)
         ):
             if completed and all(
-                _id_of(record) in completed for record in cluster_records
+                _citation_ref_of(record) in completed for record in cluster_records
             ):
                 tally.terminals.append((RESUMED, cluster_records))
                 continue
@@ -341,7 +346,9 @@ class DistillationPipeline:
         rule_counts: dict[str, int] = {}
         for hit in tally.redaction_hits:
             rule_counts[hit.rule] = rule_counts.get(hit.rule, 0) + 1
-        cited = cited_memory_ids(tally.products) | completed
+        cited = cited_memory_ids(tally.products) | {
+            ref.split("@", 1)[0] for ref in completed
+        }
         unclustered = _unclustered_records(tally.terminals, cited=cited)
         terminal_counts = {state: 0 for state in TERMINAL_STATES}
         for terminal, _ in tally.terminals:
@@ -945,6 +952,11 @@ def _id_of(record: dict[str, Any]) -> str:
     return str(record.get("memory_id"))
 
 
+def _citation_ref_of(record: dict[str, Any]) -> str:
+    """``memory_id@revision_hash`` -- the same shape a citation is keyed by."""
+    return f"{_id_of(record)}@{record.get('revision_hash')}"
+
+
 def cited_memory_ids(products: list[TeamProduct]) -> set[str]:
     """Every memory id any product cites, which is what "used" means here."""
     cited: set[str] = set()
@@ -952,6 +964,19 @@ def cited_memory_ids(products: list[TeamProduct]) -> set[str]:
         for citation in product.frontmatter.get("citations") or []:
             cited.add(str(citation.get("memory_id")))
     return cited
+
+
+def cited_citation_refs(products: list[TeamProduct]) -> set[str]:
+    """Every ``memory_id@revision_hash`` these products cite.
+
+    The resume path keys on this rather than on the id, so a record that has
+    been edited since is *not* mistaken for one already distilled.
+    """
+    return {
+        f"{citation.get('memory_id')}@{citation.get('revision_hash')}"
+        for product in products
+        for citation in product.frontmatter.get("citations") or []
+    }
 
 
 def _unclustered_records(
