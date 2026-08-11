@@ -37,8 +37,8 @@
 | M2-005 | [!] | 3 个叶子 24h 稳定性测试 | roadmap:2026-04-21 | - | 已补 `scripts/stability_smoke.py`；仍需真实 3 叶子 24h 运行日志 + health 可读 |
 | M2-006 | [x] | 脱敏误伤/漏检评估工具雏形 | roadmap:2026-04-21 | - | benchmark 语料 + 评估输出 |
 | M3-001 | [>] | Hermes adapter YAML | roadmap:2026-04-21 | - | 需要当前 Hermes 官方路径依据和 fixture |
-| M3-002 | [>] | OpenClaw adapter YAML | roadmap:2026-04-21 | - | 需要当前 OpenClaw 官方路径依据和 fixture |
-| M3-003 | [>] | OpenCode adapter YAML | roadmap:2026-04-21 | - | 需要当前 OpenCode 官方路径依据和 fixture |
+| M3-002 | [x] | OpenClaw adapter YAML | roadmap:2026-04-21 | - | 官方路径依据**已取得**（openclaw 2026.3.2 真实安装只读实测布局）：`workspace/` 为工作根、`AGENTS.md` 为每会话指令文件、原生记忆是受管根父目录层级的 sqlite sidecar。已交付脱敏 fixture（`tests/fixtures/adapters/openclaw/`）+ 4 例读路径回归（只收受管根 / 原生库与敏感兄弟目录双重拒绝 / `..` 与符号链接越界报错 / hint 注入幂等）。**收窄口径：不含真实消费证据，`support_status` 保持 `experimental`**；收窄理由：openclaw 是 gateway 架构，沙箱内隔离启动且不复制 credentials 的可行性未实测 |
+| M3-003 | [x] | OpenCode adapter YAML | roadmap:2026-04-21 | - | 官方路径依据**未取得**（本机未安装 opencode，取得依据需新装 CLI，属需人工批准的外部动作）。新口径 = 显式 UNVERIFIED banner（写明路径为约定而非实测）+ 约定根/受管根边界回归 + 元测试防复发（experimental 且无 fixture/校准记录的 adapter 必须带 banner）+ 保持 `experimental`。升级为已校准 adapter 需一次真实安装与消费验证，列为 MVP 外后续项 |
 | M3-004 | [>] | Codex adapter YAML | roadmap:2026-04-21 | - | 需要当前 Codex 官方路径依据和 fixture |
 | M3-005 | [x] | 冲突 preserve_both 策略 | roadmap:2026-04-21 | - | conflict handler + marker 渲染 |
 | M3-006 | [x] | 蒸馏产物 conflicts frontmatter | roadmap:2026-04-21 | - | `conflicts` 字段写入并验证 |

@@ -584,6 +584,19 @@ team_hint_injection:
 上述真实布局与"约定 shared 根 / 无 list_personal"的隐私不变量，由
 `tests/unit/test_adapter_calibration.py` 锁定（含 personal-scope 隐私回归测试）。
 
+**`openclaw.yaml`：路径依据已取得（openclaw 2026.3.2 真实安装只读实测）**。载入配置的三条布局事实：
+
+- agent 工作根是 `<openclaw home>/workspace/`，因此 `AGENT_ROOT` 指向该目录；
+- 该根下的 `AGENTS.md` 是每会话被消费的指令文件（其正文自述读取顺序 `SOUL.md → USER.md → memory/YYYY-MM-DD.md → MEMORY.md`），故作为 hint 目标；
+- 原生记忆库是 sqlite sidecar `<openclaw home>/memory/main.sqlite`，位于受管根 `${AGENT_ROOT}/memory/shared` 的**父目录层级**；原生日更笔记 `${AGENT_ROOT}/memory/YYYY-MM-DD.md` 则是受管根的**兄弟**。两者都不在受管根的相对 glob 射程内；`.env` / `credentials/` / `logs/` / `agents/` 同理，并额外由 `exclude` 二次拒绝。
+
+脱敏布局快照存放在 `tests/fixtures/adapters/openclaw/`（内容全部为中性样例；真实 `.env` 因仓库禁止跟踪该文件名而以 `_dotenv` 占位，测试物化临时目录时改回原名），
+读路径回归由 `tests/unit/test_openclaw_adapter.py` 锁定。**该依据不含"hint 被真实消费"的证据**（未做真实 agent 运行），故 `support_status` 保持 `experimental`。
+
+**`opencode.yaml`：路径依据未取得**——开发环境无 opencode 安装可供只读核验，取得依据需新装 CLI（属需人工批准的外部动作）。因此该 YAML 首行必须写明 `EXPERIMENTAL / UNVERIFIED: template only`，并注明受管根 `${AGENT_ROOT}/memory/shared` 是 memory-net 约定目录而非实测发现，以及威胁模型（越界读取会把 agent 私有状态/凭据暴露给蒸馏侧）。升级为已校准 adapter 需一次真实安装 + 一次被消费验证。
+
+**元规则（防复发）**：任何 `support_status: experimental` 且既没有 `tests/fixtures/adapters/<name>/` 布局 fixture、也没有被校准测试登记的 adapter YAML，**首行必须带 UNVERIFIED banner**。仅靠 `support_status` 不够——它只表达"需显式 opt-in"，不表达"路径是实测还是假设"，集成者需要区分二者。该元规则由 `tests/unit/test_agent_adapters.py` 中的元测试强制，对将来新增的 adapter 同样生效。
+
 `source_locator` 固定为 `<root_alias>:<path_relative_to_base_dir>`；`root_alias` 与 `base_dir` 一旦发布，不应在后续小版本里随意更名或改变语义。新增扫描范围时优先新增 root alias，不要复用旧 alias 指向另一棵目录。
 
 **`team_hint_injection.mode` 语义必须落到实现状态机**：
@@ -879,9 +892,16 @@ wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直�
 两次 run 逐字节一致"就不再成立，而这种偏差在运行期几乎不可能被发现。
 同理**禁止用环境变量做冻结开关**——冻结只通过注入实现，否则等于给防篡改设计开一个后门。
 
-`uuid.uuid4` 的禁令带一条**具名白名单**：`orchestrator._write_team_products` 用它拼临时
-目录名（与 `os.getpid()` 一起保证并发唯一），该值不进入任何产物、manifest 或 metrics。
-白名单按"模块 + 函数"逐条具名，新模块因此无法悄悄混入一处自造 id。
+**白名单按"模块 + 具名函数"逐条给出，不豁免整个模块**——豁免一整个文件等于让
+该文件里后来新增的任意函数都免费获得一个环境时钟。当前只有两条：
+`runctx.utc_now` / `RunIdentity.system`（唯一的默认工厂），
+以及 `orchestrator._write_team_products` 的 `uuid4`（与 `os.getpid()` 一起拼临时目录名，
+该值不进入任何产物、manifest 或 metrics）。
+
+扫描器必须**解析导入别名**：`from datetime import datetime as D; D.now()` 与
+`import datetime as dt; dt.datetime.utcnow()` 都要能识别，只匹配字面写法的扫描器
+挡不住任何一个真想绕过它的人。扫描逻辑本身以"接受根目录的函数"形式实现，
+并对合成目录树做**端到端**的正反两向自检——只对匹配器断言的自检等于没有自检。
 
 #### 5.5.4 `cli.py`：唯一的装配点
 

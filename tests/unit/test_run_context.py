@@ -212,91 +212,128 @@ def test_without_a_context_the_legacy_cost_gate_still_applies(tmp_path: Path) ->
 # Structural tripwire
 # --------------------------------------------------------------------------
 
+BANNED_CLOCK = {"datetime.datetime.now", "datetime.datetime.utcnow"}
+BANNED_IDGEN = {"uuid.uuid4"}
 
-def _python_modules() -> list[Path]:
-    return sorted(DISTILLER_DIR.rglob("*.py"))
+# Exempt by *named function*, not by whole module: exempting a whole file lets
+# any later function in it acquire an ambient clock for free.
+EXEMPT: dict[str, set[str]] = {
+    # The one sanctioned clock/run-id factory (utc_now, RunIdentity.system).
+    "runctx.py": {"utc_now", "system"},
+    # Names a temp directory alongside os.getpid(). The value never reaches a
+    # product, manifest or metrics file.
+    "orchestrator.py": {"_write_team_products"},
+}
 
 
-def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
-    """Map every line inside a function body to that function's name."""
+def _alias_map(tree: ast.AST) -> dict[str, str]:
+    """Local name -> canonical dotted path, so aliased imports still resolve."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for entry in node.names:
+                root = entry.name.split(".")[0]
+                aliases[entry.asname or root] = entry.name if entry.asname else root
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for entry in node.names:
+                aliases[entry.asname or entry.name] = f"{node.module}.{entry.name}"
+    return aliases
+
+
+def _resolve(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    """Canonical dotted path of an attribute/name expression, if resolvable."""
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    return ".".join([aliases.get(current.id, current.id), *reversed(parts)])
+
+
+def _owner_by_line(tree: ast.AST) -> dict[int, str]:
     owner: dict[int, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            end = node.end_lineno or node.lineno
-            for line in range(node.lineno, end + 1):
+            for line in range(node.lineno, (node.end_lineno or node.lineno) + 1):
                 owner[line] = node.name
     return owner
 
 
-def _attribute_path(node: ast.AST) -> str:
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
+def scan_for_ambient_run_state(root: Path) -> list[str]:
+    """Find modules that read the clock, mint a run id, or take a freeze switch.
 
-
-def test_no_distiller_module_reads_the_clock_or_mints_a_run_id() -> None:
-    """A module that reads the clock itself opts out of reproducibility.
-
-    Injecting a frozen identity is what makes two runs of the same input compare
-    byte for byte; one stray ``datetime.now`` breaks that, and the breakage is
-    invisible at runtime. This test is the tripwire for the next such module.
+    Extracted as a function taking a root so the tripwire itself can be run
+    end to end against a synthetic tree -- an assertion that can never fail
+    protects nothing.
     """
     offenders: list[str] = []
-    for module in _python_modules():
+    for module in sorted(root.rglob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"))
-        owners = _enclosing_functions(tree)
+        aliases = _alias_map(tree)
+        owners = _owner_by_line(tree)
+        exempt = EXEMPT.get(module.name, set())
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Attribute):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value.startswith("AOMT_FROZEN"):
+                    offenders.append(f"{module.name}:{node.lineno} {node.value}")
                 continue
-            path = _attribute_path(node)
-            location = f"{module.name}:{node.lineno} {path}"
-            if path in {"datetime.now", "datetime.utcnow"}:
-                if module.name not in CLOCK_EXEMPT_MODULES:
-                    offenders.append(location)
-            elif path == "uuid.uuid4":
-                owner = owners.get(node.lineno, "<module>")
-                if (
-                    module.name not in CLOCK_EXEMPT_MODULES
-                    and (module.name, owner) not in UUID_EXEMPTIONS
-                ):
-                    offenders.append(f"{location} in {owner}")
+            if not isinstance(node, ast.Attribute | ast.Name):
+                continue
+            if isinstance(node, ast.Name) and isinstance(
+                getattr(node, "ctx", None), ast.Store
+            ):
+                continue
+            path = _resolve(node, aliases)
+            if path is None or path not in (BANNED_CLOCK | BANNED_IDGEN):
+                continue
+            if owners.get(node.lineno, "<module>") in exempt:
+                continue
+            offenders.append(f"{module.name}:{node.lineno} {path}")
+    return sorted(set(offenders))
 
-    assert offenders == []
 
+def test_no_distiller_module_carries_ambient_run_state() -> None:
+    """A module that reads the clock itself opts out of reproducibility.
 
-def test_no_distiller_module_takes_a_freeze_switch_from_the_environment() -> None:
-    """Freezing happens by injection only. An env-var switch would be a bypass
-    around the snapshot-frozen configuration, i.e. a tamper-proofing back door.
+    Injecting a frozen identity is what makes two runs of the same input
+    compare byte for byte; one stray clock read breaks that, invisibly at
+    runtime. An env-var freeze switch is the same hole from the other side: it
+    would be a back door around the snapshot-frozen configuration.
     """
-    offenders = [
-        f"{module.name}:{node.lineno}"
-        for module in _python_modules()
-        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and node.value.startswith("AOMT_FROZEN")
-    ]
-
-    assert offenders == []
+    assert scan_for_ambient_run_state(DISTILLER_DIR) == []
 
 
-def test_the_clock_tripwire_actually_fires(tmp_path: Path) -> None:
-    """Guards the guard: an assertion that can never fail protects nothing."""
-    module = tmp_path / "sneaky.py"
-    module.write_text("from datetime import datetime\nx = datetime.now()\n", "utf-8")
-    tree = ast.parse(module.read_text(encoding="utf-8"))
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from datetime import datetime\nx = datetime.now()\n",
+        "import datetime\nx = datetime.datetime.now()\n",
+        # The alias forms a naive matcher would miss entirely.
+        "from datetime import datetime as D\nx = D.now()\n",
+        "import datetime as dt\nx = dt.datetime.utcnow()\n",
+        "import uuid\nx = uuid.uuid4()\n",
+        "from uuid import uuid4 as fresh\nx = fresh()\n",
+        "import os\nx = os.environ.get('AOMT_FROZEN_RUN_ID')\n",
+    ],
+)
+def test_the_tripwire_actually_fires(tmp_path: Path, source: str) -> None:
+    """Guards the guard, end to end on a real tree rather than on a matcher."""
+    (tmp_path / "sneaky.py").write_text(source, encoding="utf-8")
 
-    found = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute) and _attribute_path(node) == "datetime.now"
-    ]
+    assert scan_for_ambient_run_state(tmp_path) != []
 
-    assert found, "the AST matcher no longer detects a direct clock read"
+
+def test_the_tripwire_does_not_fire_on_clean_code(tmp_path: Path) -> None:
+    """The other half: a scanner that flags everything is equally useless."""
+    (tmp_path / "clean.py").write_text(
+        "from memory_net.distiller.runctx import RunIdentity\n"
+        "def f(identity: RunIdentity) -> str:\n    return identity.now()\n",
+        encoding="utf-8",
+    )
+
+    assert scan_for_ambient_run_state(tmp_path) == []
 
 
 # --------------------------------------------------------------------------
