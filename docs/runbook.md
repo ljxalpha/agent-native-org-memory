@@ -317,10 +317,19 @@ about a supported integration, and it needs the evidence filed alongside it.
 ## Agent Sandbox Mount Manifest
 
 `scripts/agent_sandbox` runs an agent under test inside a bubblewrap namespace.
-The three real agent state directories (`~/.hermes`, `~/.codex`, `~/.claude`)
-are never bound: they do not exist inside the namespace at all, which is
-stronger than a read-only mount, because a path that is absent cannot be read
-and cannot be restored after a write.
+The real agent state directories (`~/.hermes`, `~/.codex`, `~/.claude`,
+`~/.openclaw`) are never bound: they do not exist inside the namespace at all,
+which is stronger than a read-only mount, because a path that is absent cannot
+be read and cannot be restored after a write.
+
+That is a claim about the plan, and the plan is assembled from two paths the
+caller supplies, so both are checked before anything is mounted. A
+`--runtime-root` that is, contains, or sits inside one of those directories is
+refused, as is the home directory itself; and `<root>/home` and
+`<root>/agentroot` must be real directories rather than symlinks, because bwrap
+mounts what a source symlink points at while the plan still reads as correct.
+`doctor` applies the same refusals as `run`: a plan an operator is shown must be
+one that would be allowed to execute.
 
 The plan below is the contract. A test parses this block and compares it, item
 for item, against what `agent_sandbox doctor` actually assembles -- so this

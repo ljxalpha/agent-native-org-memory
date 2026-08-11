@@ -307,3 +307,70 @@ def _runbook_manifest() -> list[str]:
     # The document writes the command name; the plan carries its absolute path.
     assert items[0] == "bwrap"
     return [sandbox.BWRAP, *items[1:]]
+
+
+# -- the two caller-supplied paths the plan is assembled from -------------
+
+
+def test_a_runtime_root_that_carries_an_agent_directory_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The mount plan omits `~/.hermes` and the others; `--runtime-root ~` puts
+    all of them back, and the plan still reads as correct."""
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+
+    with pytest.raises(SystemExit, match="must be absent from the namespace"):
+        sandbox.assert_runtime_root_is_safe(home, environ={"HOME": str(home)})
+
+
+def test_a_runtime_root_inside_an_agent_directory_is_refused(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".codex" / "src").mkdir(parents=True)
+
+    with pytest.raises(SystemExit, match="must be absent from the namespace"):
+        sandbox.assert_runtime_root_is_safe(
+            home / ".codex" / "src", environ={"HOME": str(home)}
+        )
+
+
+def test_the_home_directory_itself_is_refused_as_a_runtime_root(
+    tmp_path: Path,
+) -> None:
+    """Refused even on a machine with no agent installed, where the check above
+    finds nothing to match."""
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with pytest.raises(SystemExit, match="carries every agent state directory"):
+        sandbox.assert_runtime_root_is_safe(home, environ={"HOME": str(home)})
+
+
+def test_an_ordinary_runtime_root_is_accepted(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    runtime = tmp_path / "agent-runtime"
+    runtime.mkdir()
+
+    sandbox.assert_runtime_root_is_safe(runtime, environ={"HOME": str(home)})
+
+
+@pytest.mark.parametrize("name", ["home", "agentroot"])
+def test_a_symlinked_bind_source_is_refused(tmp_path: Path, name: str) -> None:
+    """Resolving the sandbox root does not cover its children, and bwrap mounts
+    what a source symlink points at."""
+    root = tmp_path / "sbx"
+    root.mkdir()
+    (tmp_path / "hermes-state").mkdir()
+    (root / name).symlink_to(tmp_path / "hermes-state")
+
+    with pytest.raises(SystemExit, match="it is a symlink"):
+        sandbox.assert_mount_sources_are_not_symlinks(root)
+
+
+def test_real_directories_under_the_root_are_accepted(tmp_path: Path) -> None:
+    root = tmp_path / "sbx"
+    (root / "home").mkdir(parents=True)
+    (root / "agentroot").mkdir()
+
+    sandbox.assert_mount_sources_are_not_symlinks(root)

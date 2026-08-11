@@ -4397,3 +4397,16 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   `(keys, False) == (keys, False)` 依然相等，即该条在最该报警时最安静；
   第 10 条原本只问"有没有拒绝计数"，一条车道丢掉全部 cluster 却只记录一次拒绝时同样通过。
 - Change time: 2026-08-11
+
+## Change Record - 2026-08-11 沙箱挂载源的入参校验
+
+- Change summary: `scripts/agent_sandbox` 新增 `assert_runtime_root_is_safe` 与
+  `assert_mount_sources_are_not_symlinks`，在 `run` 与 `doctor` 两处生效：
+  拒绝"是 / 包含 / 位于"任一真实 agent 状态目录的 runtime root，拒绝家目录本身，
+  并拒绝 `<root>/home` 与 `<root>/agentroot` 为符号链接。`assert_root_is_safe`
+  的禁止目录判定同时补上"该路径**包含**禁止目录"这一方向。
+- Change reason: "那几个目录在 namespace 内根本不存在"是关于**挂载计划**的陈述，
+  而计划由两个调用方给定的路径拼出：`--runtime-root ~` 会把它们一次性全塞回去，
+  `<root>/agentroot` 指向 `~/.hermes` 的符号链接会被 bwrap 跟随挂载其目标——
+  两种情况下 manifest 打印出来仍然完全正确，这正是它危险的地方。
+- Change time: 2026-08-11

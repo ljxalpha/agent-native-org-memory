@@ -37,7 +37,7 @@ from pathlib import Path
 if __package__ in (None, ""):  # pragma: no cover - direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from memory_net.shared.env_allowlist import (  # noqa: E402
+from memory_net.shared.env_allowlist import (
     MISSING_MARKER,
     SET_MARKER,
     CredentialError,
@@ -187,14 +187,22 @@ def mount_plan(
     return plan
 
 
-def sandbox_env(*, runtime_root: Path, credentials: Mapping[str, str]) -> dict[str, str]:
+def sandbox_env(
+    *, runtime_root: Path, credentials: Mapping[str, str]
+) -> dict[str, str]:
     """Layer two, assembled. Credentials are merged by the caller's ``execve``."""
     env = {
         "HOME": SANDBOX_HOME,
         "PATH": f"{runtime_root / 'venv' / 'bin'}:/usr/bin",
         "HERMES_HOME": f"{SANDBOX_HOME}/.hermes",
     }
-    env.update({key: value for key, value in credentials.items() if key in SANDBOX_ENV_ALLOWLIST})
+    env.update(
+        {
+            key: value
+            for key, value in credentials.items()
+            if key in SANDBOX_ENV_ALLOWLIST
+        }
+    )
     return env
 
 
@@ -221,6 +229,24 @@ def resolv_target_of(etc_resolv: Path = Path("/etc/resolv.conf")) -> Path | None
     return target if target.exists() else None
 
 
+def _forbidden_agent_dir(resolved: Path, home: Path) -> Path | None:
+    """The real agent state directory ``resolved`` sits in, or contains."""
+    for name in FORBIDDEN_ROOT_NAMES:
+        forbidden = (home / name).expanduser()
+        if not forbidden.exists():
+            continue
+        forbidden = forbidden.resolve()
+        if (
+            resolved == forbidden
+            or forbidden in resolved.parents
+            # A path that *contains* the agent directory is just as bad: binding
+            # `$HOME` puts every one of them inside the namespace at once.
+            or resolved in forbidden.parents
+        ):
+            return forbidden
+    return None
+
+
 def assert_root_is_safe(root: Path, *, environ: Mapping[str, str]) -> None:
     """Refuse a root that ``clean`` must never be pointed at.
 
@@ -230,13 +256,55 @@ def assert_root_is_safe(root: Path, *, environ: Mapping[str, str]) -> None:
     """
     resolved = root.expanduser().resolve()
     home = Path(environ.get("HOME") or "~").expanduser()
-    for name in FORBIDDEN_ROOT_NAMES:
-        forbidden = (home / name).resolve()
-        if resolved == forbidden or forbidden in resolved.parents:
-            raise SystemExit(f"refusing a sandbox root inside {home / name}")
+    forbidden = _forbidden_agent_dir(resolved, home)
+    if forbidden is not None:
+        raise SystemExit(f"refusing a sandbox root inside {forbidden}")
     toplevel = _git_toplevel()
     if toplevel is not None and (resolved == toplevel or toplevel in resolved.parents):
         raise SystemExit(f"refusing a sandbox root inside the repository {toplevel}")
+
+
+def assert_runtime_root_is_safe(
+    runtime_root: Path, *, environ: Mapping[str, str]
+) -> None:
+    """The runtime root is bind-mounted, so it needs the same refusal as the root.
+
+    "Those directories do not exist inside the namespace" is a claim about the
+    mount plan, and the plan is assembled from two caller-supplied paths. A
+    `--runtime-root ~` -- or a runtime root that happens to sit inside an agent
+    directory -- reintroduces exactly what the plan omits, and the omission
+    still reads as correct in the manifest.
+    """
+    resolved = runtime_root.expanduser().resolve()
+    home = Path(environ.get("HOME") or "~").expanduser()
+    forbidden = _forbidden_agent_dir(resolved, home)
+    if forbidden is not None:
+        raise SystemExit(
+            f"refusing to bind a runtime root that exposes {forbidden}: "
+            "the agent state directories must be absent from the namespace"
+        )
+    if resolved == home.resolve():
+        raise SystemExit(
+            "refusing to bind the home directory as the runtime root: "
+            "it carries every agent state directory at once"
+        )
+
+
+def assert_mount_sources_are_not_symlinks(root: Path) -> None:
+    """The two bind sources must be real directories under the sandbox root.
+
+    bwrap follows a symlink at the source path, so `<root>/agentroot -> ~/.hermes`
+    puts the host's agent state inside the namespace while the mount plan still
+    reads as `<root>/agentroot`. Resolving the root is not enough, because these
+    are its children.
+    """
+    for name in ("home", "agentroot"):
+        source = root / name
+        if source.is_symlink():
+            raise SystemExit(
+                f"refusing to bind {source}: it is a symlink, and bwrap would "
+                "mount its target rather than a directory under the sandbox root"
+            )
 
 
 def _git_toplevel() -> Path | None:
@@ -318,6 +386,11 @@ def do_doctor(
     since: str | None,
     environ: Mapping[str, str],
 ) -> int:
+    # Checked here too: `doctor` is what an operator reads to decide the plan is
+    # right, so it must refuse the same paths `run` refuses rather than print a
+    # plan that would never be allowed to execute.
+    assert_root_is_safe(root, environ=environ)
+    assert_runtime_root_is_safe(runtime_root, environ=environ)
     print("mount plan:")
     for line in _grouped(
         mount_plan(
@@ -381,6 +454,8 @@ def do_run(
     environ: Mapping[str, str],
 ) -> int:
     assert_root_is_safe(root, environ=environ)
+    assert_runtime_root_is_safe(runtime_root, environ=environ)
+    assert_mount_sources_are_not_symlinks(root)
     if not command:
         raise SystemExit("no command given after --")
     plan = mount_plan(
