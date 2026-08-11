@@ -98,4 +98,68 @@ printing an unusable payload.
 
 ## Stability Check
 
-Run `scripts/stability_smoke.py --iterations 3`; real release readiness still requires a 3-leaf 24h run.
+`scripts/stability_smoke.py --iterations 3` repeats the single-pass end-to-end
+regression and reports how many iterations returned zero. It is a quick "does
+the flow still work" check and says nothing about any leaf's health over time.
+
+## Three-Leaf Stability Soak
+
+`scripts/stability_soak.py` drives `tests/integration/local_repo_three_leaves.sh`
+in a loop over three independent leaves (each with its own agent root, its own
+clone and its own `MEMORY_NET_HOME`) and, after every cycle, checks each leaf's
+`.health.json`.
+
+CI runs the accelerated lane on every push:
+
+```bash
+python scripts/stability_soak.py --leaves 3 --cycles 5
+```
+
+The 24h lane is **the same script, the same cycle and the same assertions** —
+only the stopping condition differs:
+
+```bash
+python scripts/stability_soak.py --leaves 3 --duration-seconds 86400 \
+  --workspace ~/soak-workspace --report ~/soak-report.json
+```
+
+Pass `--workspace` for any long run: it keeps the leaf repositories and the
+per-cycle logs after the run instead of discarding them, which is what you need
+when something fails at hour 19.
+
+### What it checks each cycle, for each leaf
+
+1. the health file passes the strict check (`require_ops_identity=True`, the
+   same seven fields as `memory-net-leaf status`);
+2. `status` is `healthy`;
+3. `recent_errors` is empty;
+4. `last_report_at` has not moved backwards;
+5. `redaction_incidents.blocked_reports` has not grown;
+6. the payload changed since the previous cycle — a leaf that stopped reporting
+   leaves a health file that still satisfies 1-5.
+
+### How to read the result
+
+- Exit code `0` and `"passed": true` in the report: every cycle checked every
+  leaf and every check held.
+- Any failure stops the run. The report's `failures` list names the cycle, the
+  leaf `node_id` and the check. Diagnostics are deliberately field-level only:
+  they never contain memory text, and `recent_errors` is reported as a count.
+- `cycles_completed` lower than expected with `passed: false` means the run
+  stopped early; look at the last entry of `cycles`.
+
+### After a failure, collect
+
+1. the report JSON (`--report`);
+2. `<workspace>/logs/cycle-<n>.log` for the failing cycle — the harness output;
+3. `<workspace>/leaf-work-<node_id>/.health.json` for the named leaf, and the
+   same file from the cycle before it if you kept a copy;
+4. `<workspace>/home-<node_id>/state/` for that leaf's install identity.
+
+### What this lane does not prove
+
+The three leaves are synthetic instances on one machine using the mock provider.
+A green soak — accelerated or 24h — says the cycle logic and the health contract
+hold. It is **not** evidence about real agents consuming memory, daemon
+residency and restart, cron triggering, real embeddings or real LLM calls. A CI
+run of `--cycles 5` is in particular **not** a 24h stability result.

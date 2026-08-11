@@ -28,6 +28,12 @@ jobs:
         run: bash tests/integration/local_repo.sh
       - name: Run leaf install integration
         run: bash tests/integration/install_leaf_local.sh
+      # The accelerated lane of the three-leaf soak: minutes, no provider quota,
+      # and blocking. Same code path as the operator's 24h lane in
+      # docs/runbook.md -- only the stopping condition differs, so this step is
+      # not evidence of a 24h run.
+      - name: Run three-leaf stability soak (accelerated)
+        run: python scripts/stability_soak.py --leaves 3 --cycles 5 --report stability_soak_report.json
       - name: Validate shared pilot gate
         run: python scripts/validate_shared_pilot_gate.py
       - name: Upload distiller diagnostics
@@ -39,4 +45,5 @@ jobs:
             **/.health.json
             **/distill_runs/**/metrics.json
             **/record_runs/**
+            stability_soak_report.json
           if-no-files-found: ignore

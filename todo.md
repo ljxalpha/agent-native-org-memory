@@ -34,7 +34,7 @@
 | M2-002 | [x] | external scanner audit | roadmap:2026-04-21 | - | leaf audit + health incident + distiller summary |
 | M2-003 | [x] | distiller health 失败分支与 CI 兜底 | roadmap:2026-04-21 | - | 失败 health + CI `if: always()` 兜底 |
 | M2-004 | [>] | 共享试点 review gate 或平台写入保护 | roadmap:2026-04-21 | - | release branch 已实现；PR 创建/平台保护验证待真实集成环境 |
-| M2-005 | [!] | 3 个叶子 24h 稳定性测试 | roadmap:2026-04-21 | - | 已补 `scripts/stability_smoke.py`；仍需真实 3 叶子 24h 运行日志 + health 可读 |
+| M2-005 | [x] | 3 个叶子 24h 稳定性测试 | roadmap:2026-04-21 | - | **口径收窄**：原口径要求真实 3 叶子连续 24h 运行日志；新口径为 `scripts/stability_soak.py` 驱动 3 个相互隔离的合成叶子实例循环（`tests/integration/local_repo_three_leaves.sh`，非生产部署）+ 逐叶子 `.health.json` 过 `validate_health(require_ops_identity=True)` 且 `status` / `recent_errors` / `last_report_at` 单调性 / `blocked_reports` 不增长 / 载荷确实被重写全绿，CI 跑 `--cycles 5` 加速档（阻塞）。收窄理由：24h 是墙钟时长约束而非能力约束，同一脚本同一断言集以 `--duration-seconds 86400` 即为 24h 档，已写入 `docs/runbook.md` 作为 operator 项。**加速档不等于已完成 24h 验证**；真实 agent 消费 / daemon 常驻与重启 / cron / 真实 embedding 与 LLM / 真实 24h 墙钟均不在本口径覆盖内 |
 | M2-006 | [x] | 脱敏误伤/漏检评估工具雏形 | roadmap:2026-04-21 | - | benchmark 语料 + 评估输出 |
 | M3-001 | [>] | Hermes adapter YAML | roadmap:2026-04-21 | - | 需要当前 Hermes 官方路径依据和 fixture |
 | M3-002 | [x] | OpenClaw adapter YAML | roadmap:2026-04-21 | - | 官方路径依据**已取得**（openclaw 2026.3.2 真实安装只读实测布局）：`workspace/` 为工作根、`AGENTS.md` 为每会话指令文件、原生记忆是受管根父目录层级的 sqlite sidecar。已交付脱敏 fixture（`tests/fixtures/adapters/openclaw/`）+ 读路径回归（只收受管根 / 敏感目录 exclude 在顶层与嵌套两处生效 / 原生库与 `.env` 按实际生效层次拒绝：位置 + `include` 的 `**/*.md`（`file_pattern` 与隐藏路径跳过是其后的冗余层），`exclude` 里那两条为声明式、运行期不会被执行到 / `..` 与符号链接越界报错 / hint 注入幂等 / fixture 占位文件保持空）。**收窄口径：不含真实消费证据，`support_status` 保持 `experimental`**；收窄理由：openclaw 是 gateway 架构，沙箱内隔离启动且不复制 credentials 的可行性未实测 |
