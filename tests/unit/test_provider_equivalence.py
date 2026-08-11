@@ -136,7 +136,7 @@ def test_the_lanes_satisfy_the_same_contract(
 ) -> None:
     results = compare_run_invariants(*lanes, clusters=clusters, expect=EXPECT)
 
-    assert len(results) == 17
+    assert len(results) == 18  # 17 numbered clauses; 8 is split into two
     assert_invariants_equivalent(results)
 
 
@@ -148,7 +148,7 @@ def test_the_contract_table_names_every_invariant(
         compare_run_invariants(*lanes, clusters=clusters, expect=EXPECT)
     ).splitlines()
 
-    assert len(table) == 17
+    assert len(table) == 18
     assert all(line.startswith("PASS") for line in table)
 
 
@@ -218,3 +218,62 @@ def test_a_duplicate_topic_is_reported(
         compare_run_invariants(mock, duplicated, clusters=clusters, expect=EXPECT)
     )
     assert 16 in failed
+
+
+def test_both_lanes_failing_to_parse_is_reported(
+    lanes: tuple[LaneOutcome, LaneOutcome], clusters: list[dict[str, Any]]
+) -> None:
+    """Clause 8 used to fold this into a cross-lane equality, which both lanes
+    satisfied by failing identically: `(keys, False) == (keys, False)`.
+
+    A property that has to hold is the wrong thing to express as a comparison
+    -- an equality between two broken lanes is still an equality.
+    """
+    mock, real = lanes
+    broken = [
+        replace(lane, metrics={**lane.metrics, "parse_failure_rate": 0.25})
+        for lane in (mock, real)
+    ]
+
+    failed = _failed(compare_run_invariants(*broken, clusters=clusters, expect=EXPECT))
+    assert 8 in failed
+
+
+def test_one_rejection_does_not_account_for_several_silent_clusters(
+    lanes: tuple[LaneOutcome, LaneOutcome], clusters: list[dict[str, Any]]
+) -> None:
+    """Clause 10 used to ask whether *any* rejection was recorded, so a lane
+    that dropped every cluster but rejected one read as fully accounted for."""
+    mock, real = lanes
+    silent = replace(
+        real,
+        products={},
+        bodies={},
+        metrics={**real.metrics, "skipped_clusters": 1},
+    )
+
+    failed = _failed(
+        compare_run_invariants(mock, silent, clusters=clusters, expect=EXPECT)
+    )
+    assert 10 in failed
+
+
+def test_a_fully_accounted_for_rejection_does_not_trip_clause_ten(
+    lanes: tuple[LaneOutcome, LaneOutcome], clusters: list[dict[str, Any]]
+) -> None:
+    """The other side of the same clause: a cluster that produced nothing *and*
+    has a recorded reason is not a silent drop, and must not be reported as one.
+    """
+    mock, real = lanes
+    path = next(iter(real.products))
+    dropped = replace(
+        real,
+        products={key: value for key, value in real.products.items() if key != path},
+        bodies={key: value for key, value in real.bodies.items() if key != path},
+        metrics={**real.metrics, "skipped_clusters": 1},
+    )
+
+    failed = _failed(
+        compare_run_invariants(mock, dropped, clusters=clusters, expect=EXPECT)
+    )
+    assert 10 not in failed

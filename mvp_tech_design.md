@@ -3352,13 +3352,14 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 拿它做基准等于让 mock 与自己比较。两条车道必须跑在**同一份记录、同一种聚类**上，
 否则不变量的差异描述的是 fixture 而不是后端。
 
-**17 条不变量**（`compare_run_invariants`，输出的是一张逐条命名的表而不是一个布尔值）：
+**17 条不变量**（`compare_run_invariants`，输出的是一张逐条命名的表而不是一个布尔值；
+第 8 条拆成两行输出，故表共 18 行）：
 
 1. run status 为 `success`；2. `input_records` 相等；3. 每个产物通过产物 schema 校验；
 4. `citation_resolution_rate == 1.0`；5. `category_distribution` 的键 ⊆ 配置 categories；
 6. 每个 category 满足 `category_evidence_rules`；7. manifest 字段集合与 tombstone 状态一致；
-8. `metrics.json` 键集合一致且 `parse_failure_rate == 0`；9. fixture 的 `required_terms` 命中；
-10. **每个 cluster 都有明确结论**（要么产出，要么有带原因的拒绝计数，静默无输出即失败）；
+8. `metrics.json` 键集合一致（跨车道比较）**且每条车道各自** `parse_failure_rate == 0`（逐车道断言，不是比较）；9. fixture 的 `required_terms` 命中；
+10. **每个 cluster 都有明确结论**（无产出的 cluster 数不得超过已记录的拒绝计数，静默丢弃即失败）；
 11. 产物数量下界（全 run ≥1，每个非空 cluster ≥1）；12. 产物数量上界（全 run 与每 cluster）；
 13. title / summary / evidence 非空，且 summary 达到最小长度；
 14. **逐产物**的 citation 数与贡献者数达标（不是全局平均）；
@@ -4384,4 +4385,15 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
 - Change reason: 上述内容此前散落在各子任务的实现里没有运维面。其中两条必须写进文档而非只留在代码：
   凭据取值"进程环境优先"是 operator 注入独立低额度 key 的唯一通道，
   录制目录含完整 prompt 因而只有 `record_metrics.json` 可外发。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 等价合同第 8、10 条的可证伪性修复
+
+- Change summary: §9.12 第 8 条拆为"键集合跨车道相等"+"每条车道各自 `parse_failure_rate == 0`"
+  两条（表因此 18 行）；第 10 条由"存在任一拒绝计数即放行"改为"无产出的 cluster 数
+  不得超过已记录的拒绝计数"。两条各补一个注入式负向测试，第 10 条另补一个反向用例
+  （有据可查的单个丢弃不得被误报）。
+- Change reason: 第 8 条原本把"必须成立的属性"写成了跨车道比较，两条车道**同时**解析失败时
+  `(keys, False) == (keys, False)` 依然相等，即该条在最该报警时最安静；
+  第 10 条原本只问"有没有拒绝计数"，一条车道丢掉全部 cluster 却只记录一次拒绝时同样通过。
 - Change time: 2026-08-11

@@ -234,15 +234,19 @@ def compare_run_invariants(
             ),
         )
     )
+    # Split deliberately. Folding "no parse failures" into the cross-lane
+    # comparison made it satisfiable by both lanes failing: `(keys, False)`
+    # equals `(keys, False)`. An equality is the wrong shape for a property that
+    # has to hold, rather than merely to match.
     results.append(
-        _equal(
+        _equal(8, "metrics key set", lanes, lambda lane: tuple(sorted(lane.metrics)))
+    )
+    results.append(
+        _both(
             8,
-            "metrics key set, with no parse failures",
+            "no parse failures in either lane",
             lanes,
-            lambda lane: (
-                tuple(sorted(lane.metrics)),
-                lane.metrics["parse_failure_rate"] == 0.0,
-            ),
+            lambda lane: lane.metrics["parse_failure_rate"] == 0.0,
         )
     )
     results.append(
@@ -450,8 +454,17 @@ def _clusters_concluded(
             for cluster_id, paths in _by_cluster(lane, partition).items()
             if not paths
         ]
-        if silent and not rejected:
-            problems.append(f"{lane.name}: clusters {silent} produced nothing silently")
+        # Counted, not merely present. A single rejection anywhere in the run
+        # used to excuse every silent cluster, so a lane that dropped four
+        # clusters and rejected one still read as fully accounted for. The
+        # metrics carry no per-cluster reason, so the strongest statement
+        # available is that there are at least as many recorded rejections as
+        # there are clusters with nothing to show.
+        if len(silent) > rejected:
+            problems.append(
+                f"{lane.name}: clusters {silent} produced nothing, and only "
+                f"{rejected} rejection(s) are recorded to account for them"
+            )
     return problems
 
 
