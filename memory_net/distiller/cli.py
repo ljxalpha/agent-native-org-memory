@@ -277,6 +277,13 @@ def main(argv: list[str] | None = None) -> int:
             min_citations_by_category=_min_citations_by_category(distill_config),
             min_contributors_by_category=_min_contributors_by_category(distill_config),
             max_records_per_prompt=_max_records_per_prompt(distill_config),
+            schedule_by_estimated_cost=_clustering_flag(
+                distill_config, "schedule_by_estimated_cost"
+            ),
+            singleton_lane_enabled=_singleton_lane(distill_config).get(
+                "enabled", False
+            ),
+            singleton_lane_max_records=_singleton_lane_cap(distill_config),
         )
         result = DistillOrchestrator(
             context=context,
@@ -822,6 +829,33 @@ def _dbscan_min_samples(config: dict[str, Any]) -> int:
     if isinstance(clustering, dict) and clustering.get("min_samples") is not None:
         return int(clustering["min_samples"])
     return 2
+
+
+def _clustering_section(config: dict[str, Any]) -> dict[str, Any]:
+    clustering = config.get("clustering")
+    return clustering if isinstance(clustering, dict) else {}
+
+
+def _clustering_flag(config: dict[str, Any], key: str) -> bool:
+    """One boolean scheduling switch, false unless the profile turns it on."""
+    return bool(_clustering_section(config).get(key, False))
+
+
+def _singleton_lane(config: dict[str, Any]) -> dict[str, Any]:
+    lane = _clustering_section(config).get("singleton_lane")
+    return lane if isinstance(lane, dict) else {}
+
+
+def _singleton_lane_cap(config: dict[str, Any]) -> int | None:
+    value = _singleton_lane(config).get("max_records")
+    if value is None:
+        return None
+    cap = int(value)
+    if cap < 0:
+        raise SystemExit(
+            f"clustering.singleton_lane.max_records must not be negative: {value!r}"
+        )
+    return cap
 
 
 def _min_citations_by_category(config: dict[str, Any]) -> dict[str, int]:

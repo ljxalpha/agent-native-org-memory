@@ -203,6 +203,7 @@ class DistillationPipeline:
         max_records_per_prompt: int | None = None,
         singleton_lane_enabled: bool = False,
         singleton_lane_max_records: int | None = None,
+        schedule_by_estimated_cost: bool = False,
         context: RunContext | None = None,
     ) -> None:
         self.provider = provider
@@ -227,6 +228,10 @@ class DistillationPipeline:
         self.max_records_per_prompt = (
             None if max_records_per_prompt is None else int(max_records_per_prompt)
         )
+        # Default false, and it has to stay that way in every recorded profile:
+        # strict replay compares calls in recording order, so re-ordering the
+        # clusters turns a whole golden bundle into misses (§7.2 DISTILL-001).
+        self.schedule_by_estimated_cost = bool(schedule_by_estimated_cost)
         self.singleton_lane_enabled = bool(singleton_lane_enabled)
         self.singleton_lane_max_records = (
             None
@@ -483,7 +488,7 @@ class DistillationPipeline:
         ``unclustered.json`` with that reason.
         """
         if not self.singleton_lane_enabled:
-            return clusters
+            return self._by_estimated_cost(clusters)
         grouped = [cluster for cluster in clusters if len(cluster) > 1]
         singletons = [cluster for cluster in clusters if len(cluster) <= 1]
         cap = self.singleton_lane_max_records
@@ -491,7 +496,25 @@ class DistillationPipeline:
             for cluster in singletons[cap:]:
                 tally.terminals.append((NOISE, cluster))
             singletons = singletons[:cap]
-        return grouped + singletons
+        return self._by_estimated_cost(grouped) + self._by_estimated_cost(singletons)
+
+    def _by_estimated_cost(
+        self, clusters: list[list[dict[str, Any]]]
+    ) -> list[list[dict[str, Any]]]:
+        """Cheapest cluster first, when the profile asked for it.
+
+        Cheapest-first maximises how many clusters finish before a ceiling is
+        reached. It is off by default and must stay off wherever a run is
+        recorded or replayed: replay matches calls positionally, so a re-ordered
+        run misses on every one of them.
+
+        The estimate is prompt size, taken from the same record text the
+        embedder saw. Sorting is stable, so clusters of equal size keep their
+        clustering order and the run stays reproducible.
+        """
+        if not self.schedule_by_estimated_cost:
+            return clusters
+        return sorted(clusters, key=_estimated_prompt_size)
 
     def _chunk_payload(
         self,
@@ -837,6 +860,19 @@ def _response_schema(categories: list[str]) -> dict[str, Any]:
             }
         },
     }
+
+
+def _estimated_prompt_size(cluster_records: list[dict[str, Any]]) -> int:
+    """How large this cluster's prompt will be, in characters.
+
+    A proxy for cost, not a price: the ordering only needs to be monotone in
+    prompt length, and a token estimate here would be a second, drifting copy of
+    the one the budget already uses.
+    """
+    return sum(
+        len(str(record.get("body") or record.get("content") or ""))
+        for record in cluster_records
+    )
 
 
 def _id_of(record: dict[str, Any]) -> str:
