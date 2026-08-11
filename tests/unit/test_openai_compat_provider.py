@@ -64,7 +64,7 @@ class _FakeClient:
     def create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         outcome = self._outcomes.pop(0)
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
@@ -363,3 +363,80 @@ def test_every_attempt_settles_its_reservation() -> None:
 
     budget.assert_all_settled()
     assert budget.snapshot()["attempts"] == 3
+
+
+# --------------------------------------------------------------------------
+# Every attempt reaches a terminal state, including on the ugly paths
+# --------------------------------------------------------------------------
+
+
+class _Malformed:
+    """A response object whose decoding blows up after the call was billed."""
+
+    @property
+    def choices(self) -> Any:
+        raise AttributeError("malformed SDK response")
+
+
+def test_a_malformed_response_still_settles_its_reservation() -> None:
+    """Decoding happens after the request was billed, so a body we cannot read
+    must not leave the hold open -- that would drop the cost off the ceiling."""
+    budget = RunBudget(1.0, 10.0, max_usd=None)
+    provider, _ = _provider([_Malformed()], budget=budget)
+
+    with pytest.raises(AttributeError):
+        provider.generate(_request())
+
+    budget.assert_all_settled()
+    assert budget.snapshot()["attempts"] == 1
+
+
+def test_an_interrupt_between_reserve_and_settle_does_not_leak_the_hold() -> None:
+    """KeyboardInterrupt is a BaseException: catching only Exception would let
+    the reservation escape unsettled."""
+    budget = RunBudget(1.0, 10.0, max_usd=None)
+    provider, _ = _provider([KeyboardInterrupt()], budget=budget)
+
+    with pytest.raises(KeyboardInterrupt):
+        provider.generate(_request())
+
+    budget.assert_all_settled()
+    # Conservative: an interrupt cannot prove the service did not run.
+    assert budget.snapshot()["spent_usd"] > 0.0
+
+
+def test_an_interrupt_is_not_retried() -> None:
+    provider, client = _provider(
+        [KeyboardInterrupt(), _Completion(usage=_Usage(1, 1))], max_retries=2
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        provider.generate(_request())
+
+    assert len(client.calls) == 1
+
+
+def test_retry_backoff_counts_against_the_run_wall_clock() -> None:
+    """Time spent waiting to retry is time the run spent. Leaving it out would
+    let a run blow its wall-clock ceiling while the ledger looked fine."""
+    slept: list[float] = []
+    budget = RunBudget(1.0, 10.0, max_usd=None, max_wall_clock_s=None)
+    client = _FakeClient([_HTTPError(500), _Completion(usage=_Usage(1, 1))])
+    provider = OpenAICompatProvider(
+        api_key="unused-because-a-client-is-injected",
+        base_url="https://example.invalid/v1",
+        model="deepseek-v4-flash",
+        client=client,
+        budget=budget,
+        sleep=lambda seconds: slept.append(seconds),
+    )
+
+    provider.generate(_request())
+
+    assert slept, "a retryable failure must back off before retrying"
+    # The second attempt's window opens before its backoff, so the waiting time
+    # is inside the settled wall clock rather than outside every window.
+    import inspect
+
+    source = inspect.getsource(OpenAICompatProvider.generate)
+    assert source.index("started = time.monotonic()") < source.index("self.sleep(")

@@ -125,42 +125,64 @@ class OpenAICompatProvider(LLMProvider):
         last_exc: BaseException | None = None
 
         for attempt in range(self.max_retries + 1):
+            # The backoff is inside the attempt's own timing window, so the
+            # run's wall-clock ledger accounts for time spent waiting to retry
+            # rather than only for time spent inside the request.
+            started = time.monotonic()
+            if attempt:
+                self.sleep(_BACKOFF_BASE_S * (2 ** (attempt - 1)))
             # Reserved before every attempt, including retries: a retry is a
             # fresh call with a fresh cost, and a ceiling that only counted the
             # first one would not be a ceiling.
             reservation = self._reserve(request)
-            started = time.monotonic()
             try:
-                completion = client.chat.completions.create(
-                    model=model,
-                    max_tokens=request.max_tokens,
-                    # Two messages, never one: the role boundary is the point.
-                    messages=[
-                        {"role": "system", "content": request.system_prompt},
-                        {"role": "user", "content": request.user_prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    timeout=self.timeout_s,
+                completion = self._call(client, request=request, model=model)
+            except BaseException as exc:
+                # BaseException, not Exception: a KeyboardInterrupt between the
+                # reserve and the settle would otherwise leak the hold, and an
+                # unsettled hold is an attempt whose cost silently missed the
+                # ceiling.
+                outcome = (
+                    classify_failure(exc)
+                    if isinstance(exc, Exception)
+                    else _Outcome(retryable=False, billable=True)
                 )
-            except Exception as exc:
-                outcome = classify_failure(exc)
                 self._close(reservation, billable=outcome.billable, started=started)
                 last_exc = exc
                 if not outcome.retryable or attempt == self.max_retries:
                     raise
-                self.sleep(_BACKOFF_BASE_S * (2**attempt))
                 continue
 
-            return self._to_response(
-                completion,
-                request=request,
-                model=model,
-                reservation=reservation,
-                started=started,
-            )
+            # From here the request has been billed, so the reservation must
+            # reach a terminal state even if decoding the response blows up on
+            # a malformed body.
+            try:
+                return self._to_response(
+                    completion,
+                    request=request,
+                    model=model,
+                    reservation=reservation,
+                    started=started,
+                )
+            except BaseException:
+                self._close(reservation, billable=True, started=started)
+                raise
 
         # Unreachable: the loop either returns or re-raises on its last attempt.
         raise RuntimeError(f"{PROVIDER_BACKEND} call failed") from last_exc
+
+    def _call(self, client: Any, *, request: LLMRequest, model: str) -> Any:
+        return client.chat.completions.create(
+            model=model,
+            max_tokens=request.max_tokens,
+            # Two messages, never one: the role boundary is the point.
+            messages=[
+                {"role": "system", "content": request.system_prompt},
+                {"role": "user", "content": request.user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            timeout=self.timeout_s,
+        )
 
     # -- helpers ---------------------------------------------------------
 
@@ -207,7 +229,9 @@ class OpenAICompatProvider(LLMProvider):
         started: float,
         usage: dict[str, int] | None = None,
     ) -> None:
-        if reservation is None:
+        if reservation is None or reservation.is_settled:
+            # Idempotent: the guard around response decoding closes the
+            # reservation only if _to_response did not already get there.
             return
         wall_s = time.monotonic() - started
         if usage is not None:

@@ -81,6 +81,15 @@ class Reservation:
     _wall_upper_s: float
     _settled: bool = False
 
+    @property
+    def is_settled(self) -> bool:
+        """Whether a terminal state has already been reached.
+
+        Lets a caller wrap an attempt in a belt-and-braces guard without that
+        guard double-terminating a reservation the happy path already closed.
+        """
+        return self._settled
+
     def settle(self, *, usage: dict[str, int], wall_s: float) -> None:
         """Success: charge the real usage and refund the rest of the hold."""
         self._finish(
