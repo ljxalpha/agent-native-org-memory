@@ -1118,9 +1118,11 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
    这条按**生效值**判定而非 profile 字面值：`--provider` / `--fallback-provider` 会覆盖 profile，
    只查 profile 的话，一条 `--provider mock` 就能让 production profile 跑出一份假产物，
    而 `profile_class: production` 仍照常写进 metrics。**主备两条通道分别判**——
-   备用通道同样会产出发布物。同理 **production 下 `--replay` 一律拒绝**：
+   备用通道同样会产出发布物。同理 **production 下的 `--replay` 也按生效值判定**：
    回放会把 provider 整个换成 `ReplayProvider`，绕过上面这条检查，
    而 bundle 里录的可能正是 mock 的响应，`provider_backend` 也照录不误。
+   因此判据是 bundle 的**逐调用 backend 溯源**：每一条调用都记着允许的后端才放行，
+   出现 mock / hermes_tool / unknown，或 bundle 读不出来，一律拒绝（口径见 §9.10.1）。
 2. 数值键必须是**有限且为正**的数（`llm.budget_usd` 与两个 `*_per_mtok_usd`）。
    只查"键存在"挡不住 `0` / `.nan` / `.inf`：预扣额度完全由这几个价格算出，
    价格为 0 则任何调用的预扣都是 0，`.nan` 的比较恒为假——两种写法都让上界形同虚设，
