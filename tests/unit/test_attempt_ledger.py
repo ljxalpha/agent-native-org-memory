@@ -210,9 +210,7 @@ def test_the_lock_is_released_after_each_reservation(tmp_path: Path) -> None:
     assert not ledger.lock_path.exists()
 
 
-def test_a_held_lock_eventually_fails_loudly(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_a_held_lock_eventually_fails_loudly(tmp_path: Path, monkeypatch: Any) -> None:
     ledger = _ledger(tmp_path, ceiling=5)
     ledger.lock_path.parent.mkdir(parents=True, exist_ok=True)
     ledger.lock_path.touch()
@@ -229,3 +227,127 @@ def test_entries_are_json_lines(tmp_path: Path) -> None:
     lines = ledger.path.read_text(encoding="utf-8").splitlines()
 
     assert [json.loads(line)["run_id"] for line in lines] == ["r1"]
+
+
+# --------------------------------------------------------------------------
+# The production provider reserves before every request
+# --------------------------------------------------------------------------
+
+
+class _CountingClient:
+    """Stands in for the SDK client, and counts requests actually made."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.requests = 0
+        self.error = error
+        self.chat = self
+
+    @property
+    def completions(self) -> _CountingClient:
+        return self
+
+    def create(self, **_kwargs: Any) -> Any:
+        self.requests += 1
+        if self.error is not None:
+            raise self.error
+        message = type("Message", (), {"content": '{"products": []}'})()
+        choice = type("Choice", (), {"message": message, "finish_reason": "stop"})()
+        usage = type("Usage", (), {"prompt_tokens": 1, "completion_tokens": 1})()
+        return type(
+            "Completion", (), {"choices": [choice], "usage": usage, "model": "m"}
+        )()
+
+
+def _request() -> Any:
+    from memory_net.distiller.llm.base import LLMRequest
+
+    return LLMRequest(
+        system_prompt="s",
+        user_prompt="u",
+        model="m",
+        metadata={"run_id": "20260810T101010Z-a1b2c3d4"},
+    )
+
+
+def test_the_provider_records_one_attempt_per_request(tmp_path: Path) -> None:
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+
+    ledger = _ledger(tmp_path, ceiling=5)
+    client = _CountingClient()
+    provider = OpenAICompatProvider(client=client, ledger=ledger, model="m")
+
+    provider.generate(_request())
+
+    assert client.requests == 1
+    assert ledger.spent() == 1
+    reserved = [item for item in ledger.entries() if item["outcome"] == "reserved"]
+    assert reserved[0]["run_id"] == "20260810T101010Z-a1b2c3d4"
+    assert reserved[0]["provider"] == "deepseek"
+
+
+def test_the_provider_makes_no_request_once_the_ceiling_is_reached(
+    tmp_path: Path,
+) -> None:
+    """The assertion that matters: the refusal happens before the wire, so the
+    fake client's request count stays at zero."""
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+    from memory_net.distiller.runctx import BudgetExhausted
+
+    ledger = _ledger(tmp_path, ceiling=1)
+    ledger.reserve(kind="distill_live", run_id="earlier-run")
+    client = _CountingClient()
+    provider = OpenAICompatProvider(client=client, ledger=ledger, model="m")
+
+    with pytest.raises(BudgetExhausted, match="attempt ceiling"):
+        provider.generate(_request())
+
+    assert client.requests == 0
+    assert ledger.spent() == 1
+
+
+def test_a_refused_attempt_leaves_no_unsettled_run_budget(tmp_path: Path) -> None:
+    """The run budget hold taken just before must be released, or the run ends
+    reporting a leaked reservation instead of an exhausted ceiling."""
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+    from memory_net.distiller.runctx import BudgetExhausted, RunBudget
+
+    ledger = _ledger(tmp_path, ceiling=1)
+    ledger.reserve(kind="distill_live", run_id="earlier-run")
+    budget = RunBudget(input_per_mtok_usd=0.6, output_per_mtok_usd=2.4, max_usd=10.0)
+    provider = OpenAICompatProvider(
+        client=_CountingClient(), ledger=ledger, model="m", budget=budget
+    )
+
+    with pytest.raises(BudgetExhausted):
+        provider.generate(_request())
+
+    budget.assert_all_settled()
+
+
+def test_each_retry_costs_its_own_attempt(tmp_path: Path) -> None:
+    """A retry is a second request on the wire, and the endpoint bills it."""
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+
+    ledger = _ledger(tmp_path, ceiling=5)
+    client = _CountingClient(error=TimeoutError("upstream timed out"))
+    provider = OpenAICompatProvider(
+        client=client, ledger=ledger, model="m", max_retries=2, sleep=lambda _s: None
+    )
+
+    with pytest.raises(Exception):  # noqa: B017 - sanitized provider error
+        provider.generate(_request())
+
+    assert client.requests == 3
+    assert ledger.spent() == 3
+
+
+def test_without_a_ledger_the_provider_is_unchanged(tmp_path: Path) -> None:
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+
+    client = _CountingClient()
+    provider = OpenAICompatProvider(client=client, model="m")
+
+    provider.generate(_request())
+
+    assert client.requests == 1
+    assert provider.ledger is None

@@ -28,7 +28,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
+from memory_net.distiller.llm.ledger import (
+    Attempt,
+    AttemptCeilingExceeded,
+    AttemptLedger,
+)
 from memory_net.distiller.runctx import (
+    BudgetExhausted,
     Reservation,
     RunBudget,
     prompt_tokens_upper,
@@ -37,6 +43,9 @@ from memory_net.distiller.runctx import (
 PROVIDER_BACKEND = "deepseek"
 
 DEFAULT_MODEL = "deepseek-v4-flash"
+
+_REFUSED = object()
+"""Sentinel for "the project ledger refused this attempt"; see _reserve_attempt."""
 """Model used when neither the profile nor the request names one.
 
 The cheaper of the two available tiers, deliberately: an unconfigured run
@@ -118,6 +127,7 @@ class OpenAICompatProvider(LLMProvider):
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_retries: int = DEFAULT_MAX_RETRIES,
         client: Any | None = None,
+        ledger: AttemptLedger | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -132,6 +142,10 @@ class OpenAICompatProvider(LLMProvider):
         # Injected by tests so the whole contract is exercised without a key or
         # a network call. Production leaves it None and the SDK client is built.
         self.client = client
+        # The cross-process attempt ledger (§5.5.14). None means no project
+        # ceiling is enforced, which is what a test double wants; cli.py always
+        # attaches one, so every production call is counted.
+        self.ledger = ledger
         self.sleep = sleep
         # Injected together: a test that fakes sleeping must be able to make
         # the clock advance with it, or the wall-clock ledger it asserts on
@@ -163,6 +177,17 @@ class OpenAICompatProvider(LLMProvider):
             reservation = self._reserve(
                 request, wall_upper_s=backoff_s + self.timeout_s
             )
+            # The project ledger, after the run budget and before the request:
+            # one entry per attempt, which is exactly what this loop multiplies
+            # and what the endpoint bills (§5.5.14).
+            ledger_attempt = self._reserve_attempt(request, model=model)
+            if ledger_attempt is _REFUSED:
+                if reservation is not None:
+                    # Provably not executed: the request never went out.
+                    reservation.release(wall_s=0.0)
+                raise BudgetExhausted(
+                    "project attempt ceiling reached; no request was made"
+                )
             try:
                 if backoff_s:
                     self.sleep(backoff_s)
@@ -178,6 +203,7 @@ class OpenAICompatProvider(LLMProvider):
                     else _Outcome(retryable=False, billable=True)
                 )
                 self._close(reservation, billable=outcome.billable, started=started)
+                self._settle_attempt(ledger_attempt, outcome="failed")
                 last_exc = exc
                 if not outcome.retryable or attempt == self.max_retries:
                     # Only ``Exception`` is restated. Wrapping a
@@ -192,6 +218,7 @@ class OpenAICompatProvider(LLMProvider):
             # From here the request has been billed, so the reservation must
             # reach a terminal state even if decoding the response blows up on
             # a malformed body.
+            self._settle_attempt(ledger_attempt, outcome="ok")
             try:
                 return self._to_response(
                     completion,
@@ -252,6 +279,29 @@ class OpenAICompatProvider(LLMProvider):
                 "install the 'llm' extra"
             ) from exc
         return openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _reserve_attempt(self, request: LLMRequest, *, model: str) -> Any:
+        """Take one attempt from the project ledger, or report the refusal.
+
+        Returns ``_REFUSED`` rather than raising so the caller can release the
+        run-budget hold it already took before turning this into the same
+        ``BudgetExhausted`` every other pre-call refusal produces.
+        """
+        if self.ledger is None:
+            return None
+        try:
+            return self.ledger.reserve(
+                kind="distill_live",
+                run_id=str((request.metadata or {}).get("run_id") or "unknown"),
+                provider="deepseek",
+                model=model,
+            )
+        except AttemptCeilingExceeded:
+            return _REFUSED
+
+    def _settle_attempt(self, attempt: Any, *, outcome: str) -> None:
+        if isinstance(attempt, Attempt):
+            self.ledger.settle(attempt, outcome=outcome)  # type: ignore[union-attr]
 
     def _reserve(
         self, request: LLMRequest, *, wall_upper_s: float

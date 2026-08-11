@@ -29,6 +29,7 @@ from memory_net.distiller.llm.anthropic_sdk import (
 from memory_net.distiller.llm.base import LLMProvider
 from memory_net.distiller.llm.budgeted import BudgetedProvider
 from memory_net.distiller.llm.hermes_tool import HermesToolProvider
+from memory_net.distiller.llm.ledger import AttemptLedger
 from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import (
     API_KEY_ENV,
@@ -548,7 +549,10 @@ def _base_provider(
     """
     if provider_name == "deepseek":
         # Reserves for itself, so wrapping it would reserve twice per call.
-        return OpenAICompatProvider(model=model, budget=budget)
+        # The attempt ledger is attached unconditionally: it is the only ceiling
+        # that survives across processes and runs, and the production backend is
+        # the one lane where a real request is billed (§5.5.14).
+        return OpenAICompatProvider(model=model, budget=budget, ledger=AttemptLedger())
     if provider_name == "anthropic":
         return _budgeted(AnthropicSDKProvider(model=model), budget)
     if provider_name == "hermes_tool":
