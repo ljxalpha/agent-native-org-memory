@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import socket
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -104,6 +105,38 @@ def _metrics(repo: Path, run_id: str) -> dict[str, Any]:
     return json.loads((repo / "distill_runs" / run_id / "metrics.json").read_text())
 
 
+def recorded_call_count(bundle: Path) -> int:
+    """How many calls the bundle actually holds, read from the bundle.
+
+    Derived rather than pinned to a constant: a bundle carrying calls that the
+    replay never consumes would otherwise pass, because unused responses
+    produce no products and nothing else notices them.
+    """
+    lines = (bundle / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+    return len([line for line in lines if line.strip()])
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A socket in this file is a defect, whatever the metrics say.
+
+    ``replay_live_calls`` is computed from the run's own counters, so it is the
+    replay reporting on itself. A live request that still returned a replayed
+    response would leave that counter at zero and this file green -- while
+    having spent money and reached a third party. Blocking the syscall is the
+    only assertion here that does not depend on the code under test.
+    """
+
+    def _refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "the golden replay attempted a network connection; it must be offline"
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", _refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", _refuse)
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+
+
 @pytest.fixture(scope="module")
 def replayed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
     return _run_once(tmp_path_factory.mktemp("replay"), "repo")
@@ -146,8 +179,13 @@ def test_the_replay_hits_every_recorded_call(replayed: tuple[Path, str]) -> None
     assert metrics["replay_mode"] == "strict"
     assert metrics["replay_live_calls"] == 0
     assert metrics["replay_misses"] == 0
-    assert metrics["replay_hits"] == EXPECTED_CLUSTERS
     assert metrics["status"] == "success"
+    # Read from the bundle, not from a constant: every recorded call must be
+    # consumed, so a bundle with a spare unused response cannot pass.
+    assert metrics["replay_hits"] == recorded_call_count(
+        read_current_bundle(BUNDLE_ROOT)
+    )
+    assert metrics["replay_hits"] == EXPECTED_CLUSTERS
 
 
 def test_the_replay_carries_the_recording_s_provenance(
@@ -277,3 +315,10 @@ def _read_tree(repo: Path, run_id: str) -> dict[str, bytes]:
         for path in sorted(files)
         if path.is_file()
     }
+
+
+def test_the_network_guard_is_actually_armed() -> None:
+    """A guard that silently failed to install would make every other test in
+    this file weaker while looking identical."""
+    with pytest.raises(AssertionError, match="must be offline"):
+        socket.create_connection(("127.0.0.1", 9))
