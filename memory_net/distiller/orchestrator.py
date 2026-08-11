@@ -21,7 +21,11 @@ from memory_net.distiller.metrics import (
     citation_resolution_rate,
     parse_failure_rate,
 )
-from memory_net.distiller.output_scanner import PROSE, OutputScanner
+from memory_net.distiller.output_scanner import (
+    PROSE,
+    OutputScanner,
+    RedactionViolation,
+)
 from memory_net.distiller.pipeline import (
     DistillationAborted,
     DistillationOutput,
@@ -501,6 +505,26 @@ class DistillOrchestrator:
             **self._run_configuration_fields(),
         )
 
+    def _safe_failure_message(self, error: str) -> str:
+        """The failure text, or a rule-name summary when it cannot be published.
+
+        Exception messages are the one artifact assembled from material nothing
+        scanned: a provider quotes the bridge's stdout, a parser quotes the
+        payload, a refusal quotes a filename. They land in ``.health.json`` and
+        ``metrics.json``, which CI publishes -- so the message is scanned like
+        anything else, and a hit replaces it rather than stopping the failure
+        path, which is already the path something else went wrong on.
+        """
+        scanner = self.context.scanner if self.context is not None else None
+        if not isinstance(scanner, OutputScanner):
+            return error
+        try:
+            scanner.check(error, field_kind=PROSE, field_path="failure.error")
+        except RedactionViolation as exc:
+            rules = ", ".join(sorted({hit.rule for hit in exc.hits}))
+            return f"error message withheld: output scanner matched {rules}"
+        return error
+
     def _write_failure_outputs(
         self,
         *,
@@ -511,6 +535,7 @@ class DistillOrchestrator:
         duration_seconds: float,
         output: DistillationOutput | None = None,
     ) -> None:
+        error = self._safe_failure_message(error)
         now = self._now()
         health = {
             "schema_version": "memory-net/health/v1",

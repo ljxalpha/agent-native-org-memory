@@ -277,3 +277,56 @@ def test_a_leaking_parse_failure_detail_aborts_the_run(
     assert "abs_home_path" in output.redaction_rule_counts
     assert output.parse_error_details == []
     assert HOME_PATH not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# The failure message itself
+# --------------------------------------------------------------------------
+
+
+def test_a_leaking_failure_message_is_replaced_by_its_rule_names(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """Exception messages are assembled from material nothing scanned -- a
+    bridge's stdout, a parser's payload, a refused filename -- and they land in
+    .health.json and metrics.json, which CI publishes."""
+    orchestrator = DistillOrchestrator(
+        repo_path=tmp_path,
+        pipeline=None,  # type: ignore[arg-type]
+        context=(
+            RunContextBuilder()
+            .set_identity(RunIdentity(run_id=RUN_ID, now=lambda: "2026-08-10T0:0:0Z"))
+            .set_scanner(scanner)
+            .freeze()
+        ),
+    )
+
+    message = orchestrator._safe_failure_message(f"bridge said: {HOME_PATH}")
+
+    assert HOME_PATH not in message
+    assert "abs_home_path" in message
+
+
+def test_a_clean_failure_message_is_left_alone(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    orchestrator = DistillOrchestrator(
+        repo_path=tmp_path,
+        pipeline=None,  # type: ignore[arg-type]
+        context=RunContextBuilder().set_scanner(scanner).freeze(),
+    )
+
+    assert orchestrator._safe_failure_message("parse failures: 2") == (
+        "parse failures: 2"
+    )
+
+
+def test_without_a_scanner_the_failure_message_is_unchanged(tmp_path: Path) -> None:
+    orchestrator = DistillOrchestrator(
+        repo_path=tmp_path,
+        pipeline=None,  # type: ignore[arg-type]
+    )
+
+    assert orchestrator._safe_failure_message(f"bridge said: {HOME_PATH}").endswith(
+        HOME_PATH
+    )

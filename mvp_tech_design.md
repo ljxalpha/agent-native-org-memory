@@ -1451,6 +1451,13 @@ pipeline 捕获后**不吞异常**，而是把 `redaction_failures` 与 `redacti
 orchestrator 捕获它 → 取出 output → 走 failure 路径。
 计数与阻断因此走同一条通路，不存在"异常吃掉了计数"的窗口。
 
+**失败消息本身也要过扫描**：异常消息是唯一一类"由未经扫描的素材拼出来"的产物——
+provider 会引用桥接的 stdout、解析器会引用载荷、提交拒绝会引用文件名——
+而它们会落进 `.health.json` 与 `metrics.json`，CI 会当 artifact 发布。
+`_write_failure_outputs()` 因此先把 `error` 过一遍 scanner：命中就**整条替换**成
+"error message withheld: output scanner matched <规则名>"，而不是让失败路径再抛一次
+（这条路径本来就是别的东西出错之后才走到的）。
+
 **`parse_error_details` 同样要过扫描**：解析失败时写进 `metrics.json` 的这段描述里
 带有解析器引用的**模型可控片段**（候选键名、失败位置），而它是唯一一段
 "没被解析过就进产物"的模型输出——解析成功的载荷走 `_scan_parsed`，解析失败的只剩这条。
