@@ -12,6 +12,12 @@ from memory_net.distiller.clustering.dbscan import cluster_vectors
 from memory_net.distiller.clustering.embedder import FastEmbedder
 from memory_net.distiller.conflict import CONFLICT_MARKER, normalize_conflicts
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
+from memory_net.distiller.output_scanner import (
+    PROSE,
+    OutputScanner,
+    RedactionViolation,
+    RuleHit,
+)
 from memory_net.distiller.provenance import RunProvenance, aggregate
 from memory_net.distiller.runctx import (
     BudgetExhausted,
@@ -32,6 +38,20 @@ class EvidenceRuleRejection(ValueError):
     specific ``min_citations`` / ``min_contributors`` threshold rejections to
     the ``evidence_rule_rejections`` tuning metric.
     """
+
+
+class DistillationAborted(RuntimeError):
+    """The run stopped mid-way, carrying the counts it had reached (§5.5.13).
+
+    The output travels *with* the exception because the counts and the refusal
+    have to arrive together: an exception that unwinds without them leaves the
+    orchestrator able to say a run failed but not what it saw, and re-deriving
+    that after the fact is not possible.
+    """
+
+    def __init__(self, output: DistillationOutput, message: str) -> None:
+        self.output = output
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -58,6 +78,10 @@ class DistillationOutput:
     # a live/record run (no replay markers present).
     replay_hits: int = 0
     replay_misses: int = 0
+    # Output scanner refusals (§5.5.13). Non-zero means the run was stopped, not
+    # that a cluster was skipped; rule names and counts only, never content.
+    redaction_failures: int = 0
+    redaction_rule_counts: dict[str, int] | None = None
     # Run-level fold of every call's provenance, primary and fallback lanes alike.
     provenance: RunProvenance = field(default_factory=RunProvenance.empty)
 
@@ -149,6 +173,7 @@ class DistillationPipeline:
         evidence_rule_rejections = 0
         replay_hits = 0
         replay_misses = 0
+        redaction_hits: list[RuleHit] = []
         # Every actual call, in invocation order, primary and fallback alike —
         # the fallback lane is precisely what makes a run's provenance "mixed".
         call_responses: list[LLMResponse] = []
@@ -222,6 +247,16 @@ class DistillationPipeline:
                     skipped_clusters += 1
                     continue
                 fallback_accepted += 1
+            try:
+                # Parsed into an object, nothing written yet: the last moment at
+                # which refusing costs nothing but the run.
+                self._scan_parsed(parsed)
+            except RedactionViolation as exc:
+                redaction_hits.extend(exc.hits)
+                # The whole loop, not this cluster: this input and this prompt
+                # just produced sensitive content, which says nothing good about
+                # the clusters after it either.
+                break
             emitted, resolved = _count_citation_resolution(parsed, cluster_records)
             citations_emitted += emitted
             citations_resolved += resolved
@@ -265,7 +300,10 @@ class DistillationPipeline:
             category_distribution[product.category] = (
                 category_distribution.get(product.category, 0) + 1
             )
-        return DistillationOutput(
+        rule_counts: dict[str, int] = {}
+        for hit in redaction_hits:
+            rule_counts[hit.rule] = rule_counts.get(hit.rule, 0) + 1
+        output = DistillationOutput(
             products=products,
             response=response,
             skipped_clusters=skipped_clusters,
@@ -283,10 +321,30 @@ class DistillationPipeline:
             category_distribution=dict(sorted(category_distribution.items())),
             replay_hits=replay_hits,
             replay_misses=replay_misses,
+            redaction_failures=len(redaction_hits),
+            redaction_rule_counts=dict(sorted(rule_counts.items())) or None,
             # The synthesized aggregate ``response`` above is not a call, so it
             # is deliberately not part of the fold.
             provenance=aggregate(call_responses),
         )
+        if redaction_hits:
+            raise DistillationAborted(
+                output,
+                f"output scanner refused {len(redaction_hits)} value(s): "
+                + ", ".join(sorted(rule_counts)),
+            )
+        return output
+
+    def _scan_parsed(self, parsed: dict[str, Any]) -> None:
+        """Scan one cluster's parsed products (§5.5.13).
+
+        The scanner comes off the context and is never constructed here: it is
+        the run's single instance and its hit counter. No context, no scanner,
+        and the behaviour is exactly what it was before this existed.
+        """
+        scanner = self.context.scanner if self.context is not None else None
+        if isinstance(scanner, OutputScanner):
+            scanner.check(parsed, field_kind=PROSE, field_path="products")
 
     def _cluster_records(
         self, records: list[dict[str, Any]]

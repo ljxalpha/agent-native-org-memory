@@ -1386,6 +1386,30 @@ bundle 的写入过去不是事务性的：`BundleRecorder.record()` 逐调用 a
 **生产 profile 拒绝平面 `--record`**——平面文件不经过 commit 前的全量复扫，
 生产的录制必须是走完整闸门的 bundle。
 
+#### 5.5.13 发布闸：命中即整 run 失败
+
+pipeline 在 `parse_json_response` 成功之后、`render_products` 之前
+（"已成结构化对象、尚未落任何盘"的那一刻）扫描解析结果的**全部 prose 字段**。
+`enforce` 下命中的语义是**整 run 失败**，不是"跳过这个 cluster"：
+
+- 一个 cluster 的输出泄漏，说明**这批输入 + 这个 prompt** 会让模型带出敏感内容，
+  其余 cluster 没有任何理由被认为是干净的；
+- "跳过一个 cluster"会让 run 成功退出、产物照常发布，泄漏只留下一行计数——
+  这正是"有 scanner 的错觉"。
+
+**计数如何穿过异常边界**（这是最容易漏的一处）：`RedactionViolation` 携带 `hits`；
+pipeline 捕获后**不吞异常**，而是把 `redaction_failures` 与 `redaction_rule_counts`
+写进 `DistillationOutput`，再抛出**携带该 output** 的 `DistillationAborted`。
+orchestrator 捕获它 → 取出 output → 走 failure 路径。
+计数与阻断因此走同一条通路，不存在"异常吃掉了计数"的窗口。
+
+orchestrator 侧 `_distill_gate_error()` 新增 `redaction_failures > 0` 分支，
+语义强于 parse/citation 两者：**阻止全部发布**（不写 team、不写 manifest、不写产物）
++ 触发 `recorder.abort()`（不留任何 bundle）+ 写 failure 版 `.health.json` 与 `metrics.json`
+（只记规则名与计数，不记内容）+ **进程非零退出**。不允许部分成功。
+
+`context.scanner is None` 时全部行为与接线前逐字相同。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区

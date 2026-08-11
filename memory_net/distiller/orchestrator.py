@@ -21,7 +21,11 @@ from memory_net.distiller.metrics import (
     parse_failure_rate,
 )
 from memory_net.distiller.output_scanner import PROSE, OutputScanner
-from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
+from memory_net.distiller.pipeline import (
+    DistillationAborted,
+    DistillationOutput,
+    DistillationPipeline,
+)
 from memory_net.distiller.provenance import RunProvenance
 from memory_net.distiller.runctx import RunContext, RunIdentity
 from memory_net.shared.git_io import GitError, GitRepo
@@ -149,7 +153,13 @@ class DistillOrchestrator:
             records = self._load_leaf_records()
             previous_manifest = self._load_master_manifest()
             with self._snapshot_prompts(snapshot_sha):
-                output = self.pipeline.run(records, run_id=run_id)
+                try:
+                    output = self.pipeline.run(records, run_id=run_id)
+                except DistillationAborted as exc:
+                    # The counts arrived with the exception, so the run reports
+                    # what stopped it instead of only that something did. The
+                    # gate below turns them into the failure path (§5.5.13).
+                    output = exc.output
             gate_error = _distill_gate_error(output)
             if not gate_error:
                 # Written and published only once the run is known to be good.
@@ -277,9 +287,16 @@ class DistillOrchestrator:
             "output_scanner_ruleset_version": scanner.ruleset.version,
         }
         if not scanner.enforcing:
-            # Only under observe: enforce turns a hit into a failed run, and the
-            # failure path reports its own counts.
+            # Under observe the distribution *is* the point of the run.
             fields["redaction_observations"] = scanner.observations_snapshot()
+        elif scanner.violations:
+            # Under enforce the run is failing, and these two are the only
+            # account of why that can be written down without reproducing it.
+            # Reported here rather than off DistillationOutput so a refusal
+            # raised by the recorder -- before any request went out, which never
+            # reaches the pipeline's output -- is reported the same way.
+            fields["redaction_failures"] = scanner.violations
+            fields["redaction_rule_counts"] = scanner.rule_counts
         return fields
 
     def _profile_provenance(self) -> dict[str, str]:
@@ -1425,6 +1442,15 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 
 def _distill_gate_error(output: DistillationOutput) -> str | None:
     failures: list[str] = []
+    if output.redaction_failures:
+        # Stronger than the other two: they say some clusters were unusable,
+        # this says the run produced content that must not be published at all,
+        # so nothing from it is (§5.5.13).
+        rules = ", ".join(sorted(output.redaction_rule_counts or {}))
+        failures.append(
+            f"output scanner refusals: {output.redaction_failures}"
+            + (f" ({rules})" if rules else "")
+        )
     if output.parse_failures:
         failures.append(f"parse failures: {output.parse_failures}")
     if output.citation_failures:
