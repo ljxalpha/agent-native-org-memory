@@ -21,8 +21,13 @@ import yaml  # type: ignore[import-untyped]
 
 from memory_net import __version__
 from memory_net.leaf import daemon, hints
-from memory_net.leaf.health import build_health, write_health
-from memory_net.leaf.identity import read_host
+from memory_net.leaf.health import build_health, utc_now, write_health
+from memory_net.leaf.identity import (
+    OpsIdentityError,
+    collect_ops_identity,
+    read_host,
+    split_ops_identity,
+)
 from memory_net.leaf.reporter import RedactionBlockedError, report
 from memory_net.leaf.scanner import scanner_config_from_report_config
 from memory_net.leaf.subscriber import SubscribeResult, subscribe
@@ -39,12 +44,19 @@ from memory_net.shared.config import (
 from memory_net.shared.git_io import GitError, GitRepo
 from memory_net.shared.observability import setup_logging
 from memory_net.shared.redaction import Redactor
-from memory_net.shared.schema import validate_bootstrap_state
+from memory_net.shared.schema import (
+    SchemaError,
+    validate_bootstrap_state,
+    validate_health,
+)
 from memory_net.shared.util.hashing import short_hash
 from memory_net.shared.util.paths import expand_path
 
 BUILD_API = 1
 HEALTH_COMMIT_INTERVAL_SECONDS = 6 * 60 * 60
+#: Captured once per process so every health snapshot a daemon writes shares
+#: the same ``started_at``, and so no code path reads the clock twice.
+_PROCESS_STARTED_AT = utc_now()
 LOGGER = logging.getLogger(__name__)
 NON_LOCAL_FILESYSTEM_TYPES = frozenset(
     {"nfs", "nfs4", "smb", "smb2", "smb3", "smbfs", "cifs", "fuse.sshfs"}
@@ -126,6 +138,14 @@ def main(argv: list[str] | None = None) -> int:
 
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--health", required=True, type=Path)
+    status_parser.add_argument(
+        "--lenient",
+        action="store_true",
+        help=(
+            "accept a health file without operational identity fields; "
+            "for installations that predate them"
+        ),
+    )
 
     args = parser.parse_args(argv)
     _setup_runtime(args)
@@ -206,7 +226,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "health" or (is_trigger and args.target == "health"):
-        write_health(args.path, build_health(node_id=args.node_id))
+        identity_kwargs, identity_extra = split_ops_identity(_ops_identity(args))
+        write_health(
+            args.path,
+            build_health(
+                node_id=args.node_id,
+                extra=identity_extra or None,
+                **identity_kwargs,
+            ),
+        )
         print(str(args.path))
         return 0
 
@@ -251,8 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "status":
-        print(args.health.read_text(encoding="utf-8"))
-        return 0
+        return _print_status(args.health, lenient=args.lenient)
 
     parser.error("unknown command")
     return 2
@@ -424,12 +451,15 @@ def _daemon_tasks(
         health_path = args.state_dir / "last_health.json"
         with _health_lock(args.state_dir):
             recent_errors = _read_recent_errors(health_path)
+            identity_kwargs, identity_extra = split_ops_identity(_ops_identity(args))
             health = build_health(
                 node_id=args.node_id,
                 status="degraded" if recent_errors else "healthy",
                 config_revision=_active_config_revision(args),
                 recent_errors=recent_errors,
                 published=False,
+                extra=identity_extra or None,
+                **identity_kwargs,
             )
             write_health(health_path, health)
         if _health_commit_due(args.state_dir, args.repo):
@@ -878,6 +908,67 @@ def _materialize_generation_from_git_snapshot(
         )
     finally:
         shutil.rmtree(source_root, ignore_errors=True)
+
+
+def _print_status(health_path: Path, *, lenient: bool) -> int:
+    """Read, validate and print a health file.
+
+    ``status`` is the gate that makes "the install finished" mean "this leaf can
+    be located by an operator", so it validates instead of printing blindly.
+    Returns a process exit code.
+    """
+    try:
+        raw = health_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"cannot read health file {health_path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        health = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"health file {health_path} is not valid JSON: {exc}", file=sys.stderr)
+        return 1
+    try:
+        validate_health(health, require_ops_identity=not lenient)
+    except SchemaError as exc:
+        print(f"health file {health_path} failed validation: {exc}", file=sys.stderr)
+        return 1
+    print(raw)
+    return 0
+
+
+def _ops_identity(args: argparse.Namespace) -> dict[str, str] | None:
+    """Collect operational identity from the installation layout, best effort.
+
+    A development run without a full ``install_leaf.sh`` layout must not break
+    reporting, so an incomplete layout logs a warning and yields ``None``; the
+    strict gate lives in ``status`` instead.
+    """
+    state_home = _state_home(args)
+    try:
+        return collect_ops_identity(
+            state_dir=state_home / "state",
+            adapter_path=_ops_identity_adapter_path(args, state_home),
+            local_yaml_path=state_home / "local.yaml",
+            generation_dir=state_home / "config-current",
+            started_at=_PROCESS_STARTED_AT,
+        )
+    except OpsIdentityError as exc:
+        LOGGER.warning("operational identity is unavailable: %s", exc)
+        return None
+
+
+def _ops_identity_adapter_path(args: argparse.Namespace, state_home: Path) -> Path:
+    """Locate the adapter YAML naming this leaf's adapter.
+
+    Prefers an explicit ``--adapter``; otherwise follows the installed layout
+    ``config-current/adapters/<local.yaml agent>.yaml``.
+    """
+    adapter = getattr(args, "adapter", None)
+    if isinstance(adapter, Path):
+        active = state_home / "config-current" / "adapters" / adapter.name
+        return active if active.exists() else adapter
+    agent = _load_yaml_mapping(state_home / "local.yaml").get("agent")
+    return state_home / "config-current" / "adapters" / f"{agent}.yaml"
 
 
 def _memory_net_home() -> Path:

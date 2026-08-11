@@ -299,3 +299,118 @@ def _force_fallback_scheduler(monkeypatch: Any) -> None:
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+OPS_IDENTITY_SAMPLE = {
+    "adapter": "claude-code",
+    "install_id": "inst-0001",
+    "code_version": "0.1.0",
+    "host": "leaf-host-01",
+    "build_id": "0123456789abcdef0123456789abcdef01234567",
+    "config_source_master_sha": "b" * 40,
+    "started_at": "2026-04-20T09:00:00Z",
+}
+
+
+def _install_layout(tmp_path: Path, monkeypatch: Any) -> Path:
+    """Build a minimal ``MEMORY_NET_HOME`` the way install_leaf.sh lays it out."""
+    home = tmp_path / "mn-home"
+    (home / "state").mkdir(parents=True)
+    (home / "state" / "install_id").write_text("inst-0001\n", encoding="utf-8")
+    generation = home / "config.generations" / "gen1"
+    (generation / "adapters").mkdir(parents=True)
+    (generation / "adapters" / "claude-code.yaml").write_text(
+        "name: claude-code\n", encoding="utf-8"
+    )
+    (generation / "config_source_master_sha").write_text("b" * 40, encoding="utf-8")
+    (home / "config-current").symlink_to(generation)
+    (home / "local.yaml").write_text(
+        'agent: "claude-code"\n'
+        'package_ref: "git+ssh://git@example.invalid/org/aomt.git@'
+        '0123456789abcdef0123456789abcdef01234567"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_NET_HOME", str(home))
+    monkeypatch.setattr(leaf_cli, "_PROCESS_STARTED_AT", "2026-04-20T09:00:00Z")
+    monkeypatch.setattr(leaf_cli.platform, "node", lambda: "leaf-host-01")
+    return home
+
+
+def test_health_command_stamps_operational_identity(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _install_layout(tmp_path, monkeypatch)
+    health_path = tmp_path / ".health.json"
+
+    assert leaf_cli.main(["health", "--path", str(health_path), "--node-id", "a"]) == 0
+
+    health = json.loads(health_path.read_text(encoding="utf-8"))
+    for field, value in OPS_IDENTITY_SAMPLE.items():
+        assert health[field] == value
+    assert health["build_id_source"] == "package_ref"
+
+
+def test_health_command_degrades_gracefully_without_an_install(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A dev run without an install layout must still produce a health file."""
+    monkeypatch.setenv("MEMORY_NET_HOME", str(tmp_path / "absent"))
+    health_path = tmp_path / ".health.json"
+
+    assert leaf_cli.main(["health", "--path", str(health_path), "--node-id", "a"]) == 0
+
+    health = json.loads(health_path.read_text(encoding="utf-8"))
+    for field in OPS_IDENTITY_SAMPLE:
+        assert field not in health
+
+
+def test_status_accepts_a_complete_health_file(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    _install_layout(tmp_path, monkeypatch)
+    health_path = tmp_path / ".health.json"
+    leaf_cli.main(["health", "--path", str(health_path), "--node-id", "a"])
+
+    assert leaf_cli.main(["status", "--health", str(health_path)]) == 0
+    assert '"host": "leaf-host-01"' in capsys.readouterr().out
+
+
+def test_status_rejects_a_health_file_without_operational_identity(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    monkeypatch.setenv("MEMORY_NET_HOME", str(tmp_path / "absent"))
+    health_path = tmp_path / ".health.json"
+    leaf_cli.main(["health", "--path", str(health_path), "--node-id", "a"])
+
+    assert leaf_cli.main(["status", "--health", str(health_path)]) == 1
+    err = capsys.readouterr().err
+    for field in OPS_IDENTITY_SAMPLE:
+        assert field in err
+
+
+def test_status_lenient_accepts_a_pre_identity_health_file(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    monkeypatch.setenv("MEMORY_NET_HOME", str(tmp_path / "absent"))
+    health_path = tmp_path / ".health.json"
+    leaf_cli.main(["health", "--path", str(health_path), "--node-id", "a"])
+
+    assert leaf_cli.main(["status", "--health", str(health_path), "--lenient"]) == 0
+    assert '"node_id": "a"' in capsys.readouterr().out
+
+
+def test_status_reports_a_corrupt_health_file_without_a_traceback(
+    tmp_path: Path, capsys: Any
+) -> None:
+    health_path = tmp_path / ".health.json"
+    health_path.write_text("{not json", encoding="utf-8")
+
+    assert leaf_cli.main(["status", "--health", str(health_path)]) == 1
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_status_reports_a_missing_health_file_without_a_traceback(
+    tmp_path: Path, capsys: Any
+) -> None:
+    assert leaf_cli.main(["status", "--health", str(tmp_path / "absent.json")]) == 1
+    assert "cannot read health file" in capsys.readouterr().err
