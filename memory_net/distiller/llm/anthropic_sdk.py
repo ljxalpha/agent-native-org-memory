@@ -38,7 +38,12 @@ class AnthropicSDKProvider(LLMProvider):
                 raise RuntimeError(
                     "ANTHROPIC_API_KEY is required for AnthropicSDKProvider"
                 )
-            client = anthropic.Anthropic(api_key=self.api_key)
+            # `max_retries=0`: the SDK defaults to retrying twice, and those
+            # attempts are invisible to the attempt ledger wrapped around this
+            # provider. One reservation would then cover up to three billed
+            # requests, and a ceiling that counts reservations would be off by
+            # a factor it cannot see.
+            client = anthropic.Anthropic(api_key=self.api_key, max_retries=0)
         model = self.model or request.model or DEFAULT_ANTHROPIC_MODEL
         message = client.messages.create(
             model=model,

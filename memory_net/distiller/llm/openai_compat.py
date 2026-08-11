@@ -294,7 +294,15 @@ class OpenAICompatProvider(LLMProvider):
                 "openai package is required for OpenAICompatProvider; "
                 "install the 'llm' extra"
             ) from exc
-        return openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+        # `max_retries=0` is load-bearing, not tuning. The SDK's own retry loop
+        # is invisible to everything above it: this class reserves one ledger
+        # attempt and one budget hold per iteration of *its* loop, so an SDK
+        # that quietly retried twice more would bill three wire attempts
+        # against one reservation -- and the project ceiling counts
+        # reservations. Retries belong to the loop that can account for them.
+        return openai.OpenAI(
+            api_key=self.api_key, base_url=self.base_url, max_retries=0
+        )
 
     def _reserve_attempt(self, request: LLMRequest, *, model: str) -> Any:
         """Take one attempt from the project ledger, or report the refusal.
