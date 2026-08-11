@@ -1,9 +1,22 @@
 name: hermes
-# experimental until a real agent run shows the injected hint is followed.
-# The layout below is calibrated against a hermes 0.18 install, whose redacted
-# snapshot is tests/fixtures/adapters/hermes/ -- but a calibrated *read* path is
-# not evidence of a consumed hint, and only the second one lifts this flag.
-support_status: experimental
+# Verified against hermes v0.18.0 by a real agent run, 2026-08-11.
+#
+# The layout below is calibrated against that install (redacted snapshot:
+# tests/fixtures/adapters/hermes/). A calibrated *read* path is not evidence of
+# a consumed hint, so the flag rests on the second thing: an agent given this
+# hint returned a token that existed only in the injected INDEX.md, and a
+# control run with the hint removed did not. Inlining is excluded by source --
+# `agent/prompt_builder.py::_load_agents_md` copies AGENTS.md verbatim and the
+# agent performs no `@`-reference expansion anywhere -- so a tool read is the
+# only path by which that token could have reached the model.
+#
+# What that evidence does NOT cover, stated so nobody has to guess: a
+# successful oneshot writes no session trace on this platform, so the tool set
+# offered and the call sequence are unverified mechanically; it was
+# one invocation against one model; and the inlining exclusion is a fact about
+# this version, which an upgrade invalidates. Re-run
+# `scripts/verify_adapter_consumption` after a major agent upgrade.
+support_status: stable
 roots:
   shared:
     # The memory-net convention directory, never the agent's own store. The

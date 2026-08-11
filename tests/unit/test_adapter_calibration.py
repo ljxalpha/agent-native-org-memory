@@ -309,11 +309,37 @@ def test_the_hermes_fixture_carries_no_real_content(tmp_path: Path) -> None:
         assert "@" not in text.replace("@memory/team/INDEX.md", "")
 
 
-def test_hermes_stays_experimental_until_a_real_run_says_otherwise() -> None:
-    """A calibrated read path is not evidence of a consumed hint."""
-    config = yaml.safe_load((ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8"))
+def test_hermes_is_stable_only_alongside_the_evidence_and_its_limits() -> None:
+    """Promoted on a real agent run, 2026-08-11.
 
-    assert config["support_status"] == "experimental"
+    The status is a claim to an integrator, and this pins the claim to the two
+    things that make it checkable: what the evidence was, and what it does not
+    cover. A future edit that raises another adapter to ``stable`` by copying
+    this line has to copy the record with it.
+    """
+    text = (ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8")
+    config = yaml.safe_load(text)
+
+    assert config["support_status"] == "stable"
+    # The evidence.
+    assert "control run" in text
+    assert "no `@`-reference expansion" in text
+    # And its stated limits, which are the part a reader would otherwise assume
+    # away: no trace, one invocation, and a fact tied to one version.
+    assert "writes no session trace" in text
+    assert "one invocation against one model" in text
+    assert "an upgrade invalidates" in text
+
+
+def test_the_other_calibrated_adapters_are_still_experimental() -> None:
+    """Promoting hermes must not read as promoting the read-path work in
+    general: codex and openclaw have calibrated read paths and no consumption
+    evidence, which is exactly the distinction the flag exists to carry."""
+    for agent in ("codex", "openclaw"):
+        config = yaml.safe_load(
+            (ADAPTERS_DIR / f"{agent}.yaml").read_text(encoding="utf-8")
+        )
+        assert config["support_status"] == "experimental", agent
 
 
 # -- codex: the read path against the layout that exists -----------------

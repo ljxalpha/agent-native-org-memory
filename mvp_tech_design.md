@@ -4624,3 +4624,15 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   (c) agent 自己调模型，本项目的 provider 栈不在中间，ledger 此前完全看不到这类运行；
   按上限预先记账是唯一可行的保守口径。
 - Change time: 2026-08-11
+
+## Change Record - 2026-08-11 hermes adapter 升为 stable
+
+- Change summary: `config/adapters/hermes.yaml` 的 `support_status` 由 `experimental`
+  改为 `stable`，并在文件内写明证据与**证据边界**；`todo.md` M3-001 关闭。
+  校准测试相应改为"锁定 stable 所依据的证据与其边界"，另加一条"其余已校准 adapter
+  仍为 experimental"的测试。
+- Change reason: 2026-08-11 的真实 agent 运行（4 次调用）给出了此前唯一缺失的那一环：
+  正例返回哨兵、对照未返回，且源码层面排除了内联，因此工具读取是哨兵到达模型的唯一路径。
+  边界一并写进 YAML 而非只写在验收记录里，因为读 YAML 的人是集成者，
+  而"没写出来的限制"会被默认为不存在。
+- Change time: 2026-08-11
