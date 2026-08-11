@@ -100,10 +100,10 @@ flowchart TB
     direction TB
     A["agent memory on disk<br/>Markdown files"]
     ADP["FileSystemMdAdapter<br/>config/adapters/*.yaml<br/>reads scope: shared roots only"]
+    SCN["leaf scanner, on the RAW content<br/>audit / warn / block"]
     RED["Redactor<br/>26 patterns + blocklist terms<br/>substitute, then re-scan for residue"]
-    SCN["leaf scanner<br/>audit / warn / block"]
     OUT["memories/CATEGORY/SLUG-REV.md<br/>manifest.json · .health.json"]
-    A --> ADP --> RED --> SCN --> OUT
+    A --> ADP --> SCN --> RED --> OUT
   end
 
   OUT -->|"git push HEAD:leaf/NODE-ID"| BR["shared repo<br/>branch leaf/NODE-ID"]
@@ -168,7 +168,7 @@ flowchart TD
   S1 --> RSV["RunBudget.reserve, then AttemptLedger.reserve<br/>both strictly before the request is issued"]
   RSV --> CALL["POST /chat/completions<br/>system+user as two messages · response_format=json_object<br/>· max_tokens honoured · SDK retries disabled"]
   CALL --> STL["settle / settle_unknown / release<br/>exactly one terminal state per attempt"]
-  STL --> S2["SCAN 2 — inbound: response text + raw_meta<br/>then the recorder demands that verdict before it writes"]
+  STL --> S2["SCAN 2 — inbound, ONLY on a recording run: response text + raw_meta<br/>the recorder demands that verdict before it writes<br/>a non-recording run persists no raw response and skips it"]
   S2 --> PARSE["parse: take the sibling object that carries a products array<br/>two candidates → refuse rather than guess"]
   PARSE --> S3["SCAN 3 — parsed products, still in memory, nothing on disk"]
   S3 --> RENDER["render: every citation resolved against the frozen<br/>snapshot; per-category min_citations / min_contributors"]
@@ -272,10 +272,13 @@ outright.
 
 **2. Leak detection happens before persistence, never after.**
 The outbound scan runs *before* the inner provider is called: once a prompt has left
-the process, refusing to write it down protects nothing. The inbound scan runs before
-anything reaches disk. And the writer does not trust that someone upstream scanned —
-`BundleRecorder.record` requires a `ScanVerdict` as an argument, and refuses a verdict
-that carries hits.
+the process, refusing to write it down protects nothing. Every lane is wrapped for that
+scan, recording or not — not recording means the prompt is never written down, not that
+it is never sent. The raw-response scan, by contrast, exists only on a recording run,
+because that is the only run where a raw response reaches disk; on every run the model's
+output is gated once it has been parsed, before anything is rendered. And the writer does
+not trust that someone upstream scanned: `BundleRecorder.record` requires a `ScanVerdict`
+as an argument, and refuses one that carries hits.
 → `memory_net/distiller/llm/recording.py`, `memory_net/distiller/output_scanner.py`
 
 **3. A scanner hit fails the whole run, not the cluster.**
@@ -364,7 +367,7 @@ proven". Here is the honest line for each part.
 
 | Area | Status | What that means exactly |
 |---|---|---|
-| Distillation backend `deepseek` | **Production path** | Real endpoint, role-separated messages, service-reported usage, run budget + cross-process attempt ledger. The golden bundle in `tests/fixtures/golden_bundle/` is a recording of a real run of it. |
+| Distillation backend `deepseek` | **Production path** | Real endpoint, role-separated messages, run budget + cross-process attempt ledger. Usage is taken from the service when it reports both counters and is labelled `usage_source: reported`; when it does not, the run estimates and says `estimated` rather than claiming a report it never got. The golden bundle in `tests/fixtures/golden_bundle/` is a recording of a real run of it. |
 | `hermes_tool` bridge | **Experimental** | Proves `LLMProvider` can host an out-of-process backend. The reference bridge script's own backend is a deterministic mock, by design. Refused by a production profile. |
 | `anthropic` provider | Implemented | Budgeted and ledgered, but not the production baseline and not the equivalence reference. |
 | Adapter: `claude-code` | Tested path | The only adapter without `support_status: experimental` — it is stable by the loader's default, not by an explicit declaration. |
@@ -376,7 +379,7 @@ proven". Here is the honest line for each part.
 | Production regression in CI | Two tiers | Tier A — offline golden-bundle strict replay plus stub contract tests — blocks every PR. Tier B — a live smoke run against the real endpoint — is `workflow_dispatch` only and skips when no credential is present. |
 | Non-coding agents, org-level roots, live dashboard | **Roadmap** | Not shipped. See [VISION.md](VISION.md). |
 
-Scale of the test surface, for calibration: **1234 tests**, all blocking in CI
+Scale of the test surface, for calibration: **over 1,200 tests**, all blocking in CI
 alongside `ruff`, `black`, `isort`, and `mypy --strict` over `memory_net`.
 
 ---
@@ -402,25 +405,38 @@ below are placeholders):
 # 1. stand up a shared memory repo (once per team)
 scripts/bootstrap_repo.sh --repo /tmp/team-memory.git
 
-# 2. each member's leaf reports its agent's shareable memory (secrets redacted on the way up)
-git clone /tmp/team-memory.git ./leaf-work
-python3 -m memory_net.leaf.cli report \
-  --repo ./leaf-work --node-id alice-claude-01 --agent-root ~/my-agent \
-  --adapter config/adapters/claude-code.yaml \
-  --redaction config/redaction_patterns.yaml
+# 2. install a leaf, once per member. This is what clones the repo, materializes
+#    the config generation the leaf runs from, injects the hint into the agent's
+#    instruction file, and registers cron + the daemon.
+scripts/install_leaf.sh \
+  --repo /tmp/team-memory.git --agent claude-code \
+  --node-id alice-claude-01 --agent-root ~/my-agent \
+  --package-ref <pinned package ref>
 
 # 3. the distiller distills team knowledge onto a release branch — the review/release gate
 git clone /tmp/team-memory.git ./distill-work
 python3 -m memory_net.distiller.cli run --repo ./distill-work --provider mock
-
-# 4. once the release is approved (merged to master), leaves subscribe it back
-python3 -m memory_net.leaf.cli subscribe \
-  --repo ./distill-work --agent-root ~/my-agent \
-  --adapter config/adapters/claude-code.yaml \
-  --config-revision test --state-dir ~/.memory-net/state
 ```
 
-Step 3 above uses the shipped default profile, which is a **mock** run costing zero
+Steps 2 and 3 are the whole deployment: from there the leaf daemon runs
+`config_sync`, `report`, `subscribe` and `health` on an interval. The individual
+commands exist and can be driven by hand —
+
+```bash
+python3 -m memory_net.leaf.cli report \
+  --repo ./leaf-work --node-id alice-claude-01 --agent-root ~/my-agent \
+  --adapter config/adapters/claude-code.yaml \
+  --redaction config/redaction_patterns.yaml
+```
+
+— but `subscribe` deliberately refuses to run until a config generation is active
+and its subscribe contract matches the one recomputed from `origin/master`: writing
+team knowledge into an agent under a contract that has since drifted is exactly the
+failure the check exists to prevent. The installer is what puts that state in place;
+`tests/integration/local_repo.sh` materializes it explicitly, which is worth reading
+if you want to see the minimum by hand.
+
+Step 3 uses the shipped default profile, which is a **mock** run costing zero
 tokens. A live run selects the production profile instead, and takes its credentials
 from the environment through the launcher — never from a file the provider opens itself:
 
@@ -459,9 +475,14 @@ configuration:
 | Per-run evidence (`metrics.json`, `snapshot.json`, `clusters.jsonl`, `unclustered.json`) | shared repo `distill_runs/RUN_ID/` |
 
 The `config/` and `prompts/` here are bootstrap templates and test fixtures; the
-runtime source of truth is always the shared repo's `master`. Recorded call bundles
-are never part of that whitelist — they hold complete prompts and responses and stay
-outside the repository.
+runtime source of truth is always the shared repo's `master`.
+
+Recorded call bundles are not on that list. They hold complete prompts and complete
+responses, so `--record-dir` is documented to point at a staging directory *outside*
+the repository (`docs/tuning_loop.md`). That is a procedure, not a constraint the CLI
+enforces: the flag accepts any path. What the code does guarantee is narrower — the
+publish step stages only the whitelisted paths, and refuses outright if the working
+tree carries anything outside the whitelist.
 
 ---
 

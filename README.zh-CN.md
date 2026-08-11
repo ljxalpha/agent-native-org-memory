@@ -92,10 +92,10 @@ flowchart TB
     direction TB
     A["agent memory on disk<br/>Markdown files"]
     ADP["FileSystemMdAdapter<br/>config/adapters/*.yaml<br/>reads scope: shared roots only"]
+    SCN["leaf scanner, on the RAW content<br/>audit / warn / block"]
     RED["Redactor<br/>26 patterns + blocklist terms<br/>substitute, then re-scan for residue"]
-    SCN["leaf scanner<br/>audit / warn / block"]
     OUT["memories/CATEGORY/SLUG-REV.md<br/>manifest.json · .health.json"]
-    A --> ADP --> RED --> SCN --> OUT
+    A --> ADP --> SCN --> RED --> OUT
   end
 
   OUT -->|"git push HEAD:leaf/NODE-ID"| BR["shared repo<br/>branch leaf/NODE-ID"]
@@ -157,7 +157,7 @@ flowchart TD
   S1 --> RSV["RunBudget.reserve, then AttemptLedger.reserve<br/>both strictly before the request is issued"]
   RSV --> CALL["POST /chat/completions<br/>system+user as two messages · response_format=json_object<br/>· max_tokens honoured · SDK retries disabled"]
   CALL --> STL["settle / settle_unknown / release<br/>exactly one terminal state per attempt"]
-  STL --> S2["SCAN 2 — inbound: response text + raw_meta<br/>then the recorder demands that verdict before it writes"]
+  STL --> S2["SCAN 2 — inbound, ONLY on a recording run: response text + raw_meta<br/>the recorder demands that verdict before it writes<br/>a non-recording run persists no raw response and skips it"]
   S2 --> PARSE["parse: take the sibling object that carries a products array<br/>two candidates → refuse rather than guess"]
   PARSE --> S3["SCAN 3 — parsed products, still in memory, nothing on disk"]
   S3 --> RENDER["render: every citation resolved against the frozen<br/>snapshot; per-category min_citations / min_contributors"]
@@ -257,8 +257,11 @@ agent CLI 只接受一段文本 prompt，`system` / `user` 的角色边界在链
 
 **2. 泄漏判定发生在任何持久化之前，绝不在之后。**
 出站扫描发生在调用内层 provider *之前*：prompt 一旦离开进程，再拒绝把它写下来已经保护
-不了任何东西。入站扫描发生在任何字节落盘之前。而且写入方不会假设上游有人扫过——
-`BundleRecorder.record` 强制要求调用方出示一份 `ScanVerdict`，并拒绝带命中的判定书。
+不了任何东西。**每一条 lane 都会被包上这道出站扫描**，无论是否录制——不录制只意味着 prompt
+不会被写下来，而不意味着它不会被发出去。相比之下，对**原始响应**的扫描只存在于录制运行中，
+因为那是唯一会把原始响应落盘的运行；而在**每一次**运行里，模型输出都会在解析成对象之后、
+渲染之前再过一道闸。而且写入方不会假设上游有人扫过——`BundleRecorder.record` 强制要求
+调用方出示一份 `ScanVerdict`，并拒绝带命中的判定书。
 → `memory_net/distiller/llm/recording.py`、`memory_net/distiller/output_scanner.py`
 
 **3. 扫描命中会让整个 run 失败，而不是跳过这个 cluster。**
@@ -333,7 +336,7 @@ profile、prompt 模板、scanner 规则文件，全都用 `git show` 从快照 
 
 | 领域 | 状态 | 确切含义 |
 |---|---|---|
-| 蒸馏后端 `deepseek` | **生产路径** | 真实端点、角色分离的双 message、服务端回报 usage、run 级预算 + 跨进程调用账本。`tests/fixtures/golden_bundle/` 里的 golden bundle 就是它一次真实运行的录制。 |
+| 蒸馏后端 `deepseek` | **生产路径** | 真实端点、角色分离的双 message、run 级预算 + 跨进程调用账本。只有当服务端两个计数都回报时才取服务端 usage 并标记 `usage_source: reported`；否则本地估算并标记 `estimated`，绝不谎称拿到了回报。`tests/fixtures/golden_bundle/` 里的 golden bundle 就是它一次真实运行的录制。 |
 | `hermes_tool` 桥接 | **experimental** | 它证明了 `LLMProvider` 抽象可以承载跨进程后端。参考桥接脚本的末端后端**按设计就是确定性 mock**。生产 profile 拒绝它。 |
 | `anthropic` provider | 已实现 | 带预算闸与调用账本，但不是生产基准，也不是等价性比对的参照系。 |
 | Adapter：`claude-code` | 已测试路径 | 唯一没有 `support_status: experimental` 的 adapter——它是靠加载器的默认值成为 stable 的，而不是靠一条显式声明。 |
@@ -345,7 +348,7 @@ profile、prompt 模板、scanner 规则文件，全都用 `git show` 从快照 
 | CI 中的生产回归 | 两档 | Tier A——离线 golden bundle 严格回放 + 桩契约测试——**每个 PR 阻塞**。Tier B——对真实端点的 live smoke——仅 `workflow_dispatch` 手动触发，缺凭据即 skip。 |
 | 非编码 agent、组织级根、实时看板 | **路线图** | 尚未交付。见 [VISION.md](VISION.md)。 |
 
-测试面的量级，供校准：**1234 个测试**，与 `ruff`、`black`、`isort`、对 `memory_net` 的
+测试面的量级，供校准：**1200 多个测试**，与 `ruff`、`black`、`isort`、对 `memory_net` 的
 `mypy --strict` 一起，全部在 CI 中阻塞。
 
 ---
@@ -370,25 +373,34 @@ bash tests/integration/local_repo.sh
 # 1. 搭起一个共享记忆仓库（每个团队一次）
 scripts/bootstrap_repo.sh --repo /tmp/team-memory.git
 
-# 2. 叶子汇报其 agent 中可共享的记忆（上行途中已对敏感信息脱敏）
-git clone /tmp/team-memory.git ./leaf-work
-python3 -m memory_net.leaf.cli report \
-  --repo ./leaf-work --node-id alice-claude-01 --agent-root ~/my-agent \
-  --adapter config/adapters/claude-code.yaml \
-  --redaction config/redaction_patterns.yaml
+# 2. 每位成员装一次叶子。这一步负责克隆仓库、物化叶子实际运行所依据的 config generation、
+#    把 hint 注入 agent 的指令文件，并登记 cron 与守护进程。
+scripts/install_leaf.sh \
+  --repo /tmp/team-memory.git --agent claude-code \
+  --node-id alice-claude-01 --agent-root ~/my-agent \
+  --package-ref <固定的包引用>
 
 # 3. distiller 把团队知识蒸馏到一个 release 分支上——这就是审核/发布关卡
 git clone /tmp/team-memory.git ./distill-work
 python3 -m memory_net.distiller.cli run --repo ./distill-work --provider mock
-
-# 4. release 经审核（合入 master）后，叶子把它订阅回本地
-python3 -m memory_net.leaf.cli subscribe \
-  --repo ./distill-work --agent-root ~/my-agent \
-  --adapter config/adapters/claude-code.yaml \
-  --config-revision test --state-dir ~/.memory-net/state
 ```
 
-上面第 3 步用的是随附的默认 profile，那是一次**零 token 的 mock 运行**。真实运行要改用
+第 2、3 步就是全部部署工作：此后叶子守护进程会按间隔依次运行 `config_sync`、`report`、
+`subscribe`、`health`。这些子命令当然也可以手工驱动——
+
+```bash
+python3 -m memory_net.leaf.cli report \
+  --repo ./leaf-work --node-id alice-claude-01 --agent-root ~/my-agent \
+  --adapter config/adapters/claude-code.yaml \
+  --redaction config/redaction_patterns.yaml
+```
+
+——但 `subscribe` **会刻意拒绝运行**，直到存在一个已激活的 config generation，且其
+subscribe 契约与从 `origin/master` 重算出来的值一致：在契约已经漂移的情况下往 agent 里
+写团队知识，正是这道检查存在的理由。安装脚本负责把该状态准备好；
+`tests/integration/local_repo.sh` 则把它显式地物化了一遍——想看纯手工的最小步骤，读它。
+
+第 3 步用的是随附的默认 profile，那是一次**零 token 的 mock 运行**。真实运行要改用
 生产 profile，并通过启动器从进程环境取凭据——provider 自己绝不打开任何凭据文件：
 
 ```bash
@@ -424,8 +436,12 @@ python3 -m memory_net.distiller.cli --help  # run [--provider mock|anthropic|her
 | 逐 run 的证据（`metrics.json`、`snapshot.json`、`clusters.jsonl`、`unclustered.json`） | 共享仓库 `distill_runs/RUN_ID/` |
 
 此处的 `config/` 与 `prompts/` 仅为引导模板与测试夹具；运行时的唯一事实来源始终是共享
-仓库的 `master`。录制下来的调用 bundle 从不在该白名单之内——它包含完整的 prompt 与
-response，只留在仓库之外。
+仓库的 `master`。
+
+录制下来的调用 bundle 不在该白名单之内。它包含完整的 prompt 与完整的 response，因此
+`--record-dir` 在文档中被规定指向仓库**之外**的 staging 目录（见 `docs/tuning_loop.md`）。
+这是一条**流程约定，而不是 CLI 强制的约束**：该参数接受任意路径。代码真正保证的是更窄的
+一条——发布步骤只暂存白名单内的路径，且一旦工作区里出现白名单之外的内容就直接拒绝发布。
 
 ---
 
