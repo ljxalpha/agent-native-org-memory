@@ -261,44 +261,40 @@ MASTER_SHA="$(git rev-parse origin/master)"
   --master-sha "$MASTER_SHA" \
   --installed-at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 git --work-tree="$TMP_GEN" checkout origin/master -- bootstrap_state.json config prompts >/dev/null
-cp "$TMP_GEN/bootstrap_state.json" "$TMP_GEN/config/bootstrap_state.json"
-cp -R "$TMP_GEN/prompts" "$TMP_GEN/config/prompts"
+
+# Materialize through the shared implementation rather than by hand. The
+# previous inline mktemp -> hash -> mv -> ln sequence was a second, unprotected
+# path to the same result: it skipped the post-move hash re-verification and the
+# quarantine of a corrupted generation that materialize_generation() already
+# performs, and it computed the revision over a differently shaped tree than the
+# daemon's config sync does -- so install and sync could disagree on the
+# revision for identical config.
 GEN_REVISION="$(
-  "$PYTHON" - <<'PY' "$TMP_GEN" "$TMP_GEN/config" "$AGENT" "$MASTER_SHA"
+  "$PYTHON" - "$TMP_GEN" "$MN_HOME/config.generations" "$AGENT" "$MASTER_SHA" <<'PY'
+import os
 import sys
 from pathlib import Path
 
-from memory_net.shared.config.generation import (
-    canonical_generation_hash,
-    subscribe_contract_revision,
-)
+from memory_net.shared.config.generation import materialize_generation
 
-source_root = Path(sys.argv[1])
-root = Path(sys.argv[2])
-agent = sys.argv[3]
-source_master_sha = sys.argv[4]
-(root / "config_revision").write_text(
-    canonical_generation_hash(root),
-    encoding="utf-8",
+generation = materialize_generation(
+    Path(sys.argv[1]),
+    Path(sys.argv[2]),
+    adapter_name=sys.argv[3],
+    source_master_sha=sys.argv[4],
 )
-(root / "subscribe_contract_revision").write_text(
-    subscribe_contract_revision(source_root, adapter_name=agent),
-    encoding="utf-8",
-)
-(root / "config_source_master_sha").write_text(
-    source_master_sha,
-    encoding="utf-8",
-)
-print(canonical_generation_hash(root))
+# Activate through a temporary link plus an atomic replace, so a reader never
+# observes config-current missing.
+current = Path(sys.argv[2]).parent / "config-current"
+tmp = current.with_name(".config-current.tmp")
+if tmp.exists() or tmp.is_symlink():
+    tmp.unlink()
+os.symlink(generation, tmp)
+os.replace(tmp, current)
+print(generation.name)
 PY
-
 )"
-GEN_DIR="$MN_HOME/config.generations/$GEN_REVISION"
-if [[ ! -d "$GEN_DIR" ]]; then
-  mv "$TMP_GEN/config" "$GEN_DIR"
-fi
 rm -rf "$TMP_GEN"
-ln -sfn "$GEN_DIR" "$MN_HOME/config-current"
 
 record_stage GENERATION_READY
 
@@ -335,7 +331,40 @@ if [[ "$NO_DAEMON" != "1" ]]; then
     --adapter "$ADAPTER_CONFIG" \
     --agent-root "$AGENT_ROOT" \
     > "$MN_HOME/state/daemon.log" 2>&1 &
-  echo "$!" > "$MN_HOME/state/daemon.pid"
+  DAEMON_PID="$!"
+  echo "$DAEMON_PID" > "$MN_HOME/state/daemon.pid"
+
+  # POST_VERIFY. Starting a process is not the same as installing a working
+  # leaf: the script used to declare DAEMON_STARTED the instant nohup returned,
+  # so a daemon that died on its first tick still looked like a clean install.
+  # Verify two things within a bounded wait -- the daemon actually produced a
+  # health snapshot, and a health file passes the strict check (which requires
+  # every operational identity field, i.e. that the installed layout resolves).
+  STAGE="POST_VERIFY"
+  POST_VERIFY_TIMEOUT="${MEMORY_NET_INSTALL_POST_VERIFY_SECONDS:-30}"
+  POST_VERIFY_HEALTH="$MN_HOME/state/post_install_health.json"
+  WAITED=0
+  DELAY=1
+  while [[ ! -f "$MN_HOME/state/last_health.json" ]]; do
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      echo "[ABORT] the leaf daemon exited before reporting health" >&2
+      exit 6
+    fi
+    if (( WAITED >= POST_VERIFY_TIMEOUT )); then
+      echo "[ABORT] the leaf daemon did not report health within ${POST_VERIFY_TIMEOUT}s" >&2
+      exit 6
+    fi
+    sleep "$DELAY"
+    WAITED=$(( WAITED + DELAY ))
+    (( DELAY < 5 )) && DELAY=$(( DELAY * 2 ))
+  done
+
+  MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli health \
+    --path "$POST_VERIFY_HEALTH" \
+    --node-id "$NODE_ID" >/dev/null
+  MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli status \
+    --health "$POST_VERIFY_HEALTH" >/dev/null
+
   record_stage DAEMON_STARTED
 fi
 

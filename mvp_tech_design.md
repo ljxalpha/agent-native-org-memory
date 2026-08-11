@@ -1514,6 +1514,33 @@ HINTS_INSTALLED → DAEMON_STARTED`，失败记为 `FAILED:<STAGE>`。
 这三者的真相源分别是 `local.yaml` 与 `config-current/config_revision`，
 在状态文件里存副本只会制造第二个可能过期的答案。）
 
+#### 6.6.5 generation 物化归口与安装后验证
+
+**物化归口。** 脚本原先内联手搓 `mktemp → git checkout → 算 hash → mv → ln -sfn`，
+是通往同一结果的**第二条、无保护的路径**：它跳过了 `materialize_generation()`
+已经实现的移动后哈希复核与损坏代次 quarantine（`_corrupted/`），
+而且它计算 revision 时喂进去的目录形状与守护 `config_sync` 的不同——
+同一份配置，装机与同步可能算出不同的 `config_revision`。
+现在两侧都调 `materialize_generation(source_root, generations_root,
+adapter_name=…, source_master_sha=…)`，并用「临时符号链接 + 原子替换」激活
+`config-current`，读者不会看到该链接短暂缺失。**删代码即得能力。**
+
+**安装后验证。** 原先 `nohup` 返回的瞬间就写 `DAEMON_STARTED`：
+守护进程在第一个 tick 就崩掉，安装看起来依然干净。现在在**有界等待**内验证两件事，
+通过才写 `DAEMON_STARTED`：
+
+1. 守护确实产出了健康快照（轮询 `state/last_health.json`，退避 1→2→4→5 秒，
+   默认上限 30 秒，可用 `MEMORY_NET_INSTALL_POST_VERIFY_SECONDS` 调整；
+   期间若进程已退出立即失败，不等满超时）；
+2. `memory-net-leaf status` 的**严格档**在一份新写出的 health 上通过——
+   严格档要求七个运维身份字段齐全，因此这一步实际验证的是"安装布局能解析出完整身份"。
+
+任一失败 → `FAILED:POST_VERIFY` + 非零退出。`--no-daemon` 时整段跳过。
+
+> 该验证针对新写出的 health 文件，而不是装机时种进叶子分支的那份
+> `.health.json`——后者在建分支时写入，那时 `config-current` 尚不存在，
+> 因此不含运维身份；它由第一次 report / 健康发布刷新。
+
 生产级 one-command hardening 仍作为后续任务跟踪：平台/依赖探针、
 `build_info` / approved build ID 校验、安装失败阶段状态、远端 manifest
 兼容校验、代表性 schema probe、同机 dirty recovery 留证、generation quarantine、

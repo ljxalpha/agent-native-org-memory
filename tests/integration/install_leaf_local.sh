@@ -14,7 +14,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/memory-net-install.XXXXXX")"
-trap 'rm -rf "$TMPROOT"' EXIT
+cleanup() {
+  # Kill before removing the tree: a daemon left running against a deleted home
+  # would be exactly the machine pollution this harness exists to prevent.
+  if [[ -f "$TMPROOT/home-daemon/state/daemon.pid" ]]; then
+    kill "$(cat "$TMPROOT/home-daemon/state/daemon.pid")" 2>/dev/null || true
+  fi
+  rm -rf "$TMPROOT"
+}
+trap cleanup EXIT
 
 # Neutral identity for every commit made below, so the regression does not
 # depend on (or read) the machine's git configuration.
@@ -182,5 +190,54 @@ assert "node_id" not in raw, raw
 state = json.loads((home / "state" / "install_state.json").read_text(encoding="utf-8"))
 assert state["status"] == "HINTS_INSTALLED", state
 PY
+
+# The active generation must be hash-consistent with its own directory name.
+# That is the property the shared materialization re-verifies after moving into
+# place, and which the previous hand-rolled sequence never checked.
+python3 - "$MN_HOME/config-current" <<'PY'
+import sys
+from pathlib import Path
+
+from memory_net.shared.config.generation import canonical_generation_hash
+
+generation = Path(sys.argv[1]).resolve()
+assert canonical_generation_hash(generation) == generation.name, generation
+assert (generation / "config_revision").read_text(encoding="utf-8") == generation.name
+PY
+
+# --- Post-install verification ----------------------------------------------
+# Everything above ran with --no-daemon. Run one install *with* the daemon, in
+# its own temporary home, to exercise the bounded post-install check: starting a
+# process is not the same as installing a working leaf.
+DAEMON_HOME="$TMPROOT/home-daemon"
+MEMORY_NET_HOME="$DAEMON_HOME" "$ROOT/scripts/install_leaf.sh" \
+  --repo "$MEMORY_REPO" \
+  --agent claude-code \
+  --node-id "$NODE_ID-d" \
+  --agent-root "$AGENT_ROOT" \
+  --package-ref "$ROOT" \
+  --home "$DAEMON_HOME" \
+  --no-cron > "$TMPROOT/daemon.out" 2> "$TMPROOT/daemon.err"
+
+crontab -l > "$CRON_AFTER" 2>/dev/null || : > "$CRON_AFTER"
+diff -u "$CRON_BEFORE" "$CRON_AFTER" \
+  || { echo "[FAIL] the daemon install modified the user crontab" >&2; exit 1; }
+
+python3 - "$DAEMON_HOME/state/install_state.json" <<'PY'
+import json
+import sys
+
+state = json.loads(open(sys.argv[1], encoding="utf-8").read())
+# DAEMON_STARTED is only written after post-install verification passes.
+assert state["status"] == "DAEMON_STARTED", state
+PY
+
+# The verification artifact must itself pass the strict check, which is what
+# proves the installed layout resolves to a complete operational identity.
+MEMORY_NET_HOME="$DAEMON_HOME" "$DAEMON_HOME/venv/bin/python" \
+  -m memory_net.leaf.cli status \
+  --health "$DAEMON_HOME/state/post_install_health.json" >/dev/null
+
+kill "$(cat "$DAEMON_HOME/state/daemon.pid")" 2>/dev/null || true
 
 echo "install_leaf_local.sh passed"
