@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""aomt-with-env — run a command with two allowlisted credentials in its env.
+
+    aomt-with-env --check
+    aomt-with-env --print-keys
+    aomt-with-env [--env-file PATH] [--key NAME]... -- <command> [args...]
+
+The credential file (``~/.hermes/.env`` by default) is a personal, shared store
+holding many unrelated keys, so this reads exactly the allowlisted ones and
+drops the rest as it parses. It is not a shell: no expansion, no substitution,
+no ``source``, no ``export``.
+
+Values reach the command through the environment of ``execve`` and nowhere else
+-- never through a command line, which is world-readable via ``/proc``. There is
+no eval-able output mode and no ``env`` subcommand, on purpose: both would put a
+credential on a terminal and into a shell history. ``--check`` prints only
+``<set>`` or ``<missing>``, and ``--print-keys`` prints only names.
+
+Exit status: 0 on success, 1 when ``--check`` finds something missing, 2 when
+the arguments or the credential file cannot be used.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from memory_net.shared.env_allowlist import CredentialError, main
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except CredentialError as exc:
+        # The message names keys and paths only; see CredentialError.
+        print(f"aomt-with-env: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc

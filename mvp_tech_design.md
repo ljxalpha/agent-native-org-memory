@@ -1410,6 +1410,35 @@ orchestrator 侧 `_distill_gate_error()` 新增 `redaction_failures > 0` 分支�
 
 `context.scanner is None` 时全部行为与接线前逐字相同。
 
+### 5.6 凭据 launcher（`memory_net/shared/env_allowlist.py` + `scripts/aomt-with-env`）
+
+生产蒸馏需要 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` 两个变量，
+而它们所在的凭据文件（默认 `~/.hermes/.env`）是一个**混装了大量无关服务凭据**的个人文件。
+因此**不允许** `source` 该文件、也不允许把整份环境交给子进程——
+取值必须按**键名 allowlist** 逐条筛，且在解析阶段就把 allowlist 之外的键丢掉
+（不是解析完再过滤：无关服务的凭据根本不应该出现在本进程内存里）。
+
+**解析器不是 shell**：只接受 `^[A-Za-z_][A-Za-z0-9_]*=` 形态，剥掉**成对**引号，
+忽略空行与 `#` 开头；**不做**变量展开、命令替换、行继续，
+`export KEY=` 与其它 shell 构造一律**拒绝**（不是静默接受——
+接受一部分 shell 语法等于宣称支持全部，下一个构造就会被悄悄读错）。
+`$(...)` 与 `${...}` 一律按字面量保留。
+
+**取值优先级**：先看本进程环境（调用方为这次运行显式设置的），再回退凭据文件，
+**两者都没有则报错**——带着空凭据继续，只会在几步之后换来一个说明不了原因的鉴权失败。
+
+**交给子进程的方式**（这是本节的硬要求）：
+`os.execve(path, argv, {**environ, **credentials})` —— 值**只走 `env` 参数**，
+**绝不进 `argv`**：`/proc/<pid>/cmdline` 对同机任意进程可读。
+`env -i KEY=VALUE` 与 bwrap 的 `--setenv KEY VALUE` 都会把值写进命令行，两者都不用；
+bwrap 本来就把**自己的环境**传给沙箱内的子进程，所以 `exec_in_sandbox()` 走的是同一条路。
+
+**三个模式，没有第四个**：`--check`（只打印 `<set>` / `<missing>`）、
+`--print-keys`（只打印键名，供沙箱 launcher 知道要带哪些变量）、
+`-- <cmd> [args…]`（exec）。**不提供任何可 `eval` 的输出、不提供 `env` 子命令**：
+可 `eval` 的一行就是一个出现在终端、shell 历史和任何捕获日志里的凭据。
+异常消息只带**键名与路径**，绝不回显值。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
