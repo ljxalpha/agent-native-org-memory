@@ -18,6 +18,7 @@ from typing import Any, cast
 from memory_net.distiller.llm.recording import BundleRecorder
 from memory_net.distiller.metrics import (
     DistillMetrics,
+    RunAccounting,
     citation_resolution_rate,
     parse_failure_rate,
 )
@@ -178,7 +179,9 @@ class DistillOrchestrator:
                     # what stopped it instead of only that something did. The
                     # gate below turns them into the failure path (§5.5.13).
                     output = exc.output
-            gate_error = _distill_gate_error(output)
+            gate_error = _distill_gate_error(
+                output, accounting=_accounting_of(output, len(records))
+            )
             manifest: dict[str, Any] | None = None
             if not gate_error:
                 # Built (and therefore scanned) before anything is written or
@@ -548,6 +551,7 @@ class DistillOrchestrator:
             provider_backends=output.provenance.provider_backends,
             usage_source=output.provenance.usage_source,
             usage_source_counts=output.provenance.usage_source_counts,
+            **_accounting_of(output, len(records)).as_metrics_fields(),  # type: ignore[arg-type]
             **self._run_configuration_fields(),
         )
 
@@ -661,6 +665,11 @@ class DistillOrchestrator:
             provider_backends=provenance.provider_backends,
             usage_source=provenance.usage_source,
             usage_source_counts=provenance.usage_source_counts,
+            **(
+                _accounting_of(output, len(records)).as_metrics_fields()  # type: ignore[arg-type]
+                if output
+                else {}
+            ),
             **self._run_configuration_fields(),
             status="failed",
             recent_errors=[error],
@@ -1587,7 +1596,26 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
-def _distill_gate_error(output: DistillationOutput) -> str | None:
+def _accounting_of(
+    output: DistillationOutput,
+    input_records: int,
+) -> RunAccounting:
+    """This run's cluster and record identities, folded once per use site."""
+    return RunAccounting.of(
+        clusters_total=len(output.cluster_assignments or []),
+        terminal_counts=output.cluster_terminal_counts,
+        records_cited=output.records_cited,
+        records_unclustered=len(output.unclustered or []),
+        input_records=input_records,
+        aborted=bool(output.redaction_failures),
+    )
+
+
+def _distill_gate_error(
+    output: DistillationOutput,
+    *,
+    accounting: RunAccounting | None = None,
+) -> str | None:
     failures: list[str] = []
     if output.redaction_failures:
         # Stronger than the other two: they say some clusters were unusable,
@@ -1602,6 +1630,18 @@ def _distill_gate_error(output: DistillationOutput) -> str | None:
         failures.append(f"parse failures: {output.parse_failures}")
     if output.citation_failures:
         failures.append(f"citation failures: {output.citation_failures}")
+    if accounting is not None and accounting.mismatch:
+        # Counts that do not add up mean some cluster or some record went
+        # unaccounted for, and there is no way to tell from the outside whether
+        # what went missing was a skip or a whole product. Publishing on top of
+        # that would make the run's own metrics unusable as evidence.
+        failures.append(
+            "accounting mismatch: clusters "
+            f"{accounting.clusters_terminal}/{accounting.clusters_total}, "
+            "records "
+            f"{accounting.records_cited}+{accounting.records_unclustered}"
+            f"/{accounting.input_records}"
+        )
     if not failures:
         return None
     return "distill quality gate failed: " + "; ".join(failures)

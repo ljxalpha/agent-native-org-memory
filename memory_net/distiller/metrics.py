@@ -78,6 +78,18 @@ class DistillMetrics:
     # fired" is the only thing that can be said without quoting the content.
     redaction_failures: int | None = None
     redaction_rule_counts: dict[str, int] | None = None
+    # Cluster and record accounting (DISTILL-001). ``clusters_attempted`` above
+    # keeps its own meaning -- the clusters that actually issued a call, which
+    # total_calls, the replay counters and the parse-failure rate all read --
+    # so these are new names rather than a redefinition of it.
+    clusters_total: int = 0
+    clusters_terminal: int = 0
+    cluster_terminal_counts: dict[str, int] = field(default_factory=dict)
+    records_cited: int = 0
+    records_unclustered: int = 0
+    accounting_mismatch: bool = False
+    # Which run this one continued, empty when it started from scratch.
+    resumed_from: str = ""
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,6 +119,83 @@ OPTIONAL_KEYS = (
     "redaction_rule_counts",
 )
 """Keys written only when they apply. See ``DistillMetrics.as_dict``."""
+
+
+@dataclass(frozen=True)
+class RunAccounting:
+    """The two identities a run's counts must satisfy (§7.2 DISTILL-001).
+
+    Cluster level: every cluster reaches exactly one terminal, so the terminal
+    counts sum to the number of clusters.
+
+    Record level: every input record is either cited by some product or listed
+    in ``unclustered.json``, so the two partition the input.
+
+    Kept apart on purpose. ``unclustered.json`` is a *record* list, and adding
+    it to a cluster-level sum would double-count a failed cluster -- once as a
+    skipped cluster and again through each of its records.
+    """
+
+    clusters_total: int
+    clusters_terminal: int
+    terminal_counts: dict[str, int]
+    records_cited: int
+    records_unclustered: int
+    input_records: int
+    mismatch: bool
+
+    @classmethod
+    def of(
+        cls,
+        *,
+        clusters_total: int,
+        terminal_counts: dict[str, int] | None,
+        records_cited: int,
+        records_unclustered: int,
+        input_records: int,
+        aborted: bool = False,
+    ) -> RunAccounting:
+        """Fold the counts, and decide whether they add up.
+
+        ``aborted`` suppresses the verdict rather than the counts: a run the
+        output scanner stopped mid-way has clusters that never reached a
+        terminal *by design*, and reporting that as an accounting fault would
+        bury the refusal that is the actual reason the run failed.
+
+        ``terminal_counts is None`` means no terminals were reported at all --
+        an output that predates them, or a stand-in pipeline. There is nothing
+        to check then, and inventing a failure out of an absent report would say
+        the counts disagree when none were given.
+        """
+        counts = dict(terminal_counts or {})
+        clusters_terminal = sum(counts.values())
+        mismatch = (
+            terminal_counts is not None
+            and not aborted
+            and (
+                clusters_total != clusters_terminal
+                or input_records != records_cited + records_unclustered
+            )
+        )
+        return cls(
+            clusters_total=clusters_total,
+            clusters_terminal=clusters_terminal,
+            terminal_counts=counts,
+            records_cited=records_cited,
+            records_unclustered=records_unclustered,
+            input_records=input_records,
+            mismatch=mismatch,
+        )
+
+    def as_metrics_fields(self) -> dict[str, object]:
+        return {
+            "clusters_total": self.clusters_total,
+            "clusters_terminal": self.clusters_terminal,
+            "cluster_terminal_counts": self.terminal_counts,
+            "records_cited": self.records_cited,
+            "records_unclustered": self.records_unclustered,
+            "accounting_mismatch": self.mismatch,
+        }
 
 
 def parse_failure_rate(parse_failures: int, clusters_attempted: int) -> float:
