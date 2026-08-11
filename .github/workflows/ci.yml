@@ -33,6 +33,9 @@ jobs:
       # docs/runbook.md -- only the stopping condition differs, so this step is
       # not evidence of a 24h run.
       - name: Run three-leaf stability soak (accelerated)
+        # Bounded: the driver waits on a subprocess with no deadline of its own,
+        # so a hung git would otherwise hold the runner until the job limit.
+        timeout-minutes: 15
         run: python scripts/stability_soak.py --leaves 3 --cycles 5 --report stability_soak_report.json
       - name: Validate shared pilot gate
         run: python scripts/validate_shared_pilot_gate.py

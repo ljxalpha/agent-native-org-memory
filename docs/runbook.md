@@ -127,10 +127,17 @@ Pass `--workspace` for any long run: it keeps the leaf repositories and the
 per-cycle logs after the run instead of discarding them, which is what you need
 when something fails at hour 19.
 
-A cycle costs the same at hour 19 as at minute 1: each leaf keeps a rolling
-window of three cycles' memories and each review branch is deleted once master
-carries it, so neither the corpus nor the branch list grows without bound. Cycle
-duration drifting upward over a long run is therefore a signal, not the setup.
+A cycle costs about the same at hour 19 as at minute 1: each leaf keeps a
+rolling window of three cycles' memories, master keeps the two most recent
+distillation run directories, and each review branch is deleted once master
+carries its content. So the published tree, the corpus and the branch list stay
+bounded, and cycle duration drifting upward over a long run is a signal rather
+than the setup.
+
+Git history is the one thing that does keep growing: every cycle still adds
+commits, and pruned objects stay in the repository until a `git gc`. Give a 24h
+workspace disk headroom (order of a gigabyte, not a megabyte) and put it on a
+local filesystem.
 
 ### What it checks each cycle, for each leaf
 
@@ -142,6 +149,12 @@ duration drifting upward over a long run is therefore a signal, not the setup.
 5. `redaction_incidents.blocked_reports` has not grown;
 6. the payload changed since the previous cycle — a leaf that stopped reporting
    leaves a health file that still satisfies 1-5.
+
+Check 5 is the one that stays quiet on a healthy run: a report that a scanner
+blocks fails the cycle before its health is ever compared, so on this lane the
+counter is always zero and the comparison only earns its keep against a leaf
+that goes degraded without failing. Its failure branch is covered by unit tests,
+not by this lane.
 
 ### How to read the result
 

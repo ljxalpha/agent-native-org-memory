@@ -145,6 +145,12 @@ PY
 # under test -- would decide when it fell over.
 MEMORY_WINDOW_CYCLES=3
 
+# How many distillation run directories master keeps. Every cycle commits a new
+# `distill_runs/<run_id>/` into master, so without pruning the published tree --
+# and every clone that fetches it -- grows with the run, for the same reason the
+# memory window exists.
+RUN_HISTORY_CYCLES=2
+
 # Give one leaf a brand new memory for this cycle and retire the one that fell
 # out of the window. Every cycle must produce genuinely new work, otherwise
 # "the health file changed" would be untestable.
@@ -205,8 +211,33 @@ PY
   # Retire the review branch once master carries its content: over a 24h run the
   # remote would otherwise accumulate one branch per cycle.
   git -C "$DISTILL_WORK" push --quiet origin --delete "release/$run_id" || true
+  prune_distill_runs
   test -f "$DISTILL_WORK/manifest.json"
   test -n "$(find "$DISTILL_WORK/team" -type f -name '*.md' -print -quit)"
+}
+
+# Drop the run directories that fell out of the history window and publish the
+# smaller tree. `latest` is left alone: it is the pointer the regressions read.
+prune_distill_runs() {
+  local stale
+  stale="$(python3 - "$DISTILL_WORK" "$RUN_HISTORY_CYCLES" <<'PY'
+import sys
+from pathlib import Path
+
+repo, keep = Path(sys.argv[1]), int(sys.argv[2])
+runs = sorted(
+    path
+    for path in (repo / "distill_runs").glob("*")
+    if path.is_dir() and path.name != "latest"
+)
+for path in runs[: max(0, len(runs) - keep)]:
+    print(path.relative_to(repo).as_posix())
+PY
+)"
+  [[ -n "$stale" ]] || return 0
+  echo "$stale" | xargs -r git -C "$DISTILL_WORK" rm -rq --
+  git -C "$DISTILL_WORK" commit -qm "prune distill run history"
+  git -C "$DISTILL_WORK" push --quiet origin master
 }
 
 run_subscribe() {
