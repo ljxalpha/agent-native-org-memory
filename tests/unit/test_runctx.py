@@ -303,6 +303,12 @@ def test_snapshot_key_set_is_stable() -> None:
         "max_attempts",
         "max_usd",
         "max_wall_clock_s",
+        # The two stricter ceilings and the wind-down flag (DISTILL-001). Always
+        # present, None / False when the profile configured neither, so a reader
+        # never has to tell "not configured" from "this run predates them".
+        "per_cluster_max_usd",
+        "soft_max_usd",
+        "soft_exhausted",
         "reserved_usd",
         "reserved_wall_clock_s",
         "spent_usd",

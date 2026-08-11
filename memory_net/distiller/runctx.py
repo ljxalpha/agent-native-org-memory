@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import math
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self
@@ -45,6 +46,17 @@ class BudgetExhausted(NotExecuted):
 
     Raised by ``RunBudget.reserve`` *before* the provider issues its request:
     settling after the fact cannot prevent an overspend, only report one.
+    """
+
+
+class ClusterBudgetExhausted(BudgetExhausted):
+    """One cluster's own ceiling refused the call, not the run's.
+
+    A distinct type because the two refusals mean different things to the loop
+    holding them: the run ceiling says every later cluster is refused too, while
+    this one says only this cluster is over its share and the next may proceed.
+    Collapsing them would either stop a run that still has budget, or keep
+    hammering a cluster that has none.
     """
 
 
@@ -91,6 +103,9 @@ class Reservation:
     _cost_upper_usd: float
     _wall_upper_s: float
     _settled: bool = False
+    # Which per-cluster scope was open when this was taken, so the charge lands
+    # on the same counter the reservation was checked against.
+    _scope: str | None = None
 
     @property
     def is_settled(self) -> bool:
@@ -155,11 +170,74 @@ class RunBudget:
     max_usd: float | None = None
     max_attempts: int | None = None
     max_wall_clock_s: float | None = None
+    # Two ceilings *stricter* than max_usd, and neither replaces it (§7.2
+    # DISTILL-001). soft_max_usd is advisory and is enforced by the scheduler,
+    # not here: refusing a call the loop already decided to make would turn a
+    # graceful wind-down into the hard stop max_usd already provides.
+    # per_cluster_max_usd is enforced here, but only inside an open scope.
+    soft_max_usd: float | None = None
+    per_cluster_max_usd: float | None = None
 
     spent_usd: float = 0.0
     attempts: int = 0
     wall_clock_s: float = 0.0
     _outstanding: list[Reservation] = field(default_factory=list)
+    _scope: str | None = None
+    _scope_spent: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Refuse a configuration whose ceilings contradict each other.
+
+        A soft or per-cluster limit above the hard one is not a limit at all,
+        and one without a hard one has no baseline to be "stricter" than.
+        Clamping either silently would leave a run reporting ceilings it never
+        applied, so both are rejected at construction.
+        """
+        for name in ("soft_max_usd", "per_cluster_max_usd"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if value < 0:
+                raise ValueError(f"{name} must not be negative: {value!r}")
+            if self.max_usd is None:
+                raise ValueError(
+                    f"{name} needs a hard ceiling to be stricter than; "
+                    "set llm.budget_usd as well"
+                )
+            if value > self.max_usd:
+                raise ValueError(
+                    f"{name} ({value}) must not exceed max_usd ({self.max_usd})"
+                )
+
+    @contextmanager
+    def enter_scope(self, name: str) -> Iterator[None]:
+        """Charge everything reserved inside this block to one named scope.
+
+        The scope is what gives ``per_cluster_max_usd`` something to be *per*.
+        Restored rather than cleared on the way out, so a nested scope cannot
+        silently drop the enclosing one.
+        """
+        previous = self._scope
+        self._scope = name
+        self._scope_spent.setdefault(name, 0.0)
+        try:
+            yield
+        finally:
+            self._scope = previous
+
+    @property
+    def soft_exhausted(self) -> bool:
+        """Whether the scheduler should stop opening new clusters.
+
+        In-flight reservations count: they are spend that has been committed to
+        even though it has not settled yet.
+        """
+        if self.soft_max_usd is None:
+            return False
+        return self.spent_usd + self.reserved_usd >= self.soft_max_usd
+
+    def scope_spent(self, name: str) -> float:
+        return self._scope_spent.get(name, 0.0)
 
     def cost_of(self, *, input_tokens: int, output_tokens: int) -> float:
         return (input_tokens / 1_000_000) * self.input_per_mtok_usd + (
@@ -205,10 +283,25 @@ class RunBudget:
                     f"run budget exhausted: wall clock {projected_s:.3f}"
                     f"/{self.max_wall_clock_s:.3f}s"
                 )
+        # Last, and deliberately: the run-level ceilings are the ones whose
+        # breach ends the run, so they have to be the ones reported when both
+        # would refuse. hard > soft > per-cluster (§7.2 DISTILL-001).
+        if self.per_cluster_max_usd is not None and self._scope is not None:
+            projected_scope = (
+                self._scope_spent.get(self._scope, 0.0)
+                + self._reserved_usd_in(self._scope)
+                + cost_upper
+            )
+            if projected_scope > self.per_cluster_max_usd:
+                raise ClusterBudgetExhausted(
+                    f"cluster budget exhausted: cost {projected_scope:.6f}"
+                    f"/{self.per_cluster_max_usd:.6f} USD"
+                )
         reservation = Reservation(
             _budget=self,
             _cost_upper_usd=cost_upper,
             _wall_upper_s=timeout_s_upper,
+            _scope=self._scope,
         )
         self._outstanding.append(reservation)
         return reservation
@@ -216,6 +309,11 @@ class RunBudget:
     @property
     def reserved_usd(self) -> float:
         return sum(item._cost_upper_usd for item in self._outstanding)
+
+    def _reserved_usd_in(self, scope: str) -> float:
+        return sum(
+            item._cost_upper_usd for item in self._outstanding if item._scope == scope
+        )
 
     @property
     def reserved_wall_clock_s(self) -> float:
@@ -239,6 +337,9 @@ class RunBudget:
             "max_attempts": self.max_attempts,
             "max_usd": self.max_usd,
             "max_wall_clock_s": self.max_wall_clock_s,
+            "per_cluster_max_usd": self.per_cluster_max_usd,
+            "soft_max_usd": self.soft_max_usd,
+            "soft_exhausted": self.soft_exhausted,
             "reserved_usd": self.reserved_usd,
             "reserved_wall_clock_s": self.reserved_wall_clock_s,
             "spent_usd": self.spent_usd,
@@ -259,6 +360,10 @@ class RunBudget:
         ``reserve`` fail.
         """
         self._outstanding.remove(reservation)
+        if reservation._scope is not None:
+            self._scope_spent[reservation._scope] = (
+                self._scope_spent.get(reservation._scope, 0.0) + charge_usd
+            )
         self.spent_usd += charge_usd
         self.wall_clock_s += wall_s
         self.attempts += 1
