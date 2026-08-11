@@ -91,9 +91,35 @@ def test_a_long_response_around_the_payload_is_still_handled() -> None:
     assert parse_json_response(text) == PAYLOAD
 
 
-def test_a_nested_products_object_does_not_count_as_a_second_payload() -> None:
-    """Only objects decoded from the top level are candidates; a ``products``
-    key nested inside one of them is part of that object, not a rival to it."""
-    text = json.dumps({"products": [{"topic": "retry", "meta": {"products": 1}}]})
+def test_a_nested_products_key_does_not_count_as_a_second_payload() -> None:
+    """Only sibling objects are candidates. Scanning every brace descends into
+    the payload's own nesting, and a product carrying a nested ``products`` key
+    then looks like a rival payload -- turning a perfectly good response into
+    an ambiguity error. The preamble matters: without it the whole text parses
+    in one go and this scanner is never reached."""
+    payload = {"products": [{"topic": "retry", "meta": {"products": 1}}]}
+    text = f"Thinking out loud.\n{json.dumps(payload)}"
 
-    assert parse_json_response(text)["products"][0]["meta"] == {"products": 1}
+    assert parse_json_response(text) == payload
+
+
+def test_a_payload_wrapped_in_an_array_is_still_found() -> None:
+    """Some models answer with a one-element list. The object inside it is a
+    sibling as far as the scan is concerned, which is what makes it findable."""
+    text = f"Result:\n[{json.dumps(PAYLOAD)}]"
+
+    assert parse_json_response(text) == PAYLOAD
+
+
+def test_a_products_key_inside_a_string_is_not_an_object() -> None:
+    text = f'{{"thinking": "I will emit {{\\"products\\": []}} next"}}\n{json.dumps(PAYLOAD)}'
+
+    assert parse_json_response(text) == PAYLOAD
+
+
+def test_a_truncated_trailing_object_does_not_hide_the_payload() -> None:
+    """A response cut off at max_tokens still has a usable payload before the
+    cut, and refusing it would discard work already paid for."""
+    text = f'{json.dumps(PAYLOAD)}\n{{"note": "cut off here'
+
+    assert parse_json_response(text) == PAYLOAD

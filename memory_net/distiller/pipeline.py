@@ -763,15 +763,23 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
     first_error: json.JSONDecodeError | None = None
     candidates: list[dict[str, Any]] = []
     matches: list[dict[str, Any]] = []
-    for index, char in enumerate(text):
-        if char != "{":
+    index = 0
+    while index < len(text):
+        if text[index] != "{":
+            index += 1
             continue
         try:
-            value, _end = decoder.raw_decode(text[index:])
+            value, end = decoder.raw_decode(text[index:])
         except json.JSONDecodeError as exc:
             if first_error is None:
                 first_error = exc
+            index += 1
             continue
+        # Skip past what was just decoded, so only *sibling* objects are
+        # candidates. Scanning every brace would descend into the payload's own
+        # nesting, and a product carrying a nested "products" key would then
+        # look like a second, rival payload.
+        index += end
         if not isinstance(value, dict):
             continue
         candidates.append(value)
