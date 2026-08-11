@@ -24,6 +24,10 @@ from memory_net.shared.util.hashing import revision_hash, short_hash, stable_jso
 
 MEMORY_ID_RE = re.compile(r"^leaf-[a-z0-9-]+-mem-[A-Za-z0-9-]+$")
 
+#: The reporter's advisory lock file, kept inside the leaf worktree so that it
+#: scopes to the repository being written rather than to one installation home.
+LOCK_FILE_NAME = ".reporter.lock"
+
 
 @dataclass(frozen=True)
 class ReportResult:
@@ -61,7 +65,8 @@ def report(
         parameter existed.
     """
     repo_path.mkdir(parents=True, exist_ok=True)
-    lock_path = repo_path / ".reporter.lock"
+    _exclude_lock_from_status(repo_path)
+    lock_path = repo_path / LOCK_FILE_NAME
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
@@ -79,6 +84,38 @@ def report(
             )
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _exclude_lock_from_status(repo_path: Path) -> None:
+    """Keep the lock file from making the leaf worktree dirty.
+
+    Branch preparation refuses to switch branches on a dirty worktree, and the
+    lock is untracked, so without this every report after the first one would
+    abort with "cannot switch branches from a dirty worktree" — the daemon would
+    report exactly once per clone. The rule goes into the clone-local
+    ``.git/info/exclude`` rather than into a committed ``.gitignore`` because
+    that also repairs leaf branches created before this call site existed, and
+    because a lock file is a property of the working copy, not of the branch.
+
+    Best effort by design: a repository shape without ``.git/info`` (a linked
+    worktree, a submodule) or an unwritable one simply keeps the previous
+    behaviour instead of failing the report here.
+    """
+    exclude_path = repo_path / ".git" / "info" / "exclude"
+    if not exclude_path.parent.is_dir():
+        return
+    entry = f"/{LOCK_FILE_NAME}"
+    try:
+        existing = (
+            exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        )
+        if entry in existing.splitlines():
+            return
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        with exclude_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{separator}{entry}\n")
+    except OSError:
+        return
 
 
 def _report_unlocked(

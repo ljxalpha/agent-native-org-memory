@@ -1,5 +1,12 @@
 schema_version: memory-net/redaction-patterns/v1
-version: 2
+# One rule corpus, two loaders, two version semantics -- read this before editing.
+#   * memory_net/shared/redaction (leaf side, rewrites): reads `patterns` and
+#     `blocklist_terms` only, and its version hash covers exactly those two.
+#   * memory_net/distiller/output_scanner (output side, decides): reads those two
+#     plus `output_scanner_thresholds` and `output_scanner_dynamic_rules`, and its
+#     version hash covers all four -- so a threshold-only edit does change it.
+# Bump `version` on any change here: leaves re-run redaction when it moves.
+version: 3
 patterns:
   - name: email
     regex: '\b[\w._%+-]+@[\w.-]+\.[A-Za-z]{2,}\b'
@@ -74,5 +81,25 @@ patterns:
   - name: ssh_url_with_user
     regex: '\b[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+:[a-zA-Z0-9._/~-]+\.git\b'
     replacement: '<REDACTED:ssh_git_url>'
+  - name: abs_home_path
+    regex: '(?:/home|/Users)/[A-Za-z0-9._-]{1,64}|[A-Za-z]:\\Users\\[A-Za-z0-9._-]{1,64}'
+    replacement: '<REDACTED:home_path>'
+  - name: hostname_form
+    regex: '\b[A-Za-z0-9][A-Za-z0-9-]{0,62}\.(?:local|internal|lan|intranet|corp)\b'
+    replacement: '<REDACTED:hostname>'
 blocklist_terms:
   - DO_NOT_REPORT_SECRET
+# Output-scanner-only sections. The leaf-side loader ignores both; only
+# memory_net/distiller/output_scanner reads them, and its version covers them.
+output_scanner_thresholds:
+  # Shannon entropy is measured per token (a run of base64/hex-ish characters
+  # with no whitespace), not over the whole string: measured whole, ordinary
+  # English prose sits near 4 bits per character and would always fire.
+  high_entropy_min_length: 32
+  high_entropy_min_bits_per_char: 3.5
+output_scanner_dynamic_rules:
+  # Values are injected by the caller at load time, never stored here: writing
+  # the real hostname into a tracked file is the leak this rule exists to catch.
+  - name: local_hostname
+    values_from: hostname
+    regex_template: '(?i)\b{value}\b'

@@ -855,3 +855,88 @@ def test_daemon_degraded_health_carries_ops_identity(tmp_path: Path) -> None:
     assert any("task exploded" in item for item in health["recent_errors"])
     for field, value in OPS_IDENTITY.items():
         assert health[field] == value
+
+
+def _minimal_adapter(tmp_path: Path) -> FileSystemMdAdapter:
+    agent_root = tmp_path / "agent"
+    shared = agent_root / "memory" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "note.md").write_text("a shared note", encoding="utf-8")
+    adapter_config = tmp_path / "adapter.yaml"
+    adapter_config.write_text(
+        """
+name: claude-code
+roots:
+  shared:
+    - alias: shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+team_target: "${AGENT_ROOT}/memory/team"
+file_pattern: "*.md"
+""",
+        encoding="utf-8",
+    )
+    return FileSystemMdAdapter.from_yaml(adapter_config, agent_root=agent_root)
+
+
+def test_report_lock_does_not_dirty_the_worktree(tmp_path: Path) -> None:
+    """The reporter's own lock file must not block the next report.
+
+    Branch preparation refuses to switch branches on a dirty worktree, so an
+    untracked lock file would let a leaf report exactly once per clone.
+    """
+    leaf_repo = tmp_path / "leaf"
+    leaf_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(leaf_repo)], check=True)
+
+    report(
+        repo_path=leaf_repo,
+        node_id="alice-01",
+        adapter=_minimal_adapter(tmp_path),
+        redactor=null_redactor(),
+    )
+
+    assert (leaf_repo / reporter_module.LOCK_FILE_NAME).exists()
+    exclude = (leaf_repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert f"/{reporter_module.LOCK_FILE_NAME}" in exclude.splitlines()
+    status = subprocess.run(
+        ["git", "-C", str(leaf_repo), "status", "--porcelain"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+    assert reporter_module.LOCK_FILE_NAME not in status
+
+
+def test_report_exclude_entry_is_written_once(tmp_path: Path) -> None:
+    leaf_repo = tmp_path / "leaf"
+    leaf_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(leaf_repo)], check=True)
+    adapter = _minimal_adapter(tmp_path)
+
+    for _ in range(3):
+        report(
+            repo_path=leaf_repo,
+            node_id="alice-01",
+            adapter=adapter,
+            redactor=null_redactor(),
+        )
+
+    exclude = (leaf_repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    entry = f"/{reporter_module.LOCK_FILE_NAME}"
+    assert exclude.splitlines().count(entry) == 1
+
+
+def test_report_without_a_git_dir_still_works(tmp_path: Path) -> None:
+    """A non-repository target keeps the previous behaviour instead of failing."""
+    leaf_repo = tmp_path / "leaf"
+
+    result = report(
+        repo_path=leaf_repo,
+        node_id="alice-01",
+        adapter=_minimal_adapter(tmp_path),
+        redactor=null_redactor(),
+    )
+
+    assert result.records_written == 1
+    assert not (leaf_repo / ".git").exists()

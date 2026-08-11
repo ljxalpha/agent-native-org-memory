@@ -1195,6 +1195,54 @@ metrics 的字节不再与旧版逐字相同；`snapshot.json` 则仍然在无 p
 也不产生任何费用。真正要挡的是"用一个加载不了的 embedding 后端去跑完整条昂贵链路"。
 `_preflight` 按 `--provider` 而非解析后的 provider 名判断，理由同上：解析要 profile。
 
+#### 5.5.8 输出侧 scanner 判定器（`memory_net/distiller/output_scanner.py`）
+
+**问题**：蒸馏输出（模型原始响应、渲染后的产物、录制 bundle 的附属 JSON）在写进
+team 目录 / bundle / CI artifact 之前**没有任何扫描**。叶子侧的 `Redactor` 解决的是
+另一个问题：它做的是**改写**（`redact()`），而输出侧要的是**判定**——
+改写会让录进 bundle 的不再是模型的真实回答，回归价值直接归零。
+
+因此输出侧新增一个**纯函数判定器**，与叶子侧共用同一份规则语料
+（`config/redaction_patterns.yaml`，避免两套会漂移的真相源），但**只 `scan()`、不 `redact()`**：
+
+| 概念 | 契约 |
+|---|---|
+| `RuleHit` | `rule` + `field_path` + `field_kind` + `line`，**绝不携带命中原文**（携带原文的 finding 自己就是泄漏面）；`repr()` 与 JSON 序列化同样不含原文 |
+| `Ruleset.from_yaml(path, *, dynamic_values)` | 读 `patterns` + `blocklist_terms` + `output_scanner_thresholds` + `output_scanner_dynamic_rules` **四个子集**，`version` 的 hash **覆盖这四项的全部内容** |
+| `scan(payload, *, field_kind, ruleset)` | `payload` 为字符串或任意嵌套的 JSON 树；纯函数、无 IO、无落盘副作用 |
+
+**为什么另起一个 loader 而不复用 `Redactor.from_yaml()`**：后者只读 `patterns` 与
+`blocklist_terms`，其 `version` 也只覆盖这两项。若阈值块由它加载，
+"改了熵阈值但版本号不变"就是一个静默陷阱——同一个 `version` 会对应两种判定行为。
+两个 loader 读同一个文件的不同子集，各自的 version 语义在 YAML 头部注释里写明。
+
+**按字段类型分型扫描**（避免误伤是这条规则存在的唯一理由）：
+
+- `structural`：citation 的 `revision_hash` / `content_hash` / `evidence_hash` / commit sha
+  等天然长十六进制字段——**只对 `high_entropy_blob` 豁免**，其余规则照常。
+- `prose`：标题 / 摘要 / 证据 / 模型原始响应文本——全部规则严格扫描。
+- 遍历 JSON 树时，叶子的类型由**它自己的键名**决定：键名属于结构化白名单即 `structural`，
+  否则取调用方传入的默认 `field_kind`。豁免绑定在字段语义上，不绑定在调用点上。
+
+**新增三类规则**（`config/redaction_patterns.yaml` 的 `version` 因此 `2 → 3`）：
+
+1. `abs_home_path`：绝对家目录路径（`/home/…`、`/Users/…`、`C:\Users\…`）——本机身份泄漏。
+2. `hostname_form`：`.local` 与内网域名后缀；本机真实主机名走**动态规则**由运行环境注入，
+   仓内只放中性占位（把真实主机名写进仓库本身就是泄漏）。
+3. `high_entropy_blob`：**香农熵 + 长度**双阈值，阈值写在同一 YAML 的
+   `output_scanner_thresholds` 块里并随 `version` 版本化。裸长度阈值挡不住
+   "很长的英文句子 vs 40 字符的密钥"，而按 token（连续的非空白 base64/hex 字符段）
+   算每字符熵可以——自然语言的长 token 极少，且英文正文的整体熵会被短词稀释。
+
+**动态规则的值不进 `version`**（有意为之）：注入值是本机事实（主机名），
+把它折进版本号会让同一份规则在两台机器上产生两个 version，
+录制期与回放期的 bundle 就永远对不上。可见性由 `Ruleset.dynamic_rule_names`
+（只有规则名）承担。
+
+**`version` 变更即 bundle 可疑**：`Ruleset.version` 写进 `record_metrics.json`；
+replay 回归发现 bundle 的 version 与当前不一致时给出**明确警告**而非直接打红——
+规则收紧不应让历史 bundle 失效，但必须可见。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
