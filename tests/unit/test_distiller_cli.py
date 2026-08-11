@@ -306,6 +306,13 @@ def _write_distiller_seed(repo: Path) -> None:
     (repo / "config").mkdir()
     (repo / "prompts").mkdir()
     (repo / "config" / "distill.yaml").write_text("llm:\n  provider: mock\n")
+    # The shipped rules, verbatim: a recording run refuses to start without a
+    # ruleset, and a seed carrying its own abbreviated copy would be testing a
+    # corpus nothing else in the project uses.
+    (repo / "config" / "redaction_patterns.yaml").write_text(
+        Path("config/redaction_patterns.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     (repo / "prompts" / "distill_system.md").write_text("system", encoding="utf-8")
     (repo / "prompts" / "distill_user.md").write_text(
         "records {{ records_json }}",
