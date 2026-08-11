@@ -70,14 +70,21 @@ FILE_TOOLSET = ("read_file", "search_files", "patch", "write_file")
 """What the ``file`` toolset offers, measured. It includes write tools, which is
 why the agent root is mounted read-only for this check."""
 
-PROMPT = (
-    "Read the team memory index that your instructions reference, and reply "
-    "with the verification token it contains and nothing else."
-)
-"""Deliberately says nothing about where the file is, and contains no token.
+PROMPT = "Reply with the verification token and nothing else."
+"""Names no file, no path, and no instruction file. It contains no token.
 
-Naming the path would let a run pass by having been told the answer's location
-rather than by following the instruction file's reference.
+An earlier version asked for "the team memory index that your instructions
+reference". That sentence is itself a pointer: it tells the agent such an index
+exists and is worth looking for, and the first real run showed an agent with
+file tools acts on exactly that -- it found and read the index with no hint
+present at all. A prompt that describes the target cannot be used to test
+whether something else described the target.
+
+So the prompt asks only for the answer. In the positive run the injected hint
+is the sole thing that says where to look; in the control nothing does. An
+agent that goes looking anyway is not a failure of the design -- it is what the
+control is there to catch, and it makes the check fail loudly rather than pass
+for the wrong reason.
 """
 
 INDEX_TEMPLATE = """# Team Memory Index
@@ -114,6 +121,11 @@ def sandbox_argv(
     includes write tools, and a namespace that cannot be written to is a
     structural limit rather than an after-the-fact check.
 
+    ``-Q`` is required for the opposite reason: the sentinel is looked for in
+    stdout, so anything printed there other than the model's answer -- a tool
+    preview, a progress line echoing the file just read -- is a way for the
+    check to find its own input and call it evidence.
+
     Two flags must never appear, for the same reason. ``--safe-mode`` implies
     ignoring the user config and disables instruction-file and memory injection
     outright. ``--ignore-rules`` reads like hygiene -- "the rule files are the
@@ -144,6 +156,12 @@ def sandbox_argv(
         model,
         "--provider",
         provider,
+        # Final response only: no banner, no spinner, no tool previews. The
+        # check looks for the sentinel in stdout, and a tool preview echoing
+        # the file it just read would put the sentinel there without the model
+        # ever having produced it -- the evidence would be the check watching
+        # itself work.
+        "-Q",
     ]
 
 

@@ -317,11 +317,21 @@ def test_the_agent_root_is_mounted_read_only() -> None:
     assert "--read-only-agentroot" in argv
 
 
-def test_the_prompt_names_neither_the_token_nor_the_path() -> None:
-    """Naming the path would let a run pass by having been told where to look
-    instead of by following the instruction file."""
-    assert "INDEX.md" not in verifier.PROMPT
-    assert "memory/team" not in verifier.PROMPT
+def test_the_prompt_describes_the_target_in_no_way_at_all() -> None:
+    """Not just the path: any description of the target is a pointer.
+
+    An earlier prompt asked for "the team memory index that your instructions
+    reference", and the first real run showed an agent acts on that alone --
+    it found and read the index with no hint present. A prompt that tells the
+    agent such a file exists cannot test whether the hint is what told it.
+    """
+    prompt = verifier.PROMPT.lower()
+
+    assert "index" not in prompt
+    assert "memory" not in prompt
+    assert "instruction" not in prompt
+    assert "file" not in prompt
+    assert "read" not in prompt
     assert SENTINEL_PATTERN.search(verifier.PROMPT) is None
 
 
@@ -477,3 +487,22 @@ def test_the_charge_exceeds_the_iteration_cap_by_the_grace_call() -> None:
     binds, which is the one situation the ledger exists for.
     """
     assert verifier.CALLS_PER_RUN == verifier.MAX_ITERATIONS + 1
+
+
+def test_the_run_prints_only_the_final_answer() -> None:
+    """The sentinel is looked for in stdout, so anything else printed there is
+    a way for the check to find its own input and call it evidence.
+
+    A tool preview echoing the file that was just read contains the sentinel
+    without the model having produced it -- and that output is indistinguishable
+    from a correct answer to a substring search.
+    """
+    argv = verifier.sandbox_argv(
+        runtime_root=Path("/opt/rt"),
+        root=Path("/run/sbx"),
+        model="m",
+        provider="p",
+        hermes="hermes",
+    )
+
+    assert "-Q" in argv
