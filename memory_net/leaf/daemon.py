@@ -15,6 +15,18 @@ from memory_net.leaf.identity import split_ops_identity
 
 LOGGER = logging.getLogger(__name__)
 
+#: Operational identity, or a callable that re-collects it. A daemon outlives
+#: its own configuration: ``config_sync`` repoints ``config-current`` while the
+#: process runs, which changes ``config_source_master_sha``. Accepting a
+#: callable lets the degraded snapshots read the identity that is true *now*
+#: instead of the one captured at startup -- a health snapshot that names the
+#: previous config generation is worse than one that names none.
+OpsIdentity = dict[str, str] | Callable[[], "dict[str, str] | None"] | None
+
+
+def _resolve_ops_identity(ops_identity: OpsIdentity) -> dict[str, str] | None:
+    return ops_identity() if callable(ops_identity) else ops_identity
+
 
 def run_foreground(
     *,
@@ -26,13 +38,15 @@ def run_foreground(
     health_task: Callable[[], object] | None = None,
     interval_seconds: int = 300,
     once: bool = False,
-    ops_identity: dict[str, str] | None = None,
+    ops_identity: OpsIdentity = None,
 ) -> None:
     """Run the leaf daemon loop in the foreground.
 
     :param ops_identity: optional operational identity stamped onto the health
         snapshots this daemon writes, including the degraded snapshots produced
         when a task raises. ``None`` keeps the previous payload byte for byte.
+        Pass a callable to have it re-collected at each write, so a snapshot
+        taken after a config sync does not carry the pre-sync provenance.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     stop_marker = state_dir / "stop-requested"
@@ -64,11 +78,12 @@ def _run_foreground_locked(
     health_task: Callable[[], object] | None,
     interval_seconds: int,
     once: bool,
-    ops_identity: dict[str, str] | None = None,
+    ops_identity: OpsIdentity = None,
 ) -> None:
-    identity_kwargs, identity_extra = split_ops_identity(ops_identity)
-
     def default_health_task() -> None:
+        identity_kwargs, identity_extra = split_ops_identity(
+            _resolve_ops_identity(ops_identity)
+        )
         health_path = state_dir / "last_health.json"
         recent_errors = _read_recent_errors(health_path)
         write_health(
@@ -164,7 +179,7 @@ def _safe(
     *,
     state_dir: Path,
     node_id: str,
-    ops_identity: dict[str, str] | None = None,
+    ops_identity: OpsIdentity = None,
 ) -> Callable[[], object]:
     def wrapped() -> object | None:
         try:
@@ -189,9 +204,11 @@ def _append_recent_error(
     node_id: str,
     task_name: str,
     error: str,
-    ops_identity: dict[str, str] | None = None,
+    ops_identity: OpsIdentity = None,
 ) -> None:
-    identity_kwargs, identity_extra = split_ops_identity(ops_identity)
+    identity_kwargs, identity_extra = split_ops_identity(
+        _resolve_ops_identity(ops_identity)
+    )
 
     def degraded() -> dict[str, Any]:
         return build_health(

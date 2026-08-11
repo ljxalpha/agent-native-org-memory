@@ -2081,8 +2081,19 @@ collect_ops_identity(
 采集是**尽力而为**：安装布局不完整（例如未经 `install_leaf.sh` 的开发运行）时记一条
 warning 并照旧写出不含运维身份的 health，而不是让 `report` / `daemon` 失败。
 真正的把关点在 `status`。"尽力而为"覆盖的失败面不止 `OpsIdentityError`——
-布局文件存在但不可读（权限、坏编码）同样必须降级为 warning，
+布局文件存在但不可读（权限、坏编码、是个目录）同样必须降级为 warning，
 否则一条本应软失败的路径会以 traceback 崩掉 `report`。
+
+`local.yaml` 的 `agent` 决定去读哪一份 adapter YAML，而 `local.yaml` 是磁盘上的文件、
+不是可信常量：`agent` 必须是**单个路径段**（非空、无分隔符、非 `.`/`..`），
+否则绝对值会整段丢弃 `config-current/adapters/` 前缀、`..` 会走出该目录，
+而 adapter 名随后就作为这个叶子的身份被写进 health 并发布出去。
+不满足即按 `OpsIdentityError` 降级。
+
+守护进程比它自己的配置代次活得久：`config_sync` 会在进程运行期间重新指向
+`config-current`。因此 `run_foreground(ops_identity=…)` 除接受字典外**还接受一个
+可调用对象**，在每次写健康快照时重新解析——一份指名已被取代的代次的健康快照，
+比一份不指名任何代次的更糟。
 
 `status` 不再是 `cat`：它执行「读 → `validate_health(require_ops_identity=True)` → 打印」。
 

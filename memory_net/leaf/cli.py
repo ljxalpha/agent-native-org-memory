@@ -269,7 +269,10 @@ def main(argv: list[str] | None = None) -> int:
             health_task=health_task,
             interval_seconds=args.interval_seconds,
             once=args.once,
-            ops_identity=_ops_identity(args),
+            # A callable, not a snapshot: config sync repoints config-current
+            # while this daemon runs, and a degraded health snapshot naming the
+            # superseded generation is worse than one naming none.
+            ops_identity=lambda: _ops_identity(args),
         )
         return 0
 
@@ -979,13 +982,43 @@ def _ops_identity_adapter_path(args: argparse.Namespace, state_home: Path) -> Pa
 
     Prefers an explicit ``--adapter``; otherwise follows the installed layout
     ``config-current/adapters/<local.yaml agent>.yaml``.
+
+    ``agent`` comes out of ``local.yaml``, which is a file on disk rather than a
+    trusted constant, so it is required to be a single path component. Splicing
+    it in unchecked would let an absolute value discard the adapters prefix
+    entirely, or ``..`` segments walk out of it, and the adapter name is then
+    published in the health payload as this leaf's identity.
+
+    :raises OpsIdentityError: when ``local.yaml`` is unreadable, is not a
+        mapping, or names no usable agent.
     """
     adapter = getattr(args, "adapter", None)
     if isinstance(adapter, Path):
         active = state_home / "config-current" / "adapters" / adapter.name
         return active if active.exists() else adapter
-    agent = _load_yaml_mapping(state_home / "local.yaml").get("agent")
+    agent = _ops_identity_agent_name(state_home / "local.yaml")
     return state_home / "config-current" / "adapters" / f"{agent}.yaml"
+
+
+def _ops_identity_agent_name(local_yaml_path: Path) -> str:
+    """Read and validate ``local.yaml``'s ``agent`` as one adapter stem."""
+    try:
+        document = yaml.safe_load(local_yaml_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise OpsIdentityError(
+            f"local.yaml is missing: {local_yaml_path.name}"
+        ) from exc
+    except yaml.YAMLError as exc:
+        raise OpsIdentityError(f"local.yaml is not valid YAML: {exc}") from exc
+    if not isinstance(document, dict):
+        raise OpsIdentityError("local.yaml is not a mapping")
+    agent = document.get("agent")
+    if not isinstance(agent, str) or not agent.strip():
+        raise OpsIdentityError("local.yaml names no agent")
+    agent = agent.strip()
+    if agent in {".", ".."} or set(Path(agent).parts) != {agent}:
+        raise OpsIdentityError(f"local.yaml agent is not one path component: {agent}")
+    return agent
 
 
 def _memory_net_home() -> Path:

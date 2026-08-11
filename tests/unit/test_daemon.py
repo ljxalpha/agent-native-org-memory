@@ -569,3 +569,128 @@ def _writable_adapter(generation: Path, agent_root: Path) -> None:
         'file_pattern: "*.md"\n',
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize(
+    "local_yaml",
+    [
+        'agent: "/etc/passwd"\n',
+        'agent: "../../../etc/passwd"\n',
+        'agent: "sub/dir"\n',
+        'agent: ".."\n',
+        'agent: ""\n',
+        "agent: 7\n",
+        "- not\n- a\n- mapping\n",
+        "agent: [unclosed\n",
+    ],
+)
+def test_ops_identity_refuses_an_agent_that_is_not_one_adapter_stem(
+    tmp_path: Path, monkeypatch: Any, local_yaml: str
+) -> None:
+    """``local.yaml`` is a file on disk, not a trusted constant.
+
+    An absolute or traversing ``agent`` would select an adapter outside the
+    active generation, and malformed YAML must degrade rather than crash.
+    """
+    home = _install_layout(tmp_path, monkeypatch)
+    (home / "local.yaml").write_text(local_yaml, encoding="utf-8")
+
+    args = Namespace(state_dir=home / "state", adapter=None)
+
+    assert leaf_cli._ops_identity(args) is None
+
+
+def test_ops_identity_degrades_when_a_source_is_a_directory(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``IsADirectoryError`` is an OSError; it must not escape as a traceback."""
+    home = _install_layout(tmp_path, monkeypatch)
+    (home / "local.yaml").unlink()
+    (home / "local.yaml").mkdir()
+
+    args = Namespace(state_dir=home / "state", adapter=None)
+
+    assert leaf_cli._ops_identity(args) is None
+
+
+def test_daemon_report_task_forwards_operational_identity(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The daemon's own report path must forward identity, not just the command.
+
+    The scanner-block regression above stubs ``report()`` without inspecting its
+    arguments, so it stays green if the daemon stops forwarding. This asserts on
+    the keyword the daemon actually passes.
+    """
+    home = _install_layout(tmp_path, monkeypatch)
+    received: dict[str, Any] = {}
+    args = Namespace(
+        repo=tmp_path / "repo",
+        adapter=Path("claude-code.yaml"),
+        agent_root=tmp_path / "agent",
+        node_id="alice",
+        state_dir=home / "state",
+        no_push=False,
+        config_revision="local",
+    )
+
+    monkeypatch.setattr(leaf_cli, "_repo_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(leaf_cli, "_prepare_leaf_branch", lambda *_args: None)
+    monkeypatch.setattr(leaf_cli, "_daemon_redaction_path", lambda _args: tmp_path)
+    monkeypatch.setattr(
+        leaf_cli.Redactor, "from_yaml", staticmethod(lambda _path: object())
+    )
+    monkeypatch.setattr(leaf_cli, "_report_config", lambda _args: {})
+    monkeypatch.setattr(leaf_cli, "_report_adapter", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(leaf_cli, "_active_config_revision", lambda _args: "rev")
+    monkeypatch.setattr(leaf_cli, "report", lambda **kwargs: received.update(kwargs))
+    monkeypatch.setattr(
+        leaf_cli, "_commit_and_push_report", lambda *_args, **_kwargs: False
+    )
+
+    report_task, _subscribe, _config, _health = leaf_cli._daemon_tasks(args)
+    assert report_task is not None
+    report_task()
+
+    assert received["ops_identity"] == {
+        **OPS_IDENTITY_SAMPLE,
+        "build_id_source": "package_ref",
+    }
+
+
+def test_daemon_resolves_operational_identity_at_each_write(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A daemon outlives its own config generation.
+
+    Identity captured once at startup would make every later snapshot -- health
+    and degraded alike -- name the generation that was active when the process
+    started, which after a config sync is the superseded one. Resolving a
+    callable per write is what keeps the provenance honest.
+    """
+    _force_fallback_scheduler(monkeypatch)
+    shas = iter(["a" * 40, "e" * 40, "f" * 40, "0" * 40])
+    resolved: list[str] = []
+
+    def collect() -> dict[str, str]:
+        sha = next(shas)
+        resolved.append(sha)
+        return {**OPS_IDENTITY_SAMPLE, "config_source_master_sha": sha}
+
+    def boom() -> None:
+        raise RuntimeError("task exploded")
+
+    state_dir = tmp_path / "state"
+    run_foreground(
+        node_id="alice",
+        state_dir=state_dir,
+        report_task=boom,
+        once=True,
+        ops_identity=collect,
+    )
+
+    health = json.loads((state_dir / "last_health.json").read_text(encoding="utf-8"))
+    assert health["status"] == "degraded"
+    # More than one resolution is the whole point: a startup snapshot resolves once.
+    assert len(resolved) > 1
+    assert health["config_source_master_sha"] in resolved
