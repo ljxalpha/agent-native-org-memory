@@ -468,11 +468,60 @@ def test_a_malformed_response_still_settles_its_reservation() -> None:
     budget = RunBudget(1.0, 10.0, max_usd=None)
     provider, _ = _provider([_Malformed()], budget=budget)
 
-    with pytest.raises(AttributeError):
+    with pytest.raises(ProviderCallError):
         provider.generate(_request())
 
     budget.assert_all_settled()
     assert budget.snapshot()["attempts"] == 1
+
+
+def test_a_decoding_failure_does_not_quote_the_sdk_response_object() -> None:
+    """Decoding reads the SDK's own object, so its AttributeError or TypeError
+    can quote that object -- and the orchestrator persists str(exc)."""
+
+    class _Quoting:
+        @property
+        def choices(self) -> Any:
+            raise TypeError(
+                "cannot read Response(url='https://secret.invalid/v1', "
+                "headers={'authorization': 'Bearer sk-live-topsecret'})"
+            )
+
+    provider, _ = _provider([_Quoting()])
+
+    with pytest.raises(ProviderCallError) as raised:
+        provider.generate(_request())
+
+    assert "sk-live-topsecret" not in str(raised.value)
+    assert "secret.invalid" not in str(raised.value)
+    assert "TypeError" in str(raised.value)
+
+
+def test_a_failure_building_the_sdk_client_is_sanitised_too() -> None:
+    """Client construction already holds the endpoint and the credentials, and
+    it happens before the retry loop, so the loop's sanitizing cannot help."""
+
+    class _ExplodingProvider(OpenAICompatProvider):
+        def _client(self) -> Any:
+            raise ValueError("bad base_url https://secret.invalid/v1?key=sk-live-x")
+
+    provider = _ExplodingProvider(api_key="k", base_url="https://example.invalid/v1")
+
+    with pytest.raises(ProviderCallError) as raised:
+        provider.generate(_request())
+
+    assert "sk-live-x" not in str(raised.value)
+    assert "secret.invalid" not in str(raised.value)
+    assert "0 attempt(s)" in str(raised.value)
+
+
+def test_a_configuration_error_still_says_what_is_missing() -> None:
+    """These messages are ours, not the SDK's, and naming the missing variable
+    is the entire point of raising them."""
+    provider = OpenAICompatProvider(api_key=None, base_url=None)
+
+    with pytest.raises(ProviderCallError, match="DEEPSEEK_API_KEY"):
+        provider.generate(_request())
 
 
 def test_an_interrupt_between_reserve_and_settle_does_not_leak_the_hold() -> None:

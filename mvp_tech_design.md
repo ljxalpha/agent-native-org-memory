@@ -813,7 +813,9 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 预算是 **run 级共享**的（由 CLI 把同一实例注入 primary 与 fallback 两条 lane），
 因此 primary 吃掉的额度 fallback 拿不到。
 
-**逃逸出 provider 的异常必须改写为 `ProviderCallError`**：SDK 的异常文本是按它刚发出的
+**逃逸出 provider 的异常必须改写为 `ProviderCallError`**（**三处入口一个都不能漏**：
+SDK 客户端构造、调用与重试循环、以及**响应解码**——解码读的是 SDK 自己的响应对象，
+它抛出的 `AttributeError` / `TypeError` 同样可能把那个对象引用进消息里）：SDK 的异常文本是按它刚发出的
 那次请求拼出来的，可能带上 endpoint URL 乃至已鉴权请求的片段；而 orchestrator 会把失败 run 的
 `str(exc)` 写进 failure health 与 metrics 文件，这些是 CI 会发布的 artifact。
 因此对外只暴露**异常类型 + HTTP 状态码 + 尝试次数**，原异常仅挂在 `__cause__` 上

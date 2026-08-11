@@ -139,7 +139,17 @@ class OpenAICompatProvider(LLMProvider):
         self.monotonic = monotonic
 
     def generate(self, request: LLMRequest) -> LLMResponse:
-        client = self._client()
+        try:
+            client = self._client()
+        except ProviderCallError:
+            # Our own configuration errors (missing key, missing base url,
+            # missing extra) are written by us and safe to surface verbatim.
+            raise
+        except Exception as exc:
+            # Building the SDK client already touches the endpoint and the
+            # credentials, so a failure here can carry both. It escapes before
+            # the retry loop, so the loop's sanitizing is no help.
+            raise _sanitized(exc, attempts=0) from exc
         model = self.model or request.model or DEFAULT_MODEL
         last_exc: BaseException | None = None
 
@@ -190,8 +200,16 @@ class OpenAICompatProvider(LLMProvider):
                     reservation=reservation,
                     started=started,
                 )
-            except BaseException:
+            except BaseException as exc:
                 self._close(reservation, billable=True, started=started)
+                # Decoding reads the SDK's own response object, so an
+                # AttributeError or TypeError from it can quote that object.
+                # ProviderCallError instances are ours (the truncation error)
+                # and already safe.
+                if isinstance(exc, Exception) and not isinstance(
+                    exc, ProviderCallError
+                ):
+                    raise _sanitized(exc, attempts=attempt + 1) from exc
                 raise
 
         # Unreachable: the loop either returns or re-raises on its last attempt.
@@ -219,13 +237,17 @@ class OpenAICompatProvider(LLMProvider):
         # configuration error and should say so, rather than being masked by
         # "the optional extra is not installed".
         if not self.api_key:
-            raise RuntimeError(f"{API_KEY_ENV} is required for OpenAICompatProvider")
+            raise ProviderCallError(
+                f"{API_KEY_ENV} is required for OpenAICompatProvider"
+            )
         if not self.base_url:
-            raise RuntimeError(f"{BASE_URL_ENV} is required for OpenAICompatProvider")
+            raise ProviderCallError(
+                f"{BASE_URL_ENV} is required for OpenAICompatProvider"
+            )
         try:
             import openai
         except ImportError as exc:
-            raise RuntimeError(
+            raise ProviderCallError(
                 "openai package is required for OpenAICompatProvider; "
                 "install the 'llm' extra"
             ) from exc
@@ -299,7 +321,7 @@ class OpenAICompatProvider(LLMProvider):
         )
 
         if finish_reason == "length":
-            raise RuntimeError(
+            raise ProviderCallError(
                 f"{PROVIDER_BACKEND} response was truncated at max_tokens="
                 f"{request.max_tokens}; the JSON body is incomplete"
             )
@@ -358,11 +380,13 @@ def _reported_count(usage: Any, name: str) -> int | None:
     """One service-reported counter, or ``None`` when it was not reported.
 
     ``bool`` is rejected explicitly: it is an ``int`` subclass, so a stray
-    ``True`` would otherwise pass for a token count of one.
+    ``True`` would otherwise pass for a token count of one. Negatives are
+    rejected because settling charges what it is given, so a negative count
+    would reduce the run's recorded spend and hand back budget already used.
     """
     if usage is None:
         return None
     value = getattr(usage, name, None)
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
