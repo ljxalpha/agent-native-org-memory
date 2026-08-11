@@ -465,3 +465,40 @@ def test_live_soak_catches_a_leaf_that_stopped_reporting(
     summary = json.loads(report.read_text(encoding="utf-8"))
     assert summary["cycles_completed"] == 2
     assert checks(summary) == [("carol-claude-01", "health_not_regenerated")]
+
+
+def test_executor_rejects_a_leaf_set_that_changes_mid_run(tmp_path: Path) -> None:
+    """Renaming the leaves every cycle would make every cycle a first cycle."""
+    manifest = tmp_path / "leaves.json"
+
+    def write(ids: tuple[str, ...]) -> None:
+        manifest.write_text(
+            json.dumps(
+                {
+                    "leaves": [
+                        {
+                            "node_id": node_id,
+                            "health_path": str(tmp_path / f"{node_id}.json"),
+                        }
+                        for node_id in ids
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def runner(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=[], returncode=0)
+
+    executor = HarnessCycleExecutor(
+        script=Path("unused.sh"),
+        workspace=tmp_path,
+        expected_leaves=3,
+        runner=runner,
+    )
+    write(LEAF_IDS)
+    executor(1)
+    write(("d-claude-01", "e-claude-01", "f-claude-01"))
+
+    with pytest.raises(SystemExit):
+        executor(2)

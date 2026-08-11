@@ -385,6 +385,15 @@ class HarnessCycleExecutor:
                 f"the harness drove {len(leaves)} leaves, --leaves says "
                 f"{self._expected_leaves}"
             )
+        # The leaf set is fixed after the first cycle. Cross-cycle checks are
+        # keyed by node id, so a harness that renamed its leaves every cycle
+        # would make every cycle look like a first cycle -- nothing to compare
+        # against, nothing to fail -- and the run would be green without a
+        # single leaf ever being observed twice.
+        if self.leaves and [leaf.node_id for leaf in leaves] != [
+            leaf.node_id for leaf in self.leaves
+        ]:
+            raise SystemExit("the harness changed its leaf set mid-run")
         return leaves
 
 

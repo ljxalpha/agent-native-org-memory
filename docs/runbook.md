@@ -130,14 +130,24 @@ when something fails at hour 19.
 A cycle costs about the same at hour 19 as at minute 1: each leaf keeps a
 rolling window of three cycles' memories, master keeps the two most recent
 distillation run directories, and each review branch is deleted once master
-carries its content. So the published tree, the corpus and the branch list stay
+carries its content. So the corpus, the run directories and the branch list stay
 bounded, and cycle duration drifting upward over a long run is a signal rather
 than the setup.
 
-Git history is the one thing that does keep growing: every cycle still adds
-commits, and pruned objects stay in the repository until a `git gc`. Give a 24h
-workspace disk headroom (order of a gigabyte, not a megabyte) and put it on a
-local filesystem.
+Two things still grow, and a long run has to budget for them:
+
+- **`manifest.json`.** A distillation mints new product ids, so every cycle
+  tombstones the previous cycle's products and the tombstone list only ever gets
+  longer. Measured on this harness: roughly 3 KB of manifest per cycle, so about
+  1.5 MB after a thousand cycles — and the whole file is rewritten and committed
+  each time. This is the distiller's behaviour, not the harness's; the soak is
+  what makes it visible at scale.
+- **Git history.** Every cycle adds commits, and pruned objects stay in the
+  repository until a `git gc`.
+
+Give a 24h workspace real disk headroom (tens of gigabytes, not megabytes), put
+it on a local filesystem, and watch `du -sh <workspace>` alongside the cycle
+duration.
 
 ### What it checks each cycle, for each leaf
 
