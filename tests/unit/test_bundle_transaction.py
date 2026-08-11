@@ -359,6 +359,42 @@ def test_undecodable_bytes_are_scanned_rather_than_skipped(
         orchestrator._commit_record_bundle()
 
 
+def test_a_failure_after_the_commit_keeps_the_bundle(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """The transaction ends at the commit, deliberately.
+
+    Everything the scan protects against happens before it; what can still fail
+    afterwards is writing products, the manifest or the publication. The bundle
+    records model calls that were already paid for and is the only material a
+    rerun can replay instead of paying again, so it stays."""
+    recorder = _staged(tmp_path)
+    provider = RecordingProvider(
+        _EchoProvider(["clean answer", "also clean"]),
+        recorder=recorder,
+        context=RunContextBuilder().set_scanner(scanner).freeze(),
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        scanner=scanner,
+        recorder=recorder,
+        pipeline=_TwoClusterPipeline(provider, "also clean"),
+    )
+    orchestrator.repo_path.mkdir(parents=True)
+    _stub_repo_io(orchestrator)
+
+    def _explode(**kwargs: Any) -> None:
+        raise OSError("no space left on device")
+
+    orchestrator._write_distill_outputs = _explode  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="no space left"):
+        orchestrator._run_at_snapshot(0.0, "deadbeef")
+
+    assert (tmp_path / "bundle" / "calls.jsonl").exists()
+    assert recorder.staging is not None and not recorder.staging.exists()
+
+
 # --------------------------------------------------------------------------
 # The published manifest
 # --------------------------------------------------------------------------
