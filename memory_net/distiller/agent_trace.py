@@ -16,8 +16,16 @@ What a passing run does produce is its answer. A sentinel is sixteen random
 characters that exist in exactly one place: the injected ``INDEX.md``. It is not
 in the prompt and not in the instruction file. A model that emits it has read
 that file, and a control run with the hint removed must not emit it. That pair
-is a stronger statement than a tool call anyway: a trace shows a file was
-opened, while the sentinel shows its contents reached the model.
+is a different statement from a tool call, and a stronger one for the question
+that matters: a trace shows a file was opened, while the sentinel shows its
+contents reached the model.
+
+It is worth being exact about what it does *not* show. A sentinel that comes
+back cannot distinguish the agent going and reading the file from the framework
+inlining the file the hint referenced. Both are consumption of the hint, and
+both answer "will the team memory reach this agent" -- neither answers "does
+the agent use a tool to fetch it". The verdict says so in a note rather than
+leaving the reader to assume the stronger reading.
 
 A trace is still checked when one exists, because it can say things the answer
 cannot -- which tools were offered, and whether any write was attempted.
@@ -138,6 +146,15 @@ def verify_consumption(evidence: ConsumptionEvidence) -> ConsumptionVerdict:
         notes.append(
             "no session trace was written; a successful oneshot does not "
             "produce one, so the tool set and call sequence are unverified"
+        )
+        # The two are worth separating, because only the second is a claim
+        # about tool use. Which one an integrator needs depends on what they
+        # are asking: "will the agent see the team memory" is answered by the
+        # first; "does the agent go and read it" is not.
+        notes.append(
+            "the sentinel shows the index's contents reached the model; on "
+            "this basis alone it does not distinguish an active tool read "
+            "from the framework inlining the referenced file"
         )
 
     new_sessions = sorted(set(evidence.sessions_after) - set(evidence.sessions_before))

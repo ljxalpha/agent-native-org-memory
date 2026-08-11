@@ -104,6 +104,19 @@ def test_a_sentinel_that_comes_back_and_a_control_that_does_not_is_consumption()
     assert verdict.evidence_basis == "sentinel"
 
 
+def test_the_sentinel_basis_does_not_overclaim_what_it_shows() -> None:
+    """It shows the file's contents reached the model. Whether the agent went
+    and read it, or the framework inlined the file the hint referenced, the
+    sentinel cannot tell apart -- and an integrator asking "does it actually
+    read the file" needs to know that this basis does not answer them.
+    """
+    verdict = verify_consumption(_evidence())
+
+    assert verdict.consumed
+    assert any("reached the model" in note for note in verdict.notes)
+    assert any("does not distinguish" in note for note in verdict.notes)
+
+
 def test_a_run_without_a_trace_says_what_it_could_not_check() -> None:
     """A successful oneshot writes no session file on this platform, so the
     absence of a trace is the normal case -- and must not read as "the tool set

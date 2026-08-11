@@ -3393,6 +3393,11 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 - **prompt 不点名路径**：prompt 只说"读你的指令引用的那份团队记忆索引"。
   说出路径会让一次运行靠"被告知答案在哪"而非靠"跟随指令文件的引用"通过。
 
+哨兵基线证明的是**索引内容到达了模型**，它**区分不了**"agent 主动用工具读了那个文件"
+与"框架把 hint 引用的文件内联进了 system prompt"。这两件事对不同的问题有不同价值：
+问"团队记忆会不会进入 agent 的视野"的，前者就是答案；问"agent 会不会去读"的，前者不回答。
+判定里为此固定留一条 note，绝不让读者把前者当成后者。
+
 判定见 `memory_net/distiller/agent_trace.py::verify_consumption`，
 **部分证据一律不判通过**。哨兵车道的失败条件：哨兵形状不合规；哨兵出现在 prompt
 （模型只是复述输入）或指令文件（该文件被内联进 system prompt，没有"跟随"任何引用）；
@@ -4420,4 +4425,14 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
 - Change reason: run budget 随进程生灭，N 次顺序运行就是 N 份预算；ledger 是唯一跨进程、
   跨运行存活的天花板。此前 `anthropic` 只有 run budget，即这条计费车道在跨运行维度上
   **完全没有上限**，而"项目级 50 次上限"的强度等于其最弱的那条计费车道。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 哨兵证据的适用范围说明
+
+- Change summary: §9.13 与 `agent_trace.py` 写明哨兵基线证明"索引内容到达了模型"，
+  但**区分不了**"agent 用工具主动读取"与"框架把 hint 引用的文件内联进 system prompt"；
+  判定里为此固定追加一条 note，并有对应单测。
+- Change reason: 两者都是 hint 被消费，但回答的是不同问题：
+  集成者问"团队记忆会不会进入 agent 视野"时哨兵就是答案，问"agent 会不会主动去读"时不是。
+  不写清楚，读者会默认取更强的那个读法，而这正是"看起来像证据"的典型形态。
 - Change time: 2026-08-11
