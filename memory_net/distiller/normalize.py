@@ -89,8 +89,13 @@ class RunAssets:
             # matches (that is what the content-hash restatement joins on).
             for path in sorted(products_dir.rglob("*.md"))
         }
+        # The manifest as this run left it, for the same reason: the root copy
+        # is overwritten by every later run.
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise NormalizationError(f"run {run_id} has no manifest at {manifest_path}")
         return cls(
-            manifest=_read_json(repo / "manifest.json"),
+            manifest=_read_json(manifest_path),
             snapshot=_read_json(run_dir / "snapshot.json"),
             products=products,
             metrics=_read_json(run_dir / "metrics.json"),

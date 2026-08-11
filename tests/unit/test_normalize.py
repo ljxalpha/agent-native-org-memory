@@ -300,6 +300,9 @@ def _write_run(repo: Path, assets: RunAssets, *, run_id: str) -> None:
     run_dir = repo / "distill_runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (repo / "manifest.json").write_text(json.dumps(assets.manifest), encoding="utf-8")
+    (run_dir / "manifest.json").write_text(
+        json.dumps(assets.manifest), encoding="utf-8"
+    )
     (run_dir / "snapshot.json").write_text(
         json.dumps(assets.snapshot), encoding="utf-8"
     )
@@ -338,6 +341,30 @@ def test_collect_reads_the_runs_own_products_not_the_latest_publication(
     collected = RunAssets.collect(tmp_path, run_id=run_id)
 
     assert collected.products == assets.products
+
+
+def test_collect_reads_the_runs_own_manifest(tmp_path: Path) -> None:
+    """Same hazard as the products: the root manifest is overwritten by every
+    later run, so both sides of a comparison would read one manifest."""
+    run_id = "20260810T101010Z-a1b2c3d4"
+    assets = _first_run()
+    _write_run(tmp_path, assets, run_id=run_id)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"last_run_id": "a-much-later-run"}), encoding="utf-8"
+    )
+
+    collected = RunAssets.collect(tmp_path, run_id=run_id)
+
+    assert collected.manifest["last_run_id"] == run_id
+
+
+def test_a_run_without_a_manifest_is_refused(tmp_path: Path) -> None:
+    run_id = "20260810T101010Z-a1b2c3d4"
+    _write_run(tmp_path, _first_run(), run_id=run_id)
+    (tmp_path / "distill_runs" / run_id / "manifest.json").unlink()
+
+    with pytest.raises(NormalizationError, match="no manifest"):
+        RunAssets.collect(tmp_path, run_id=run_id)
 
 
 def test_a_run_without_a_product_snapshot_is_refused(tmp_path: Path) -> None:

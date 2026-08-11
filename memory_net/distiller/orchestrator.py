@@ -429,6 +429,13 @@ class DistillOrchestrator:
         metrics.write(self.repo_path / "distill_runs" / run_id / "metrics.json")
         metrics.write(self.repo_path / "distill_runs" / "latest" / "metrics.json")
         self._write_run_product_snapshot(run_id, output.products)
+        # The manifest as *this* run left it. The repository's root copy is
+        # overwritten by every later run, so without this a comparison between
+        # two runs would read one manifest for both sides (§9.2.1).
+        (self.repo_path / "distill_runs" / run_id / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         self._write_clusters(run_id, output.cluster_assignments or [])
         (self.repo_path / "distill_runs" / run_id / "snapshot.json").write_text(
             self._snapshot_payload(run_id=run_id, snapshot_sha=snapshot_sha),

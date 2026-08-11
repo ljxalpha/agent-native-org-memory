@@ -2991,8 +2991,11 @@ normalize(assets):
   被当作语义的是**资产内部的 list 顺序**（citations / contributors / 索引列表），
   负向测试对的是这一类。
 
-**资产从哪里读**（`RunAssets.collect`）：`manifest.json` 取仓库根，
-`snapshot.json` / `metrics.json` 取 `distill_runs/<run_id>/`，
+**资产从哪里读**（`RunAssets.collect`）：`manifest.json` / `snapshot.json` /
+`metrics.json` 全部取 `distill_runs/<run_id>/`——manifest 也在其中：
+仓库根那份会被之后每一次 run 覆盖，用它比较两次 run，两边读到的是同一份。
+`_write_distill_outputs` 因此在写根 manifest 的同时，把**这次 run 的那份**
+另存进 `distill_runs/<run_id>/manifest.json`；
 产物取 **`distill_runs/<run_id>/team/`——即该 run 自己的产物快照**，
 而不是仓库根的 `team/`。后者只保留**最后一次** run 的发布结果：
 拿它比较"上一次 run 与这一次 run"，两边读到的会是同一批文件，
