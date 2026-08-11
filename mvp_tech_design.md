@@ -2661,6 +2661,42 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
 - 断言：team/ 下存在预期文件、manifest 正确、`.health.json` schema 通过、metrics 计数合理、citations 可反查到快照中的具体 revision。
 - CI 中必跑，作为回归基线。
 
+**三叶子稳定性 soak**（`tests/integration/local_repo_three_leaves.sh` +
+`scripts/stability_soak.py`）。`local_repo.sh` 是一条直线：跑一遍就退出，
+证明的是"一次全流程能通"，不能回答"连续跑很多轮之后还成不成立"。soak 补的就是后者。
+
+- **harness**（`local_repo_three_leaves.sh`）在 `local_repo.sh` 的两叶子结构上加第三个叶子
+  `carol-claude-01`，并把直线脚本改造成**可重复调用的一轮**：
+  `--workspace <dir> --cycle <n>`。三个叶子**各自独立**：独立 `AGENT_ROOT`、
+  独立 leaf 工作副本、独立 `MEMORY_NET_HOME`（各自的 `state/install_id`、`local.yaml`、
+  `config-current` 配置代际），因此各自写各自的 `.health.json`，不是同一份状态被复制三次。
+  每轮：给每个叶子新增一条记忆 → `report` → `distill --provider mock` → 把 release
+  分支快进到 master → 按新的 master sha 重新物化每个叶子的配置代际 → `subscribe`。
+  第一次调用负责建工作区，其后各轮复用同一工作区，**因此跨轮状态是累积的**——
+  这是 `last_report_at` 单调性与"健康文件确实被重新生成"能被断言的前提。
+- **driver**（`stability_soak.py`）：`--leaves N`、`--cycles N` 与 `--duration-seconds N`
+  两种终止条件（二选一）、`--report <path>`、`--workspace <dir>`。
+  每轮结束后读取**每个叶子**的 `.health.json` 并断言：
+  1. `validate_health(..., require_ops_identity=True)` 通过（§8.7.1 的七个运维身份字段齐全）；
+  2. `status == "healthy"`；
+  3. `recent_errors == []`；
+  4. `last_report_at` 相对上一轮**不回退**；
+  5. `redaction_incidents.blocked_reports` 相对上一轮**不增长**；
+  6. 健康载荷相对上一轮**必须发生变化**。第 6 条不是冗余：前五条对一个**根本没被重写**的
+     旧文件全部恒真，没有它，"叶子还活着"会被"文件还在那儿"冒充。
+- **诊断口径**：失败记录只写轮次、叶子 `node_id`、字段名与失败类别，
+  **不写记忆正文**。`recent_errors` 只记条数不记内容（它的字符串由上游拼装，
+  不能假定其中没有记忆片段）；harness 的 stdout/stderr 落在工作区的日志文件里，
+  **不进报告 JSON**，报告只记返回码与日志的相对路径。
+- **加速档与 24h 档是同一条代码路径**：`--cycles 5`（CI，分钟级、零额度、阻塞性）
+  与 `--duration-seconds 86400`（operator 档，见 `docs/runbook.md`）只是终止条件不同，
+  轮内动作与断言集完全一致。
+- soak 的三个叶子是**同机 tmp 仓 + tmp `AGENT_ROOT` 的合成叶子**，它证明的是循环逻辑与
+  health 契约；真实 agent 的记忆消费、daemon 常驻与崩溃重启、cron 触发、
+  真实 embedding / 真实 LLM 调用、真实 24 小时墙钟下的资源与时钟漂移行为**均不在其覆盖内**。
+- `scripts/stability_smoke.py` 保持不变：它重复跑 `local_repo.sh` 并统计返回码，
+  与 soak 的跨轮状态断言语义不同，两者并存。
+
 **平台兼容性硬约束（E7 必须落地）**：
 - 整个 MVP 的运行时支持平台为 **Linux / WSL2 / macOS**；**不支持 Windows native**。
 - daemon / install / distiller CLI 启动时若检测到 `platform.system() not in {"Linux", "Darwin"}`，**立即 fail closed** 并打印 `--help-platforms` 引导（指向 WSL 安装文档）。
