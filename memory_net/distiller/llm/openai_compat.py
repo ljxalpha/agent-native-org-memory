@@ -447,7 +447,33 @@ def _usage_of(completion: Any, text: str) -> tuple[dict[str, int], str]:
         return {"input_tokens": 0, "output_tokens": math.ceil(len(text) / 4)}, (
             "estimated"
         )
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens}, "reported"
+    counts = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    counts.update(_cache_counts(usage))
+    return counts, "reported"
+
+
+def _cache_counts(usage: Any) -> dict[str, int]:
+    """Prompt-cache counters, present only when the service reported them.
+
+    The names are provider-neutral on purpose: the metric is "how much of this
+    prompt was served from a cache", not "what this vendor calls it". A backend
+    that says nothing leaves the keys *absent* rather than zero, so the run can
+    later distinguish "no hits" from "not reported" and never has to estimate
+    one from the other.
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    counts: dict[str, int] = {}
+    read = _reported_count(details, "cached_tokens")
+    if read is None:
+        read = _reported_count(usage, "cache_read_input_tokens")
+    if read is not None:
+        counts["cache_read_input_tokens"] = read
+    created = _reported_count(details, "cache_creation_tokens")
+    if created is None:
+        created = _reported_count(usage, "cache_creation_input_tokens")
+    if created is not None:
+        counts["cache_creation_input_tokens"] = created
+    return counts
 
 
 def _reported_count(usage: Any, name: str) -> int | None:
