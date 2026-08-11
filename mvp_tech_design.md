@@ -722,6 +722,9 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 - `raw_meta` 记 `response_model` 与 `finish_reason`（仅字符串标量）。
 - **`finish_reason == "length"` 必须抛错**：被截断的半个 JSON 不是成功返回，
   把它交给下游解析只会得到一个更难定位的解析失败。抛错前**先结算**——钱已经花了。
+- **模型 id**：可用取值为 `deepseek-v4-flash` 与 `deepseek-v4-pro`。
+  未在 profile（`llm.model`）或 `--model` 指定时**默认取 `deepseek-v4-flash`**——
+  没配置的 run 不该悄悄挑更贵的那一档。
 - **凭据只从进程环境读** `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`。
   provider **不读任何 `.env` 文件**，读取与注入是 launcher 的职责；
   凭据绝不落盘进任何仓库、日志、fixture 或 artifact。

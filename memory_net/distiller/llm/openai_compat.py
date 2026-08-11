@@ -36,7 +36,13 @@ from memory_net.distiller.runctx import (
 
 PROVIDER_BACKEND = "deepseek"
 
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
+"""Model used when neither the profile nor the request names one.
+
+The cheaper of the two available tiers, deliberately: an unconfigured run
+should not silently pick the more expensive model. ``deepseek-v4-pro`` is the
+other supported id, selected explicitly via ``llm.model`` or ``--model``.
+"""
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_MAX_RETRIES = 2
 _BACKOFF_BASE_S = 1.0

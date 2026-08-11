@@ -42,7 +42,7 @@ class _Completion:
         content: str = '{"products": []}',
         finish_reason: str = "stop",
         usage: _Usage | None = None,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-flash",
     ) -> None:
         self.choices = [_Choice(content, finish_reason)]
         self.usage = usage
@@ -88,7 +88,7 @@ def _provider(
     provider = OpenAICompatProvider(
         api_key="unused-because-a-client-is-injected",
         base_url="https://example.invalid/v1",
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
         client=client,
         sleep=lambda _seconds: None,
         **kwargs,
@@ -142,7 +142,7 @@ def test_service_reported_usage_is_carried_through_verbatim() -> None:
     assert response.provider_backend == PROVIDER_BACKEND
     assert response.raw_meta == {
         "finish_reason": "stop",
-        "response_model": "deepseek-chat",
+        "response_model": "deepseek-v4-flash",
     }
 
 

@@ -41,11 +41,11 @@ def _args(**overrides: Any) -> argparse.Namespace:
 def test_the_deepseek_branch_builds_the_openai_compatible_provider() -> None:
     budget = RunBudget(1.0, 10.0, max_usd=1.0)
 
-    provider = cli_module._base_provider("deepseek", "deepseek-chat", budget=budget)
+    provider = cli_module._base_provider("deepseek", "deepseek-v4-flash", budget=budget)
 
     assert isinstance(provider, OpenAICompatProvider)
     assert provider.budget is budget
-    assert provider.model == "deepseek-chat"
+    assert provider.model == "deepseek-v4-flash"
 
 
 def test_deepseek_is_selectable_on_both_provider_flags() -> None:
