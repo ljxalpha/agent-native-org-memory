@@ -733,3 +733,20 @@ def test_the_report_gives_sizes_and_still_quotes_nothing(
     assert SENTINEL not in printed
     assert "no token here" not in printed
     assert json.loads(printed)["answer_sizes"]["control"] == len("no token here")
+
+
+def test_the_probe_is_launched_without_credentials() -> None:
+    """It makes no model request, so it gets no key."""
+    argv = verifier.sandbox_argv(
+        runtime_root=Path("/opt/rt"),
+        root=Path("/run/sbx"),
+        model="m",
+        provider="p",
+        hermes="hermes",
+        max_iterations=1,
+    )
+    head = argv[: argv.index("--")]
+
+    assert "--no-credentials" not in head  # the agent run itself needs one
+    # ...and the probe assembled from the same head does not.
+    assert "prompt-size" not in argv

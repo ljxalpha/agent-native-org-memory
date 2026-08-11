@@ -517,6 +517,7 @@ def do_run(
     env_file: Path | None,
     environ: Mapping[str, str],
     limits: Mapping[str, str] | None = None,
+    with_credentials: bool = True,
 ) -> int:
     assert_root_is_safe(root, environ=environ)
     assert_runtime_root_is_safe(runtime_root, environ=environ)
@@ -535,7 +536,15 @@ def do_run(
         for line in _grouped(argv):
             print(line)
         return 0
-    credentials = resolve(allowlist=CREDENTIAL_KEYS, env_file=env_file, environ=environ)
+    # A command that reaches no model has no business holding a key. The
+    # prompt-size probe is the case in point: it builds a prompt locally, and
+    # handing it a credential would put one in a second process for no reason
+    # any reader could give.
+    credentials = (
+        resolve(allowlist=CREDENTIAL_KEYS, env_file=env_file, environ=environ)
+        if with_credentials
+        else {}
+    )
     # The values exist in this process for exactly as long as it takes to hand
     # them to execve, and travel in `env` -- never in argv, which any process
     # on the machine can read out of /proc.
@@ -565,6 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-proc", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--limit", action="append", default=[], metavar="KEY=VALUE")
+    run.add_argument("--no-credentials", action="store_true")
     run.add_argument("argv", nargs=argparse.REMAINDER)
 
     doctor = sub.add_parser("doctor")
@@ -613,6 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         env_file=args.env_file,
         environ=environ,
         limits=parse_limits(args.limit),
+        with_credentials=not args.no_credentials,
     )
 
 

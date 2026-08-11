@@ -479,3 +479,39 @@ def test_up_writes_the_turn_cap(tmp_path: Path) -> None:
     )
     assert config["agent"]["max_turns"] == 2
     assert config["platform_toolsets"]["cli"] == ["file"]
+
+
+def test_a_run_can_be_launched_without_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command that reaches no model has no business holding a key.
+
+    The prompt-size probe is the case in point: it builds a prompt locally, so
+    handing it a credential would put one in a second process for no reason a
+    reader could give.
+    """
+    captured: dict[str, object] = {}
+
+    def _record(
+        argv: list[str], *, credentials: dict[str, str], environ: dict[str, str]
+    ) -> None:
+        captured["credentials"] = credentials
+
+    monkeypatch.setattr(sandbox, "exec_in_sandbox", _record)
+    root = tmp_path / "sbx"
+    (root / "home").mkdir(parents=True)
+    (root / "agentroot").mkdir()
+
+    sandbox.do_run(
+        root,
+        runtime_root=RUNTIME_ROOT,
+        command=["hermes", "prompt-size"],
+        read_only_agentroot=True,
+        allow_proc=False,
+        dry_run=False,
+        env_file=None,
+        environ={"HOME": str(tmp_path / "home")},
+        with_credentials=False,
+    )
+
+    assert captured["credentials"] == {}

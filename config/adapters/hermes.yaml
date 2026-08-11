@@ -1,42 +1,45 @@
 name: hermes
-# Verified against hermes v0.18.0 by a real paired agent run, 2026-08-11.
-#
-# The layout below is calibrated against that install (redacted snapshot:
-# tests/fixtures/adapters/hermes/). A calibrated *read* path is not evidence of
-# a consumed hint, so the flag rests on the run, which was paired and varied
-# one thing:
+# Calibrated against a hermes v0.18.0 install (redacted snapshot:
+# tests/fixtures/adapters/hermes/), and exercised by a real paired agent run on
+# 2026-08-11 that produced a positive result:
 #
 #   positive: AGENTS.md carries the injected reference; memory/team/INDEX.md
 #             holds a fresh 16-character sentinel.  -> sentinel returned
-#   control:  the same tree, the same INDEX.md, the same sentinel, the same
-#             restored agent state; the reference alone removed.
-#                                                    -> sentinel NOT returned
+#   control:  the same tree, the same INDEX.md, the same sentinel, the sandbox
+#             home restored from a pre-run snapshot; the reference alone
+#             removed.                              -> sentinel not returned
 #
-# The control is what makes this evidence rather than a demonstration. An
+# The control is what makes that a measurement rather than a demonstration. An
 # earlier attempt removed the index alongside the hint, and a prior run had
-# already shown that an agent with file tools finds and reads that file unaided
-# when the prompt so much as mentions it. So the prompt now describes nothing
-# ("Reply with the verification token and nothing else") and the file is
-# present in both arms. It came back only when the reference did.
+# shown that an agent with file tools finds and reads that file unaided as soon
+# as the prompt hints such a thing exists -- so the prompt now describes nothing
+# ("Reply with the verification token and nothing else") and the file sits in
+# both arms. Measured free via `prompt-size`: the instruction file does reach
+# the system prompt (250 vs 168 bytes of context), and the whole difference is
+# the 82-byte hint block while INDEX.md is 169 bytes, so the index was not
+# added to that section wholesale.
 #
-# Two facts measured rather than argued, both at zero cost via `prompt-size`:
-# the instruction file does reach the system prompt (250 vs 168 bytes of
-# context between the two trees), and the index is *not* inlined -- the whole
-# difference is the 82-byte hint block, while INDEX.md is 169 bytes. So the
-# sentinel arrived through a tool read.
+# STILL experimental, and the reason is the status itself rather than the
+# result. `stable` is a claim about a supported integration -- about what
+# happens when someone else runs this -- and the evidence is a single
+# unreplicated pair, always in the same order, against one model that samples.
+# One observation is not a rate. Two narrower gaps in the same direction: that
+# run predates the check's refusal of a silent control, so there is no retained
+# proof its control answered rather than failing quietly; and "the sentinel
+# arrived through a tool read" does not follow from the byte delta alone, which
+# shows only that the index did not land in the measured context section.
 #
-# Limits, stated so nobody has to guess: a successful one-shot writes no
-# session trace on this platform, so the tool set offered and the call sequence
-# are unverified mechanically; this is one paired observation on one model, not
-# a rate; and it is a fact about this version -- re-run
-# `scripts/verify_adapter_consumption` after a major agent upgrade.
+# To promote: replicated pairs with fresh sentinels and counterbalanced order,
+# a retained sanitized report showing a non-empty control answer, and the model
+# and provider recorded. `scripts/verify_adapter_consumption` does all of this
+# except the repetition, which is a matter of budget rather than design.
 #
 # One calibration note kept from the investigation: the bare
 # `@memory/team/INDEX.md` is not a hermes reference form. The agent does expand
 # `@`-references (`agent/context_references.py`), but only `@file:`, `@folder:`,
 # `@git:`, `@url:`, `@diff` and `@staged`. The hint reaches the model as plain
-# text it chooses to act on, which is precisely what the run showed it doing.
-support_status: stable
+# text that it may act on.
+support_status: experimental
 roots:
   shared:
     # The memory-net convention directory, never the agent's own store. The

@@ -290,8 +290,12 @@ def context_bytes(argv: Sequence[str], *, hermes: str) -> int:
     switching the injection off while every line of reasoning about it stayed
     true.
     """
+    head = argv[: argv.index("--")]
     probe = [
-        *argv[: argv.index("--") + 1],
+        *head,
+        # No key for a command that reaches no model.
+        "--no-credentials",
+        "--",
         hermes,
         "prompt-size",
         "--platform",
@@ -301,10 +305,22 @@ def context_bytes(argv: Sequence[str], *, hermes: str) -> int:
     result = subprocess.run(probe, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise SystemExit("could not measure the system prompt; see the sandbox")
-    breakdown = json.loads(result.stdout)
-    for label, _chars, byts in breakdown["sections"]:
-        if label == CONTEXT_SECTION:
-            return int(byts)
+    try:
+        breakdown = json.loads(result.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Not chained and not quoted: a JSONDecodeError carries a fragment of
+        # the document it failed on, and that document is another program's
+        # stdout.
+        raise SystemExit(
+            f"the prompt-size probe returned {len(result.stdout)} bytes that "
+            "are not the expected JSON; inspect the sandbox directly"
+        ) from None
+    try:
+        for label, _chars, byts in breakdown["sections"]:
+            if label == CONTEXT_SECTION:
+                return int(byts)
+    except (KeyError, TypeError, ValueError):
+        raise SystemExit("the prompt-size probe returned an unexpected shape") from None
     raise SystemExit(f"prompt-size reported no {CONTEXT_SECTION!r} section")
 
 
@@ -470,6 +486,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     positive = run_once(command, ledger=ledger, run_id=run_id, calls=calls)
     after = session_files(args.root)
 
+    # Read before the restore wipes it. A positive-arm request dump is exactly
+    # the artifact worth failing on, and `restore_home` would erase it.
+    residue = list(state_residue(args.root))
+    trace = trace_lines(args.root, sorted(set(after) - set(before)))
+
     # Same tree, same index, same sentinel, same agent state -- only the hint
     # is gone.
     restore_home(args.root, pristine)
@@ -490,8 +511,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             index_content=index_text,
             sessions_before=before,
             sessions_after=after,
-            trace_lines=trace_lines(args.root, sorted(set(after) - set(before))),
-            residue=state_residue(args.root),
+            trace_lines=trace,
+            residue=[*residue, *state_residue(args.root)],
             expected_tools=FILE_TOOLSET,
             index_path="/work/agentroot/memory/team/INDEX.md",
             inlining_ruled_out=args.inlining_ruled_out,
