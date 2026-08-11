@@ -14,6 +14,29 @@
 3. Add or tighten rules in `config/redaction_patterns.yaml` and run `scripts/redaction_benchmark.py`.
 4. Re-report after rules pass benchmark.
 
+## What the Install Regression Does Not Cover
+
+`tests/integration/install_leaf_local.sh` exercises the installer end to end,
+but against a **local bare remote and a local-path `--package-ref`**. The
+production shape — `--package-ref git+https://…@<40-char-sha>` — is deliberately
+**not** in automated regression: it would make every CI run depend on network
+reachability and on a published commit, and a flaky network would then look like
+an installer defect.
+
+What that leaves unproven, and how it is covered instead:
+
+| Not exercised end to end | Covered by |
+|---|---|
+| pip resolving a `git+https` ref over the network | nothing automated; verify by hand before a release |
+| 40-character sha enforcement for `git+*` refs | argument validation in `install_leaf.sh`, exercised by unit-level checks of the ref parser |
+| rejection of floating refs (`@main`, `@master`, `@HEAD`) | same |
+| rejection of credentials embedded in a URL | same |
+
+Consequence to keep in mind: a local-path ref pins no commit, so a leaf
+installed that way records `build_id_source: code_version` in
+`state/build_info.json` and **cannot be listed in `approved_build_ids`**. That
+is intended — see the section above.
+
 ## Enabling the Build Allowlist
 
 `bootstrap_state.json` ships **without** an `approved_build_ids` key, and that is
