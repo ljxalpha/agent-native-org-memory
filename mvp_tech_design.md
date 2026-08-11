@@ -703,6 +703,52 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 | stdout 非 JSON | 抛 `RuntimeError`，且错误信息必须**同时**带 stdout 前缀与 stderr 尾部（截断到有界长度）。裸 `JSONDecodeError` 既不是本契约的错误类型，也不带诊断所需的现场 |
 | 响应非对象 | 顶层不是 JSON 对象同样抛 `RuntimeError`，不做"退回原始 stdout 当 text"的猜测 |
 
+#### 5.3.3 `OpenAICompatProvider`：生产蒸馏后端（DeepSeek 直连）
+
+生产蒸馏走 OpenAI 兼容端点直连（DeepSeek 即为其一，`DEEPSEEK_BASE_URL` 是该端点）。
+选它做生产后端的理由是**通道能力**，这四项是 §5.3.2 的桥接通道一项都给不了的：
+
+| 能力 | 实现 | 为什么是硬要求 |
+|---|---|---|
+| role 边界 | `messages=[{"role":"system",...},{"role":"user",...}]` 两条独立 message | 叶子记录是**不可信输入**。把它和系统指令拼成一段文本，等于让记录内容有机会改写指令 |
+| 结构化输出约束 | `response_format={"type": "json_object"}` | 服务端级别的约束；prompt 里的"只输出 JSON"从此降级为冗余提示，不再是唯一防线 |
+| 输出上界 | `max_tokens` 直传 | 预算按上界预扣，上界必须真的生效 |
+| 真实计量 | `usage.prompt_tokens` / `usage.completion_tokens` → `usage_source: "reported"` | 只有服务端回报的 token 数才能支撑"生产计量真实"的判据；本地估算不能 |
+
+行为契约：
+
+- `provider_backend = "deepseek"`；服务端回了 usage → `usage_source = "reported"`；
+  没回才回落 `len(text)//4` 估算并标 `estimated`。
+- `raw_meta` 记 `response_model` 与 `finish_reason`（仅字符串标量）。
+- **`finish_reason == "length"` 必须抛错**：被截断的半个 JSON 不是成功返回，
+  把它交给下游解析只会得到一个更难定位的解析失败。抛错前**先结算**——钱已经花了。
+- **凭据只从进程环境读** `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`。
+  provider **不读任何 `.env` 文件**，读取与注入是 launcher 的职责；
+  凭据绝不落盘进任何仓库、日志、fixture 或 artifact。
+
+**超时与重试消费注入的 `RunBudget`**（§5.5.2）：
+
+- 单次调用有 `timeout`（默认 120s）。每次尝试**之前** `reserve(...)`，
+  provider 只提供 token 上界与本次超时，定价与换算全在 budget 内部；
+  触顶即抛 `BudgetExhausted`，**请求根本不发出**。
+- 仅对超时 / 连接中断 / 5xx / 429 重试（指数退避，默认 2 次）。
+  **不对 JSON 解析失败重试**——解析发生在 pipeline，重试同一个 prompt 只是重复烧钱。
+- 每次尝试恰好调用一个终态，映射**按保守优先**写死：
+
+| 结果 | 终态 | 理由 |
+|---|---|---|
+| 2xx | `settle` | 有真实 usage 可结算 |
+| 超时 / 连接中断 / 传输异常 / **5xx** | `settle_unknown` | 5xx 不能证明服务端没执行——可能执行完在返回路径上失败 |
+| **429** | `settle_unknown` | 响应体无法区分"入口就被限流"与"推理中被掐"，因此一律按可能已计费处理 |
+| 其它 4xx（缺 key、参数非法等） | `release` | 请求在进入推理前被拒，可证明未计费 |
+| `finish_reason == "length"` | 先 `settle` 再抛错 | 费用已发生 |
+
+预算是 **run 级共享**的（由 CLI 把同一实例注入 primary 与 fallback 两条 lane），
+因此 primary 吃掉的额度 fallback 拿不到。
+
+依赖：`openai` 放进 `[project.optional-dependencies]` 的 **`llm` extra**，
+不进硬依赖——生产后端是可选装的，不该让每个只跑 mock 路径的安装都被迫拉上它。
+
 ### 5.4 蒸馏 Pipeline（不引入额外 Engine 抽象）
 
 

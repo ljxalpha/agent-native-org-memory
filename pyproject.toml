@@ -32,6 +32,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The production distillation backend (OpenAICompatProvider / DeepSeek) is an
+# opt-in extra rather than a hard dependency: an install that only ever drives
+# the mock or replay path should not be forced to carry an API client it never
+# constructs.
+llm = ["openai>=1.40"]
+
 # Upper-bounded on purpose. Linters and formatters change their *verdicts* across
 # majors — new default rules, a new stable format year, stricter inference — so an
 # unbounded range means an upstream release can turn CI red on code nobody touched.
@@ -95,7 +101,7 @@ strict = true
 # These third-party libraries ship no type stubs; treat as untyped.
 # (yaml is handled by per-import `# type: ignore[import-untyped]`, kept hermetic
 #  so results don't depend on whether types-PyYAML happens to be installed.)
-module = ["fastembed.*", "sklearn.*", "anthropic.*"]
+module = ["fastembed.*", "sklearn.*", "anthropic.*", "openai.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
