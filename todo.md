@@ -83,3 +83,19 @@
 | PROD-008 | [x] | 生产护栏补齐：replay、数值上界、解析上界 | design:mvp§5.5.6/§5.3.3 | - | production 下 `--replay` 拒绝启动：回放在生效值检查之后把 provider 整体换成 `ReplayProvider`，而 bundle 里录的可能正是 mock 的响应。`llm.budget_usd` 与两个 `*_per_mtok_usd` 必须有限且为正（`bool` 显式拒绝）：预扣完全由这几个价格算出，价格为 0 则任何预扣都是 0，`.nan` 的比较恒为假，两种写法都让上界形同虚设而 run 看起来配了预算。生效值检查移到 embedding 探针**之前**——探针要加载真实模型，已知配错的 run 不该先付这笔钱。解析扫描增加失败次数上界（64）：解码成功能按长度跳过，失败不能（错误不指出下一个对象在哪），深嵌套截断输入否则每个左花括号都要扫一遍剩余全文。`metrics.json` 的三个新键对无 profile 的 run 也会出现（值为空串/`False`）——与 `snapshot.json` 不同是有意的：调参回路要读到「这次没有 profile」这个事实，而快照多一个键就是另一份快照。输出侧 scanner 在本组只做**声明锁定**，执行实现属后续交付 |
 
 
+
+---
+
+## 2026-08-11 — 输出侧 scanner / 事务 bundle / 发布闸 / 规范化 / 凭据 launcher（S16–S23、T27）
+
+| ID | 状态 | 主题 | 来源 | 负责人 | 备注 |
+|---|---|---|---|---|---|
+| SCAN-001 | [x] | 输出侧 scanner 规则集与字段类型 | design:mvp§5.5.8 | - | 判定（`scan()`）与叶子侧改写（`Redactor.redact()`）共用一份规则语料、两个加载器、两套版本语义。字段按 `prose` / `structural` 分型：哈希与标识字段豁免熵规则（整串熵在英文散文上恒过阈，逐 token 才有判别力），map 的**键名**按 `structural` 扫但正则仍然生效。规则集加了绝对家目录路径与主机名两条；主机名是运行期注入（写进跟踪文件本身就是同一个泄漏），按规则名 `local_hostname` 索引 |
+| SCAN-002 | [x] | mode 版本化与生产锁定 | design:mvp§5.5.9 | - | `output_scanner.schema_version` + `mode ∈ {enforce, observe}`；`profile_class: production` 强制 `enforce`，且**拒绝任何 CLI/env 覆盖通道**（即使它给的值与 profile 相同——允许一次"同值覆盖"就是在教人这条通道存在）。`observe` 与 `--record`/`--record-dir` 互斥：不阻断的 run 会把命中正文原样录进 bundle。**无规则集 + 录制**同样拒绝启动（唯一一条能让未扫描正文落盘的可达路径） |
+| SCAN-003 | [x] | recorder 两阶段扫描（fail-closed） | design:mvp§5.5.10 | - | 出站前扫 prompt/metadata（发出去之后再拒绝落盘保护不了任何东西），落盘前扫 response/raw_meta；`BundleRecorder.record()` 要求调用方出示 `ScanVerdict` 证据，带命中的 `enforce` 判定书一律拒写 |
+| TXN-001 | [x] | 事务性 bundle：staging / commit / abort | design:mvp§5.5.11/§5.5.12 | - | 同父目录 staging + `os.replace` 原子发布；残留 staging 拒绝复用；`abort()` 幂等且保证不创建目标；平面 `--record` 同在事务边界内。commit 前全量复扫：文件清单（含**路径字符串**）+ **每一个普通文件的正文**（JSON 走结构树、其余按文本、不可解码字节替换后仍扫）。**事务边界到 commit 为止**：其后的写产物/发布失败保留 bundle——它记录的是已付费的真实调用，也是重跑唯一的 replay 素材 |
+| GATE-001 | [x] | 发布闸：命中即整 run 失败 | design:mvp§5.5.13 | - | pipeline 在"已成结构化对象、尚未落盘"处扫描；命中不是"跳过这个 cluster"而是整 run 失败（跳过会让 run 成功退出、产物照常发布，只留一行计数）。计数经 `DistillationAborted` 携带的 `DistillationOutput` 穿过异常边界；master `manifest.json` 在其唯一构造点写盘前也过一次扫描 |
+| NORM-001 | [x] | 产物规范化比较器 | design:mvp§9.2.1 | - | 算法而非字段清单：收集 `distillation_id` 与 run_id（**全树递归**）→ 按 `(category, canonical_topic_key, relative_path)` 稳定重映射 → 全树替换（键名与内嵌子串，长串优先）→ 时钟归零 → content_hash 按归一化文档重算 → 稳定序列化。资产读 `distill_runs/<run_id>/` 下**该 run 自己的产物快照**（仓库根 `team/` 只留最后一次发布，两边会读到同一批文件而必然相等）。三处与初版计划的偏离及理由写在 §9.2.1 |
+| PROF-001 | [x] | 生产 profile 与默认 profile 标注 | design:mvp§8.3 | - | `config/distill.deepseek.yaml`（`profile_class: production`，九个必填键齐备，定价按上取整）；默认 `config/distill.yaml` 显式标注 `embedding_backend: test-cheap` 为 TEST ONLY |
+| CRED-001 | [x] | 凭据 launcher | design:mvp§5.6 | - | `aomt-with-env [--check\|--print-keys\|-- cmd]`：按键名 allowlist 逐条筛（解析阶段就丢弃无关键），值只经 `execve` 的 `env` 传给子进程（`argv` 全机可读），**没有第四种模式**——不提供任何可 `eval` 的输出，异常消息只带键名与路径 |
+| T27 | [x] | 项目级 attempt ledger | design:mvp§5.5.14 | - | 跨进程 append-only JSONL + `O_CREAT\|O_EXCL` 锁；计量单位是**真实请求**（重试各算一次），预留在请求发出之前，计数靠重放文件恢复。上限是代码常量 `ATTEMPT_CEILING_HARD = 50`，环境变量与构造参数**都只能调低**；账本预留失败会归还 run 级预算 hold（否则那笔预扣永远不会被结算，且在异常在途时连报都不会报） |
