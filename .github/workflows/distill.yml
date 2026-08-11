@@ -33,8 +33,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-${{ matrix.os }}
+          # Named files, not the whole distill_runs tree. That tree holds the
+          # run's product snapshot, so uploading it publishes team knowledge as
+          # a build artifact; these three are summaries and pointers only.
           path: |
             .pytest_cache
-            distill_runs
+            **/distill_runs/**/metrics.json
+            **/distill_runs/**/review_request.json
+            **/distill_runs/**/unclustered.json
             **/*.log
           if-no-files-found: ignore
