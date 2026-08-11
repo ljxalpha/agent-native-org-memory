@@ -211,6 +211,22 @@ class AttemptLedger:
             # and ``spent()`` counts reserved lines.
             raise LedgerError(f"{outcome!r} is not a settlement outcome")
         with self._locked():
+            # Settled exactly once, and only against a reservation that exists.
+            # The count would survive either way, but an audit trail holding two
+            # contradictory endings for one attempt cannot be read at all.
+            reserved = False
+            for item in self._entries(counted_only=False):
+                if item.get("outcome") == "reserved" and (
+                    item.get("sequence") == attempt.sequence
+                ):
+                    reserved = True
+                elif item.get("settles") == attempt.sequence:
+                    raise LedgerError(
+                        f"attempt {attempt.sequence} was already settled as "
+                        f"{item.get('outcome')!r}"
+                    )
+            if not reserved:
+                raise LedgerError(f"attempt {attempt.sequence} was never reserved")
             self._append(
                 {
                     "kind": attempt.kind,

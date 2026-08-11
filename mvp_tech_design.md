@@ -1501,6 +1501,8 @@ append-only，配 `O_CREAT|O_EXCL` 锁文件。
   **结算侧同理**：成功路径上 `settle()` 先于 `_to_response()`（后者才结算 run 预算），
   这里抛错同样会吊住 hold，因此也包 `try/except BaseException` → `_close(billable=True)` 后再抛
   （请求已经发出，按已计费结算）。
+- **`settle()` 只认"存在且未结算过"的预留**：重复结算或结算一个从未预留过的 sequence 一律报错。
+  计数两种写法都不会错，但一条尝试留下两个互相矛盾的结局，账本就没法读了。
 - **`settle()` 拒绝 `reserved` / `refused` 两个取值**：结算说的是"这次尝试怎么结束的"，
   而 `spent()` 数的正是 `reserved` 行——允许它当结算写入，等于让一次结算把自己数成第二次尝试。
 

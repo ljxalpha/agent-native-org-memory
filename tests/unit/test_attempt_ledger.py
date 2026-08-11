@@ -433,3 +433,26 @@ def test_without_a_ledger_the_provider_is_unchanged(tmp_path: Path) -> None:
 
     assert client.requests == 1
     assert provider.ledger is None
+
+
+def test_an_attempt_is_settled_exactly_once(tmp_path: Path) -> None:
+    """Two endings for one attempt is an audit trail nobody can read."""
+    ledger = _ledger(tmp_path, ceiling=5)
+    attempt = ledger.reserve(kind="distill_live", run_id="r1")
+    ledger.settle(attempt, outcome="ok")
+
+    with pytest.raises(LedgerError, match="already settled"):
+        ledger.settle(attempt, outcome="failed")
+
+    assert ledger.spent() == 1
+
+
+def test_settling_an_attempt_that_was_never_reserved_is_refused(tmp_path: Path) -> None:
+    from memory_net.distiller.llm.ledger import Attempt
+
+    ledger = _ledger(tmp_path, ceiling=5)
+
+    with pytest.raises(LedgerError, match="never reserved"):
+        ledger.settle(
+            Attempt(sequence=7, kind="distill_live", run_id="r1"), outcome="ok"
+        )
