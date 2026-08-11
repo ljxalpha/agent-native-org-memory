@@ -271,8 +271,22 @@ class DistillationPipeline:
             }
         )
 
-    def run(self, records: list[dict[str, Any]], *, run_id: str) -> DistillationOutput:
+    def run(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        run_id: str,
+        resume_completed_memory_ids: set[str] | None = None,
+    ) -> DistillationOutput:
+        """Distil ``records``; on a resume, skip what the earlier run finished.
+
+        ``resume_completed_memory_ids`` names the records the resumed run's
+        products already cite. A cluster made entirely of those terminates as
+        ``resumed`` without a call -- and its records count as cited, because
+        the carried products cite them (§7.2 DISTILL-001).
+        """
         run_id = self._checked_run_id(run_id)
+        completed = resume_completed_memory_ids or set()
         system_prompt = self.system_prompt_path.read_text(encoding="utf-8")
         template = self.user_prompt_path.read_text(encoding="utf-8")
         clusters = self._cluster_records(records)
@@ -289,6 +303,11 @@ class DistillationPipeline:
         for index, cluster_records in enumerate(
             self._execution_order(clusters, tally=tally)
         ):
+            if completed and all(
+                _id_of(record) in completed for record in cluster_records
+            ):
+                tally.terminals.append((RESUMED, cluster_records))
+                continue
             terminal = self._run_cluster_in_scope(
                 cluster_records,
                 scope=f"cluster-{index}",
@@ -322,7 +341,7 @@ class DistillationPipeline:
         rule_counts: dict[str, int] = {}
         for hit in tally.redaction_hits:
             rule_counts[hit.rule] = rule_counts.get(hit.rule, 0) + 1
-        cited = _cited_memory_ids(tally.products)
+        cited = cited_memory_ids(tally.products) | completed
         unclustered = _unclustered_records(tally.terminals, cited=cited)
         terminal_counts = {state: 0 for state in TERMINAL_STATES}
         for terminal, _ in tally.terminals:
@@ -926,7 +945,7 @@ def _id_of(record: dict[str, Any]) -> str:
     return str(record.get("memory_id"))
 
 
-def _cited_memory_ids(products: list[TeamProduct]) -> set[str]:
+def cited_memory_ids(products: list[TeamProduct]) -> set[str]:
     """Every memory id any product cites, which is what "used" means here."""
     cited: set[str] = set()
     for product in products:

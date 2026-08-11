@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,10 +31,12 @@ from memory_net.distiller.pipeline import (
     DistillationAborted,
     DistillationOutput,
     DistillationPipeline,
+    cited_memory_ids,
 )
 from memory_net.distiller.provenance import RunProvenance
 from memory_net.distiller.runctx import RunContext, RunIdentity
 from memory_net.shared.git_io import GitError, GitRepo
+from memory_net.shared.models import TeamProduct
 from memory_net.shared.paths import (
     MASTER_ALLOWED_EXACT_PATHS,
     MASTER_ALLOWED_PREFIXES,
@@ -94,6 +96,7 @@ class DistillOrchestrator:
         frozen_master_snapshot_sha: str | None = None,
         record_bundle_dir: Path | None = None,
         replay_mode: str = "live",
+        resume_from: str | None = None,
         context: RunContext | None = None,
     ) -> None:
         self.repo_path = repo_path
@@ -106,6 +109,10 @@ class DistillOrchestrator:
         # master path whitelist. replay_mode labels this run for metrics.json.
         self.record_bundle_dir = record_bundle_dir
         self.replay_mode = replay_mode
+        # Which earlier run this one continues, or None for a fresh run. A
+        # resume reuses that run's *inputs* and finished products; it never
+        # reuses its staging or its bundle (§7.2 DISTILL-001).
+        self.resume_from = resume_from
         # The single injection carrier (§5.5.3). None keeps the pre-injection
         # behaviour: a freshly generated run id and the wall clock.
         self.context = context
@@ -171,14 +178,26 @@ class DistillOrchestrator:
         try:
             records = self._load_leaf_records()
             previous_manifest = self._load_master_manifest()
+            carried = self._resumed_products(snapshot_sha)
+            completed = cited_memory_ids(carried)
             with self._snapshot_prompts(snapshot_sha):
                 try:
-                    output = self.pipeline.run(records, run_id=run_id)
+                    output = (
+                        self.pipeline.run(
+                            records,
+                            run_id=run_id,
+                            resume_completed_memory_ids=completed,
+                        )
+                        if self.resume_from
+                        else self.pipeline.run(records, run_id=run_id)
+                    )
                 except DistillationAborted as exc:
                     # The counts arrived with the exception, so the run reports
                     # what stopped it instead of only that something did. The
                     # gate below turns them into the failure path (§5.5.13).
                     output = exc.output
+            if carried:
+                output = _with_carried_products(output, carried)
             gate_error = _distill_gate_error(
                 output, accounting=_accounting_of(output, len(records))
             )
@@ -450,6 +469,81 @@ class DistillOrchestrator:
             encoding="utf-8",
         )
 
+    def _resumed_products(self, snapshot_sha: str) -> list[Any]:
+        """The earlier run's products, or nothing when this is not a resume.
+
+        Three refusals, in order, and none of them is negotiable:
+
+        * a resume needs the earlier run's ``snapshot.json`` -- without it there
+          is no way to know what that run read;
+        * the snapshot's ``master_snapshot_sha`` must still be what
+          ``origin/master`` points at. Continuing across a drift would splice
+          products derived from two different configurations and two different
+          leaf states into one release, which is the same defect
+          ``config_drift_superseded`` exists to refuse;
+        * any leftover record-bundle staging refuses the run outright. The
+          transaction rule is that leftover staging is never reused, and being
+          a resume does not soften it (§5.5.12).
+
+        The products themselves are re-scanned here, because everything this
+        run publishes must have passed *this* run's gate -- the earlier run's
+        verdict was made by a scanner that may have had a different ruleset.
+        """
+        if not self.resume_from:
+            return []
+        root = self.repo_path / "distill_runs" / self.resume_from
+        snapshot_path = root / "snapshot.json"
+        if not snapshot_path.exists():
+            raise RuntimeError(
+                f"cannot resume {self.resume_from}: no snapshot.json for that run"
+            )
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"cannot resume {self.resume_from}: snapshot.json is unreadable"
+            ) from exc
+        recorded = str(snapshot.get("master_snapshot_sha") or "")
+        if recorded != snapshot_sha:
+            raise RuntimeError(
+                f"cannot resume {self.resume_from}: master snapshot drifted "
+                f"({recorded or 'unknown'} -> {snapshot_sha})"
+            )
+        self._refuse_leftover_staging()
+        products: list[Any] = []
+        for path in sorted((root / TEAM_PREFIX).rglob("*.md")):
+            content = path.read_text(encoding="utf-8")
+            self._scan_published(content, field_path="resumed_products")
+            frontmatter, _ = split_frontmatter(content)
+            relative = Path(TEAM_PREFIX) / path.relative_to(root / TEAM_PREFIX)
+            products.append(
+                TeamProduct(
+                    relative_path=relative,
+                    content=content,
+                    frontmatter=frontmatter,
+                    category=str(frontmatter.get("category") or ""),
+                    distillation_id=str(frontmatter.get("distillation_id") or ""),
+                )
+            )
+        return products
+
+    def _refuse_leftover_staging(self) -> None:
+        """Stop a resume that would run beside an abandoned bundle staging."""
+        if self.record_bundle_dir is None:
+            return
+        parent = self.record_bundle_dir.parent
+        if not parent.exists():
+            return
+        leftovers = sorted(
+            path.name
+            for path in parent.glob(f"{self.record_bundle_dir.name}.staging-*")
+        )
+        if leftovers:
+            raise RuntimeError(
+                "cannot resume beside leftover record bundle staging: "
+                + ", ".join(leftovers)
+            )
+
     def _write_unclustered(self, run_id: str, output: DistillationOutput) -> None:
         """List the input records no product cites, by id and reason only.
 
@@ -554,6 +648,7 @@ class DistillOrchestrator:
             provider_backends=output.provenance.provider_backends,
             usage_source=output.provenance.usage_source,
             usage_source_counts=output.provenance.usage_source_counts,
+            resumed_from=self.resume_from or "",
             **_accounting_of(output, len(records)).as_metrics_fields(),  # type: ignore[arg-type]
             **self._run_configuration_fields(),
         )
@@ -675,6 +770,7 @@ class DistillOrchestrator:
             provider_backends=provenance.provider_backends,
             usage_source=provenance.usage_source,
             usage_source_counts=provenance.usage_source_counts,
+            resumed_from=self.resume_from or "",
             **(
                 _accounting_of(output, len(records)).as_metrics_fields()  # type: ignore[arg-type]
                 if output
@@ -1607,6 +1703,27 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _with_carried_products(
+    output: DistillationOutput,
+    carried: list[Any],
+) -> DistillationOutput:
+    """Fold a resumed run's earlier products back into this run's output.
+
+    The category distribution is recomputed rather than added to, so it keeps
+    partitioning ``products`` exactly -- a distribution that does not sum to the
+    product count is a metric nobody can use.
+    """
+    products = [*carried, *output.products]
+    distribution: dict[str, int] = {}
+    for product in products:
+        distribution[product.category] = distribution.get(product.category, 0) + 1
+    return replace(
+        output,
+        products=products,
+        category_distribution=dict(sorted(distribution.items())),
     )
 
 

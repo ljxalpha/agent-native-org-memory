@@ -139,6 +139,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "outright, whatever its value."
         ),
     )
+    run_parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "continue an earlier run: reuse its master snapshot, carry its "
+            "finished products, and distil only the clusters it did not. "
+            "Refused when origin/master has moved since that run."
+        ),
+    )
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--no-push", action="store_true")
     run_parser.add_argument("--eval", dest="eval_fixture", type=Path)
@@ -299,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             frozen_master_snapshot_sha=snapshot_sha,
             record_bundle_dir=args.record_dir,
             replay_mode=_replay_mode(args),
+            resume_from=args.resume,
         ).run()
         response: dict[str, Any] = {
             "run_id": result.run_id,
