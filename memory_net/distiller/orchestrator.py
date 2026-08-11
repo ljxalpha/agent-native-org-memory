@@ -441,10 +441,56 @@ class DistillOrchestrator:
             encoding="utf-8",
         )
         self._write_clusters(run_id, output.cluster_assignments or [])
+        self._write_unclustered(run_id, output)
         (self.repo_path / "distill_runs" / run_id / "snapshot.json").write_text(
             self._snapshot_payload(run_id=run_id, snapshot_sha=snapshot_sha),
             encoding="utf-8",
         )
+
+    def _write_unclustered(self, run_id: str, output: DistillationOutput) -> None:
+        """List the input records no product cites, by id and reason only.
+
+        Written for every run, empty list included: a reader has to be able to
+        tell "nothing was dropped" from "this run predates the file".
+        """
+        payload = {
+            "run_id": run_id,
+            "records": list(output.unclustered or []),
+        }
+        self._scan_then_write(
+            self.repo_path / "distill_runs" / run_id / "unclustered.json",
+            payload,
+            field_path="unclustered",
+        )
+
+    def _scan_then_write(
+        self,
+        path: Path,
+        payload: dict[str, Any],
+        *,
+        field_path: str,
+    ) -> None:
+        """The only sanctioned way to write a distill-run summary artifact.
+
+        Scanned *before* the write, over the serialized text as well as the
+        object, so a refusal leaves no half-written file behind -- there is then
+        no "written, then deleted" window for anything to read. Scanned again
+        off disk afterwards, because the check that matters is the one over the
+        bytes that actually landed; a hit there deletes the file and lets the
+        violation fail the run, like any other publish-time refusal (§5.5.13).
+        """
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        self._scan_published(payload, field_path=field_path)
+        self._scan_published(text, field_path=field_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        try:
+            self._scan_published(
+                path.read_text(encoding="utf-8"), field_path=field_path
+            )
+        except RedactionViolation:
+            path.unlink(missing_ok=True)
+            raise
 
     def _distill_metrics(
         self,

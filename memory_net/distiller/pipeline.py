@@ -82,6 +82,13 @@ class DistillationOutput:
     # that a cluster was skipped; rule names and counts only, never content.
     redaction_failures: int = 0
     redaction_rule_counts: dict[str, int] | None = None
+    # Cluster accounting (DISTILL-001): one mutually exclusive terminal per
+    # cluster, so ``clusters_total == sum(counts)`` is checkable. ``unclustered``
+    # is a *record*-level list -- ids, revisions and a reason code, never text --
+    # and therefore deliberately not part of the cluster-level identity.
+    cluster_terminal_counts: dict[str, int] | None = None
+    unclustered: list[dict[str, str]] | None = None
+    records_cited: int = 0
     # Run-level fold of every call's provenance, primary and fallback lanes alike.
     provenance: RunProvenance = field(default_factory=RunProvenance.empty)
 
@@ -90,6 +97,43 @@ _OK = "ok"
 _PARSE_FAILED = "parse_failed"
 _NOT_EXECUTED = "not_executed"
 _ABORTED = "aborted"
+
+DISTILLED = "distilled"
+SKIPPED_BUDGET = "skipped_budget"
+SKIPPED_PARSE = "skipped_parse"
+SKIPPED_CITATION = "skipped_citation"
+SKIPPED_EVIDENCE = "skipped_evidence"
+NOISE = "noise"
+RESUMED = "resumed"
+
+TERMINAL_STATES = (
+    DISTILLED,
+    SKIPPED_BUDGET,
+    SKIPPED_PARSE,
+    SKIPPED_CITATION,
+    SKIPPED_EVIDENCE,
+    NOISE,
+    RESUMED,
+)
+"""Every cluster reaches exactly one of these (§7.2 DISTILL-001).
+
+``skipped_clusters`` stays what it always was -- the sum of several of them --
+so nothing downstream that reads it changes meaning; these are the mutually
+exclusive terminals underneath that sum, which is what makes the accounting
+identity checkable at all.
+"""
+
+_REASON_BY_TERMINAL = {
+    SKIPPED_BUDGET: "budget_skipped",
+    SKIPPED_PARSE: "parse_failed",
+    SKIPPED_CITATION: "citation_failed",
+    SKIPPED_EVIDENCE: "evidence_rule_failed",
+    NOISE: "noise",
+}
+"""Why a record of a non-distilled cluster is not represented in any product."""
+
+UNCITED = "uncited"
+"""Its cluster distilled, but no product cited this record."""
 
 
 @dataclass(frozen=True)
@@ -131,6 +175,10 @@ class _RunTally:
     call_responses: list[LLMResponse] = field(default_factory=list)
     redaction_hits: list[RuleHit] = field(default_factory=list)
     seen_topics: set[tuple[str, str]] = field(default_factory=set)
+    # One entry per cluster, in execution order, paired with that cluster's
+    # records so a record-level reason can be derived without a second pass
+    # over the clustering.
+    terminals: list[tuple[str, list[dict[str, Any]]]] = field(default_factory=list)
 
 
 class DistillationPipeline:
@@ -153,6 +201,8 @@ class DistillationPipeline:
         min_citations_by_category: dict[str, int] | None = None,
         min_contributors_by_category: dict[str, int] | None = None,
         max_records_per_prompt: int | None = None,
+        singleton_lane_enabled: bool = False,
+        singleton_lane_max_records: int | None = None,
         context: RunContext | None = None,
     ) -> None:
         self.provider = provider
@@ -176,6 +226,12 @@ class DistillationPipeline:
         # a different set of calls and a different recording (DISTILL-001).
         self.max_records_per_prompt = (
             None if max_records_per_prompt is None else int(max_records_per_prompt)
+        )
+        self.singleton_lane_enabled = bool(singleton_lane_enabled)
+        self.singleton_lane_max_records = (
+            None
+            if singleton_lane_max_records is None
+            else int(singleton_lane_max_records)
         )
         self.min_citations_by_category = {
             canonical_category(category): value
@@ -211,19 +267,20 @@ class DistillationPipeline:
         ]
         tally = _RunTally()
 
-        for cluster_records in clusters:
-            aborted = self._run_cluster(
+        for cluster_records in self._execution_order(clusters, tally=tally):
+            terminal = self._run_cluster(
                 cluster_records,
                 tally=tally,
                 system_prompt=system_prompt,
                 template=template,
                 run_id=run_id,
             )
-            if aborted:
+            if terminal == _ABORTED:
                 # The whole loop, not this cluster: this input and this prompt
                 # just produced sensitive content, which says nothing good about
                 # the clusters after it either.
                 break
+            tally.terminals.append((terminal, cluster_records))
 
         response = LLMResponse(
             text="\n".join(tally.raw_texts),
@@ -243,6 +300,11 @@ class DistillationPipeline:
         rule_counts: dict[str, int] = {}
         for hit in tally.redaction_hits:
             rule_counts[hit.rule] = rule_counts.get(hit.rule, 0) + 1
+        cited = _cited_memory_ids(tally.products)
+        unclustered = _unclustered_records(tally.terminals, cited=cited)
+        terminal_counts = {state: 0 for state in TERMINAL_STATES}
+        for terminal, _ in tally.terminals:
+            terminal_counts[terminal] += 1
         output = DistillationOutput(
             products=tally.products,
             response=response,
@@ -263,6 +325,11 @@ class DistillationPipeline:
             replay_misses=tally.replay_misses,
             redaction_failures=len(tally.redaction_hits),
             redaction_rule_counts=dict(sorted(rule_counts.items())) or None,
+            cluster_terminal_counts=terminal_counts,
+            unclustered=unclustered,
+            records_cited=len(
+                [record for record in records if _id_of(record) in cited]
+            ),
             # The synthesized aggregate ``response`` above is not a call, so it
             # is deliberately not part of the fold.
             provenance=aggregate(tally.call_responses),
@@ -283,18 +350,21 @@ class DistillationPipeline:
         system_prompt: str,
         template: str,
         run_id: str,
-    ) -> bool:
-        """Distil one cluster into the tally; ``True`` means "stop the run".
+    ) -> str:
+        """Distil one cluster into the tally, returning its terminal state.
 
         One cluster is one *rendered* unit even when it is sent as several
         sub-prompts: the split exists to keep a prompt inside the model's
         context window, not to turn one cluster into several products, so the
         payloads are merged before render and the cluster-level counters move
         exactly once.
+
+        The return value is one of ``TERMINAL_STATES``, or ``_ABORTED`` -- which
+        is not a terminal but the end of the run, and therefore never counted.
         """
         if self._budget_exhausted(tally.estimated_cost_usd):
             tally.skipped_clusters += 1
-            return False
+            return SKIPPED_BUDGET
         payloads: list[dict[str, Any]] = []
         for chunk in self._split_cluster(cluster_records):
             outcome = self._chunk_payload(
@@ -305,7 +375,7 @@ class DistillationPipeline:
                 run_id=run_id,
             )
             if outcome.state == _ABORTED:
-                return True
+                return _ABORTED
             if outcome.state == _PARSE_FAILED:
                 # One sub-prompt failing fails the cluster: rendering the
                 # remainder would publish a product whose evidence is a subset
@@ -313,7 +383,7 @@ class DistillationPipeline:
                 # from the whole.
                 tally.parse_failures += 1
                 tally.skipped_clusters += 1
-                return False
+                return SKIPPED_PARSE
             if outcome.state == _NOT_EXECUTED:
                 # A gate refused before the call went out -- the run budget, or
                 # the cross-run attempt ceiling. Respect the refusal rather than
@@ -323,7 +393,7 @@ class DistillationPipeline:
                 payloads.append(outcome.parsed)
         if not payloads:
             tally.skipped_clusters += 1
-            return False
+            return SKIPPED_BUDGET
         parsed = payloads[0] if len(payloads) == 1 else _merge_payloads(payloads)
         emitted, resolved = _count_citation_resolution(parsed, cluster_records)
         tally.citations_emitted += emitted
@@ -344,13 +414,43 @@ class DistillationPipeline:
             tally.evidence_rule_rejections += 1
             tally.citation_failures += 1
             tally.skipped_clusters += 1
-            return False
+            return SKIPPED_EVIDENCE
         except ValueError:
             tally.citation_failures += 1
             tally.skipped_clusters += 1
-            return False
+            return SKIPPED_CITATION
         tally.products.extend(rendered)
-        return False
+        return DISTILLED
+
+    def _execution_order(
+        self,
+        clusters: list[list[dict[str, Any]]],
+        *,
+        tally: _RunTally,
+    ) -> list[list[dict[str, Any]]]:
+        """The order clusters are distilled in, and which ones are not.
+
+        With the singleton lane off -- the default -- this is the identity, and
+        a lone record is distilled in place exactly as it always was.
+
+        With it on, singletons (DBSCAN noise points, which ``dbscan.py`` already
+        numbers as clusters of their own) are deferred behind every real
+        cluster, so a run that runs out of budget spends what it had on grouped
+        evidence rather than on whichever lone record happened to sort first.
+        ``singleton_lane_max_records`` caps how many of them the lane distils at
+        all; the remainder terminate as ``noise`` and appear in
+        ``unclustered.json`` with that reason.
+        """
+        if not self.singleton_lane_enabled:
+            return clusters
+        grouped = [cluster for cluster in clusters if len(cluster) > 1]
+        singletons = [cluster for cluster in clusters if len(cluster) <= 1]
+        cap = self.singleton_lane_max_records
+        if cap is not None and cap < len(singletons):
+            for cluster in singletons[cap:]:
+                tally.terminals.append((NOISE, cluster))
+            singletons = singletons[:cap]
+        return grouped + singletons
 
     def _chunk_payload(
         self,
@@ -696,6 +796,52 @@ def _response_schema(categories: list[str]) -> dict[str, Any]:
             }
         },
     }
+
+
+def _id_of(record: dict[str, Any]) -> str:
+    return str(record.get("memory_id"))
+
+
+def _cited_memory_ids(products: list[TeamProduct]) -> set[str]:
+    """Every memory id any product cites, which is what "used" means here."""
+    cited: set[str] = set()
+    for product in products:
+        for citation in product.frontmatter.get("citations") or []:
+            cited.add(str(citation.get("memory_id")))
+    return cited
+
+
+def _unclustered_records(
+    terminals: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    cited: set[str],
+) -> list[dict[str, str]]:
+    """Every input record no product cites, with the reason it is missing.
+
+    Ids, revisions and a reason code only. Putting the record body here would
+    create a second place model input lands on disk, one the output scanner
+    never looked at -- the exact hole the write-time gate exists to close.
+
+    Derived from the cluster terminals rather than recomputed, so the reason a
+    record is absent is the same fact the cluster accounting reports.
+    """
+    seen: set[str] = set()
+    missing: list[dict[str, str]] = []
+    for terminal, cluster_records in terminals:
+        reason = _REASON_BY_TERMINAL.get(terminal, UNCITED)
+        for record in cluster_records:
+            memory_id = _id_of(record)
+            if memory_id in cited or memory_id in seen:
+                continue
+            seen.add(memory_id)
+            missing.append(
+                {
+                    "memory_id": memory_id,
+                    "revision_hash": str(record.get("revision_hash") or ""),
+                    "reason_code": reason,
+                }
+            )
+    return missing
 
 
 def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
