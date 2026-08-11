@@ -14,7 +14,14 @@ to a PR command as an argument.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shlex
+import signal
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "memory-net/review-request/v1"
@@ -141,3 +148,149 @@ def _checked_repo_relative(payload: dict[str, Any], key: str) -> str:
     if value.startswith("/") or ".." in value.split("/"):
         raise ReviewRequestError(f"{key} must stay inside the repo: {value!r}")
     return value
+
+
+PR_COMMAND_ENV = "AOMT_PR_COMMAND"
+DEFAULT_PR_COMMAND = "gh pr create"
+PR_ENV_ALLOWLIST_ENV = "AOMT_PR_ENV_ALLOWLIST"
+_TEARDOWN_GRACE_S = 5.0
+
+
+def open_pull_request(
+    request_path: Path,
+    *,
+    cwd: Path,
+    command: str | None = None,
+    timeout_s: float = 60.0,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Ask an external command to open the pull request this run asked for.
+
+    Every field comes from ``review_request.json`` -- head, base, title and the
+    body itself, passed as ``--body-file`` rather than re-rendered. The artifact
+    is the single source: a body assembled here could disagree with the file the
+    reviewer is looking at, and it would be text nothing validated.
+
+    The subprocess shape is the hardened one used for the agent bridge:
+    ``shlex.split`` (never a shell), its own session so the whole process group
+    can be signalled, a timeout, and ``SIGTERM`` -> bounded wait -> ``SIGKILL``
+    on the group. A ``gh`` that hangs on an auth prompt otherwise holds the run
+    open forever, and a child it spawned outlives it.
+
+    The child's environment is *built*, not inherited: this process holds an LLM
+    API key, and a PR command has no business seeing it. Only variables the
+    operator names in ``AOMT_PR_ENV_ALLOWLIST`` are forwarded, by key.
+    """
+    environ = os.environ if environ is None else environ
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    validate_review_request(payload)
+    argv = [
+        *shlex.split(command or environ.get(PR_COMMAND_ENV) or DEFAULT_PR_COMMAND),
+        "--head",
+        payload["head"],
+        "--base",
+        payload["base"],
+        "--title",
+        payload["title"],
+        "--body-file",
+        str(request_path),
+    ]
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd),
+        env=pr_environment(environ),
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        stderr = _teardown(proc)
+        raise PullRequestError(
+            f"pull request command timed out after {timeout_s}s"
+            f"{_excerpt('stderr', stderr)}"
+        ) from None
+    except BaseException:
+        # Any other way out of this frame must not leave the command running.
+        _teardown(proc)
+        raise
+    if proc.returncode != 0:
+        raise PullRequestError(
+            f"pull request command failed with exit code {proc.returncode}"
+            f"{_excerpt('stdout', stdout)}{_excerpt('stderr', stderr)}"
+        )
+    url = stdout.strip()
+    if not url.startswith("https://"):
+        # The command's contract is to print the pull request URL. Anything
+        # else means it did something other than what was asked, and reporting
+        # success on it would record a review gate that may not exist.
+        raise PullRequestError(
+            "pull request command printed no URL"
+            f"{_excerpt('stdout', stdout)}{_excerpt('stderr', stderr)}"
+        )
+    return url
+
+
+def pr_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """The child's environment: PATH, plus whatever the operator allowlisted.
+
+    Deliberately not ``os.environ``. Names are copied, values are never read
+    here for any purpose other than being handed over, and nothing is forwarded
+    that the operator did not name.
+    """
+    env = {
+        "PATH": environ.get("PATH", ""),
+        # A credential helper that decides to prompt would otherwise block until
+        # the timeout, and the reviewer would see nothing at all.
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    for name in (environ.get(PR_ENV_ALLOWLIST_ENV) or "").split(","):
+        key = name.strip()
+        if key and key in environ:
+            env[key] = environ[key]
+    return env
+
+
+class PullRequestError(RuntimeError):
+    """The PR command failed, timed out, or did not do what it was asked."""
+
+
+def _teardown(proc: subprocess.Popen[str]) -> str:
+    """Signal the command's whole process group, then drain what it wrote."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        pgid = None
+    if pgid is not None:
+        _signal_group(pgid, signal.SIGTERM)
+        _wait_briefly(proc)
+        # Unconditional: the command may exit on SIGTERM while a child it
+        # spawned ignores it, and that child is what this exists to reap.
+        _signal_group(pgid, signal.SIGKILL)
+    _wait_briefly(proc)
+    try:
+        _, stderr = proc.communicate(timeout=_TEARDOWN_GRACE_S)
+    except (subprocess.TimeoutExpired, ValueError):
+        return ""
+    return stderr or ""
+
+
+def _signal_group(pgid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        return
+
+
+def _wait_briefly(proc: subprocess.Popen[str]) -> None:
+    try:
+        proc.wait(timeout=_TEARDOWN_GRACE_S)
+    except subprocess.TimeoutExpired:
+        return
+
+
+def _excerpt(label: str, text: str) -> str:
+    value = (text or "").strip()
+    return f"; {label}={value[:400]}" if value else ""

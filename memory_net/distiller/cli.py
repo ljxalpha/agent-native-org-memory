@@ -64,6 +64,13 @@ from memory_net.distiller.profile import (
     validate_effective_provider,
     validate_profile,
 )
+from memory_net.distiller.publisher import (
+    DEFAULT_PR_COMMAND,
+    PR_COMMAND_ENV,
+    PullRequestError,
+    ReviewRequestError,
+    open_pull_request,
+)
 from memory_net.distiller.runctx import (
     RunBudget,
     RunContext,
@@ -147,6 +154,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "continue an earlier run: reuse its master snapshot, carry its "
             "finished products, and distil only the clusters it did not. "
             "Refused when origin/master has moved since that run."
+        ),
+    )
+    run_parser.add_argument(
+        "--open-pr",
+        action="store_true",
+        help=(
+            "after pushing the release branch, run the pull request command "
+            f"(env {PR_COMMAND_ENV}, default {DEFAULT_PR_COMMAND!r}) with the "
+            "body taken from distill_runs/<run_id>/review_request.json. Off by "
+            "default: opening a pull request is an outward action."
         ),
     )
     run_parser.add_argument("--dry-run", action="store_true")
@@ -311,12 +328,15 @@ def main(argv: list[str] | None = None) -> int:
             replay_mode=_replay_mode(args),
             resume_from=args.resume,
         ).run()
+        pull_request = _open_pull_request(args, run_id=result.run_id)
         response: dict[str, Any] = {
             "run_id": result.run_id,
             "input_records": result.input_records,
             "products": result.products,
             "manifest_path": str(result.manifest_path),
         }
+        if pull_request is not None:
+            response["pull_request"] = pull_request
         if args.eval_fixture is not None:
             response["golden_eval"] = evaluate_golden_fixture(args.eval_fixture)
         print(json.dumps(response, sort_keys=True))
@@ -704,6 +724,32 @@ def _cost_budget_usd(config: dict[str, Any]) -> float | None:
     if isinstance(cost_budget, dict) and cost_budget.get("budget_usd") is not None:
         return float(cost_budget["budget_usd"])
     return None
+
+
+def _open_pull_request(args: argparse.Namespace, *, run_id: str) -> str | None:
+    """Run the PR command, but only when this invocation asked for it.
+
+    Off by default, and silent when off: opening a pull request is an outward
+    action, and a run that was never asked to take one must not run any external
+    command at all.
+    """
+    if not getattr(args, "open_pr", False):
+        return None
+    if args.dry_run or args.no_push:
+        # There is no branch on the remote to open a pull request against.
+        raise SystemExit(
+            "--open-pr needs a pushed release branch: drop --dry-run/--no-push"
+        )
+    request_path = args.repo / "distill_runs" / run_id / "review_request.json"
+    if not request_path.exists():
+        raise SystemExit(
+            "--open-pr requires a review request, which only a run with "
+            "review_gate.enabled produces"
+        )
+    try:
+        return open_pull_request(request_path, cwd=args.repo)
+    except (PullRequestError, ReviewRequestError) as exc:
+        raise SystemExit(f"pull request was not opened: {exc}") from exc
 
 
 def _max_records_per_prompt(config: dict[str, Any]) -> int | None:
