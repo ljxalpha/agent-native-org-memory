@@ -4,6 +4,17 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage: install_leaf.sh --repo <memory-repo> --agent <agent> --node-id <id> --agent-root <path> --package-ref <ref>
+       [--home <dir>] [--no-cron] [--no-daemon]
+
+  --no-cron     do not register the leaf daemon in the user's crontab
+  --no-daemon   do not start the leaf daemon
+
+Both default to off, i.e. a production install still installs cron and starts
+the daemon. They exist because those two steps are the only ones that write
+outside $MEMORY_NET_HOME -- to the machine's own crontab and process table --
+which is what otherwise makes this script impossible to regression-test.
+Equivalent environment variables: MEMORY_NET_INSTALL_NO_CRON=1,
+MEMORY_NET_INSTALL_NO_DAEMON=1 (a command-line flag wins over the variable).
 USAGE
 }
 
@@ -13,6 +24,8 @@ NODE_ID=""
 AGENT_ROOT=""
 PACKAGE_REF=""
 MN_HOME="${MEMORY_NET_HOME:-$HOME/.memory-net}"
+NO_CRON="${MEMORY_NET_INSTALL_NO_CRON:-0}"
+NO_DAEMON="${MEMORY_NET_INSTALL_NO_DAEMON:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,6 +35,8 @@ while [[ $# -gt 0 ]]; do
     --agent-root) AGENT_ROOT="$2"; shift 2;;
     --package-ref) PACKAGE_REF="$2"; shift 2;;
     --home) MN_HOME="$2"; shift 2;;
+    --no-cron) NO_CRON=1; shift;;
+    --no-daemon) NO_DAEMON=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
   esac
@@ -227,7 +242,9 @@ ADAPTER_CONFIG="$MN_HOME/config-current/adapters/$AGENT.yaml"
   inject >/dev/null 2>&1 || true
 
 DAEMON_CMD="MEMORY_NET_HOME=$MN_HOME $PYTHON -m memory_net.leaf.cli start --node-id $NODE_ID --state-dir $MN_HOME/state --repo $MN_HOME/repo --adapter $ADAPTER_CONFIG --agent-root $AGENT_ROOT"
-if command -v crontab >/dev/null 2>&1; then
+# Escape valve: the crontab write is the first of two steps that leave
+# $MEMORY_NET_HOME and touch the machine itself.
+if [[ "$NO_CRON" != "1" ]] && command -v crontab >/dev/null 2>&1; then
   TMP_CRON="$(mktemp)"
   crontab -l > "$TMP_CRON" 2>/dev/null || true
   if ! grep -Fq "memory-net:leaf-daemon:$NODE_ID:$MN_HOME" "$TMP_CRON"; then
@@ -237,17 +254,24 @@ if command -v crontab >/dev/null 2>&1; then
   rm -f "$TMP_CRON"
 fi
 
-nohup env MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli start \
-  --node-id "$NODE_ID" \
-  --state-dir "$MN_HOME/state" \
-  --repo "$MN_HOME/repo" \
-  --adapter "$ADAPTER_CONFIG" \
-  --agent-root "$AGENT_ROOT" \
-  > "$MN_HOME/state/daemon.log" 2>&1 &
-echo "$!" > "$MN_HOME/state/daemon.pid"
+# Escape valve: the second step that leaves $MEMORY_NET_HOME. Skipping it leaves
+# a fully installed but idle leaf, which is exactly what a regression wants.
+if [[ "$NO_DAEMON" != "1" ]]; then
+  nohup env MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli start \
+    --node-id "$NODE_ID" \
+    --state-dir "$MN_HOME/state" \
+    --repo "$MN_HOME/repo" \
+    --adapter "$ADAPTER_CONFIG" \
+    --agent-root "$AGENT_ROOT" \
+    > "$MN_HOME/state/daemon.log" 2>&1 &
+  echo "$!" > "$MN_HOME/state/daemon.pid"
+  INSTALL_STATUS="DAEMON_STARTED"
+else
+  INSTALL_STATUS="HINTS_INSTALLED"
+fi
 
 cat > "$MN_HOME/state/install_state.json" <<JSON
-{"status":"DAEMON_STARTED","node_id":"$NODE_ID","agent":"$AGENT","generation":"$GEN_REVISION"}
+{"status":"$INSTALL_STATUS","node_id":"$NODE_ID","agent":"$AGENT","generation":"$GEN_REVISION"}
 JSON
 
 echo "Installed memory-net leaf $NODE_ID at $MN_HOME"

@@ -26,6 +26,8 @@ jobs:
         run: pytest
       - name: Run local integration
         run: bash tests/integration/local_repo.sh
+      - name: Run leaf install integration
+        run: bash tests/integration/install_leaf_local.sh
       - name: Validate shared pilot gate
         run: python scripts/validate_shared_pilot_gate.py
       - name: Upload distiller diagnostics

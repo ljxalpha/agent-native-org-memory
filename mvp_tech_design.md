@@ -1290,6 +1290,30 @@ MVP-core 当前脚本合同：
 7. 运行 install-time hint injection，并把结果写入 `state/hints_state.json`。
 8. 注册 `@reboot` cron（若可用），同时用 `nohup` 拉起一次 leaf daemon。
 
+#### 6.6.1 安装副作用的逃生阀与 hermetic 回归
+
+第 8 步的两个动作会越出 `$MEMORY_NET_HOME`，写到**运行安装的这台机器本身**：
+`crontab` 改的是用户真实的 crontab，`nohup` 起的是一个常驻进程。
+只要它们无条件执行，安装脚本就无法被自动化回归——跑一次测试就污染一次开发机或 CI runner。
+因此提供两个逃生阀：
+
+| 开关 | 环境变量 | 作用 |
+|---|---|---|
+| `--no-cron` | `MEMORY_NET_INSTALL_NO_CRON=1` | 跳过 crontab 注册 |
+| `--no-daemon` | `MEMORY_NET_INSTALL_NO_DAEMON=1` | 跳过 daemon 拉起 |
+
+**默认行为不变**：不带开关的生产安装照旧装 cron 并起 daemon。开关只做减法，
+命令行参数优先级高于环境变量。
+
+`tests/integration/install_leaf_local.sh` 是该脚本的 hermetic 回归：
+`mktemp -d` 隔离 + 本地 bare remote（`scripts/bootstrap_repo.sh` 造，
+与 `local_repo.sh` 同一手法）+ `--package-ref` 指向仓库**本地路径**（离线 pip install，
+不出网）+ `MEMORY_NET_HOME` 指向临时目录 + 中性 git 身份。
+它断言 `state/install_id`、`local.yaml`、`config-current` 符号链接、`.owner.json`
+三元组与 `leaf/<node_id>` 分支全部就位，并**显式断言用户 crontab 未被改动**——
+后者不是锦上添花：它是这条回归允许在真实机器上跑的前提。
+CI 以阻塞步骤运行该 harness。
+
 生产级 one-command hardening 仍作为后续任务跟踪：平台/依赖探针、
 `build_info` / approved build ID 校验、安装失败阶段状态、远端 manifest
 兼容校验、代表性 schema probe、同机 dirty recovery 留证、generation quarantine、
