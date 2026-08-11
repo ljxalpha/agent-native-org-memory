@@ -1089,6 +1089,35 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 因为要回答的问题是"这次 run 到底读了哪几个字节"，而解析会丢掉注释、键序与格式。
 `context.profile` 为 `None` 时**不写这三个键**，与今天完全一致。
 
+#### 5.5.7 `EmbeddingPolicy`：embedding 后端的单一判定结果
+
+**问题**：embedding 后端过去由**两处互不相干的环境变量自读**决定——
+`clustering/embedder.py` 的 `FastEmbedder.embed()` 与 `clustering/dbscan.py` 的
+`cluster_vectors()` 各读一次 `MEMORY_NET_USE_FASTEMBED`。两处判定意味着它们**可以不一致**
+（例如向量是真的、聚类却走了单簇回落），而这种不一致在运行期没有任何症状：
+指标照常产出，只是聚类结果没有意义。CLI 也没有任何通道能把 profile 的选择传下去，
+所以"生产 profile 强制真实 embedding"根本无法落地。
+
+**`EmbeddingPolicy`（frozen）是唯一的判定结果**，由 CLI 从 profile 算出一次，
+同时注入 embedder 与 `cluster_vectors()`：
+
+| 字段 | 含义 |
+|---|---|
+| `backend` | `fastembed`（真实本地模型）/ `test-cheap`（3 维廉价向量，仅测试与 CI） |
+| `model_name` | 模型名，`fastembed` 下必需 |
+| `test_only` | `backend == "test-cheap"` 时为真，进 metrics 让"这一跑不是真向量"可见 |
+| `probe()` | 构造 embedder 并 embed 一条探针文本；失败即抛 |
+
+两条行为收紧：
+
+1. **`fastembed` 下不再"import 失败就静默回落廉价向量"**。静默降级会产出一份
+   看起来正常、实际用 3 维向量聚出来的产物，而 DBSCAN 的 `eps` / `min_samples`
+   是按真实语义向量的量纲调的——两者组合在真实数据上无意义。加载失败必须**抛错**。
+2. `test-cheap` 保持既有的"确定性单簇回落"行为不变：CI 的 hermetic 性依赖它。
+
+未传 policy 的兼容路径保留 `MEMORY_NET_USE_FASTEMBED` 作为**开发便利开关**并标注 deprecated，
+使这一步可以独立合并。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
