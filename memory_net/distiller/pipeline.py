@@ -20,7 +20,7 @@ from memory_net.distiller.output_scanner import (
 )
 from memory_net.distiller.provenance import RunProvenance, aggregate
 from memory_net.distiller.runctx import (
-    BudgetExhausted,
+    NotExecuted,
     RunBudget,
     RunContext,
     utc_now,
@@ -191,10 +191,11 @@ class DistillationPipeline:
                     records=cluster_records,
                     run_id=run_id,
                 )
-            except BudgetExhausted:
-                # The run budget refused before the call went out. Respect the
-                # refusal rather than re-deriving it: this cluster is skipped,
-                # and every later one will be refused the same way.
+            except NotExecuted:
+                # A gate refused before the call went out -- the run budget, or
+                # the cross-run attempt ceiling. Respect the refusal rather
+                # than re-deriving it: this cluster is skipped, and every later
+                # one will be refused the same way.
                 clusters_attempted -= 1
                 skipped_clusters += 1
                 continue
@@ -223,9 +224,11 @@ class DistillationPipeline:
                         records=cluster_records,
                         run_id=run_id,
                     )
-                except BudgetExhausted:
-                    # The shared budget is spent: the primary lane's calls have
-                    # already consumed what the fallback would have needed.
+                except NotExecuted:
+                    # A gate refused before the call went out: the shared budget
+                    # is spent, or the cross-run attempt ceiling is reached.
+                    # Either way the primary lane's calls consumed what the
+                    # fallback would have needed.
                     fallback_attempts -= 1
                     parse_failures += 1
                     skipped_clusters += 1

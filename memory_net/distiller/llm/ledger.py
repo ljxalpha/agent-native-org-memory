@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from memory_net.distiller.runctx import utc_now
+from memory_net.distiller.runctx import NotExecuted, utc_now
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,8 +50,14 @@ class LedgerError(RuntimeError):
     """The ledger cannot be read, written or locked."""
 
 
-class AttemptCeilingExceeded(RuntimeError):
-    """The attempt was refused before any request went out."""
+class AttemptCeilingExceeded(NotExecuted):
+    """The attempt was refused before any request went out.
+
+    A ``NotExecuted``, so a caller holding a budget reservation refunds it
+    rather than keeping a hold for a request that was never sent, and the
+    pipeline skips the cluster instead of failing the run on an unhandled
+    exception mid-way through publishing.
+    """
 
 
 def attempt_ceiling(environ: Mapping[str, str] | None = None) -> int:

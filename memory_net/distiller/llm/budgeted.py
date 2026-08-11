@@ -20,7 +20,11 @@ import time
 from collections.abc import Callable
 
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
-from memory_net.distiller.runctx import RunBudget, prompt_tokens_upper
+from memory_net.distiller.runctx import (
+    NotExecuted,
+    RunBudget,
+    prompt_tokens_upper,
+)
 
 DEFAULT_TIMEOUT_S_UPPER = 300.0
 """Wall-clock upper bound assumed for a provider that declares none.
@@ -64,6 +68,13 @@ class BudgetedProvider(LLMProvider):
         )
         try:
             response = self.inner.generate(request)
+        except NotExecuted:
+            # Provably never sent -- another gate below this one refused before
+            # the request went out. Keeping the hold would charge the run for a
+            # call that did not happen, and on a ceiling refusal every later
+            # cluster would then be refused for the wrong reason.
+            reservation.release(wall_s=self.monotonic() - started)
+            raise
         except BaseException:
             # BaseException, not Exception: an interrupt between the reserve and
             # the settle would otherwise leak the hold, and an unsettled hold is

@@ -29,7 +29,18 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
     from memory_net.distiller.llm.recording import BundleRecorder
 
 
-class BudgetExhausted(RuntimeError):
+class NotExecuted(RuntimeError):
+    """A refusal raised *before* any request went out.
+
+    The distinction this carries is the only one that matters to a caller
+    holding a budget reservation: a failure that might have been billed must
+    keep its hold, while one that provably never reached the network must
+    refund it. Every pre-call refusal in the system derives from this, so a
+    caller can be correct about all of them without knowing which gate refused.
+    """
+
+
+class BudgetExhausted(NotExecuted):
     """A reservation would cross a run ceiling, so the call is not made.
 
     Raised by ``RunBudget.reserve`` *before* the provider issues its request:
