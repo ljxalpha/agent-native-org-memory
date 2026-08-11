@@ -36,7 +36,10 @@ def _production() -> dict[str, Any]:
                 "output_per_mtok_usd": 1.1,
             },
         },
-        "clustering": {"embedding_backend": "fastembed"},
+        "clustering": {
+            "embedding_backend": "fastembed",
+            "embedding_model": "BAAI/bge-small-en-v1.5",
+        },
         "output_scanner": {
             "schema_version": "memory-net/output-scanner/v1",
             "mode": "enforce",
@@ -125,6 +128,32 @@ def test_a_non_production_backend_is_refused_in_production(provider: str) -> Non
 
     with pytest.raises(ProfileError, match="llm.provider"):
         validate_profile(config)
+
+
+def test_the_test_embedding_backend_is_refused_in_production() -> None:
+    """Ruled out by what the backend is, not by what the profile is called: the
+    stand-in emits three-dimensional word counts while the DBSCAN parameters
+    beside it are tuned for semantic distance."""
+    config = _production()
+    config["clustering"]["embedding_backend"] = "test-cheap"
+
+    with pytest.raises(ProfileError, match="embedding_backend"):
+        validate_profile(config)
+
+
+def test_an_unknown_embedding_backend_is_refused() -> None:
+    config = _production()
+    config["clustering"]["embedding_backend"] = "word2vec"
+
+    with pytest.raises(ProfileError, match="embedding_backend"):
+        validate_profile(config)
+
+
+def test_the_embedding_model_has_no_production_default() -> None:
+    """Defaulting it would pick a model, and therefore an embedding space, on
+    the operator's behalf."""
+    with pytest.raises(ProfileError, match="clustering.embedding_model"):
+        validate_profile(_without(_production(), "clustering.embedding_model"))
 
 
 def test_production_refuses_observe_rather_than_correcting_it() -> None:

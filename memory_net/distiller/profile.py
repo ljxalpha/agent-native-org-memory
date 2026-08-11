@@ -18,6 +18,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
+from memory_net.distiller.clustering.policy import EMBEDDING_BACKENDS, TEST_CHEAP
+
 PRODUCTION = "production"
 DEVELOPMENT = "development"
 PROFILE_CLASSES = (PRODUCTION, DEVELOPMENT)
@@ -48,6 +50,7 @@ REQUIRED_PRODUCTION_KEYS = (
     "llm.pricing.output_per_mtok_usd",
     "llm.budget_usd",
     "clustering.embedding_backend",
+    "clustering.embedding_model",
     "output_scanner.schema_version",
     "output_scanner.mode",
 )
@@ -125,6 +128,21 @@ def validate_profile(config: dict[str, Any]) -> str:
         raise ProfileError(
             f"production profile cannot use llm.provider={provider!r}; "
             f"forbidden: {', '.join(FORBIDDEN_PRODUCTION_PROVIDERS)}"
+        )
+    backend = str(_lookup(config, "clustering.embedding_backend"))
+    if backend == TEST_CHEAP:
+        # Ruled out by what the backend *is*, not by what the file is called:
+        # the stand-in produces three-dimensional word counts, and the DBSCAN
+        # parameters beside it are tuned for semantic distance. The pairing
+        # yields meaningless products and completely ordinary metrics.
+        raise ProfileError(
+            f"production profile cannot use clustering.embedding_backend="
+            f"{TEST_CHEAP!r}; it is a test stand-in, not an embedding"
+        )
+    if backend not in EMBEDDING_BACKENDS:
+        raise ProfileError(
+            f"clustering.embedding_backend must be one of {EMBEDDING_BACKENDS}, "
+            f"got {backend!r}"
         )
     mode = str(_lookup(config, "output_scanner.mode"))
     if mode != "enforce":

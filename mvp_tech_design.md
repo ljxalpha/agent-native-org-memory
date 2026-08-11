@@ -1069,6 +1069,7 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 | `llm.pricing.input_per_mtok_usd` / `llm.pricing.output_per_mtok_usd` | 默认是 Anthropic 量纲；用它换算 DeepSeek 会把成本高估一到两个数量级，预算闸提前误停 |
 | `llm.budget_usd` | 没有它就没有成本上界，这是生产环境唯一不能省的那个 |
 | `clustering.embedding_backend` | 默认是 3 维廉价向量，与 DBSCAN 参数量纲不匹配，聚类结果无意义而指标看着正常 |
+| `clustering.embedding_model` | 默认会替操作者挑一个模型，也就挑了一个 embedding 空间 |
 | `output_scanner.schema_version` / `output_scanner.mode` | 没有它就没有输出侧泄漏闸 |
 
 另有三条**取值**约束：
@@ -1077,7 +1078,10 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
    且无结构化输出约束（§3.0 / §5.3.2），都不能承担把不可信记录喂给模型的生产职责。
 2. `output_scanner.mode` 在 production 下**唯一合法值是 `enforce`**；写 `observe` 直接拒绝启动，
    **不静默改回 `enforce`**——静默纠正会让人以为 `observe` 生效了。
-3. `output_scanner.mode` 的取值域是 `enforce` / `observe`，与叶子侧
+3. `clustering.embedding_backend` 在 production 下**不得为 `test-cheap`**。
+   这条按**语义**而非文件名判定——与 profile 叫什么名字无关，
+   要挡的是"3 维词频向量 + 按语义距离调的 DBSCAN 参数"这个组合本身。
+4. `output_scanner.mode` 的取值域是 `enforce` / `observe`，与叶子侧
    `leaf/scanner.py` 的 `audit` / `warn` / `block` **不共用取值域**。写叶子侧的词一律拒绝，
    哪怕在非 production profile 下：两套词汇混用早晚会让人把叶子侧的 `audit`
    误当成输出侧的 `observe`。
