@@ -164,31 +164,105 @@ def test_blank_config_source_master_sha_marker_is_ignored(tmp_path: Path) -> Non
     assert "config_source_master_sha" not in identity
 
 
-def test_read_host_is_the_only_platform_node_call_site() -> None:
+#: Every way to obtain the local machine name that the guard below must catch.
+#: Matching only the literal ``platform.node()`` shape would leave the whole
+#: family of equivalents (aliased imports, ``socket``, ``os.uname``, the
+#: environment) as open doors around a privacy invariant.
+HOSTNAME_SOURCES = {
+    ("platform", "node"),
+    ("platform", "uname"),
+    ("socket", "gethostname"),
+    ("socket", "getfqdn"),
+    ("os", "uname"),
+}
+HOSTNAME_ENV_VARS = {"HOSTNAME", "HOST", "COMPUTERNAME"}
+
+
+class _HostnameReadFinder(ast.NodeVisitor):
+    """Collect every hostname read in one module, resolving import aliases."""
+
+    def __init__(self) -> None:
+        #: alias -> canonical module name, e.g. ``{"p": "platform"}``
+        self.module_aliases: dict[str, str] = {}
+        #: alias -> (module, attribute) for ``from platform import node as n``
+        self.symbol_aliases: dict[str, tuple[str, str]] = {}
+        self.hits: list[int] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.name in {module for module, _ in HOSTNAME_SOURCES}:
+                self.module_aliases[alias.asname or alias.name] = alias.name
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if (node.module, alias.name) in HOSTNAME_SOURCES:
+                assert node.module is not None
+                self.symbol_aliases[alias.asname or alias.name] = (
+                    node.module,
+                    alias.name,
+                )
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        bare_alias = isinstance(func, ast.Name) and func.id in self.symbol_aliases
+        qualified = (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and (self.module_aliases.get(func.value.id), func.attr) in HOSTNAME_SOURCES
+        )
+        if bare_alias or qualified:
+            self.hits.append(node.lineno)
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        # ``os.environ["HOSTNAME"]`` / ``os.getenv("HOSTNAME")`` read the same
+        # material without calling any of the APIs above.
+        if isinstance(node.value, str) and node.value in HOSTNAME_ENV_VARS:
+            self.hits.append(node.lineno)
+        self.generic_visit(node)
+
+
+def test_the_hostname_is_read_in_exactly_one_module() -> None:
     """AST guard: the hostname may be read in exactly one module.
 
     ``host`` is local machine identity; confining the read to a single call site
     is what makes it auditable where it flows.
     """
     package_root = Path(memory_net.__file__).resolve().parent
-    call_sites: list[str] = []
+    modules: list[str] = []
     for path in sorted(package_root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "node"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "platform"
-            ):
-                call_sites.append(f"{path.relative_to(package_root)}:{node.lineno}")
-    assert [site.split(":")[0] for site in call_sites] == [
-        "leaf/identity.py"
-    ], call_sites
+        finder = _HostnameReadFinder()
+        finder.visit(ast.parse(path.read_text(encoding="utf-8")))
+        modules.extend(
+            f"{path.relative_to(package_root)}:{line}" for line in finder.hits
+        )
+    assert [site.split(":")[0] for site in modules] == ["leaf/identity.py"], modules
     assert read_host() == PLACEHOLDER_HOST
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import platform\nplatform.node()\n",
+        "import platform as p\np.node()\n",
+        "from platform import node\nnode()\n",
+        "from platform import node as n\nn()\n",
+        "import platform\nplatform.uname().node\n",
+        "import socket\nsocket.gethostname()\n",
+        "import socket\nsocket.getfqdn()\n",
+        "import os\nos.uname().nodename\n",
+        'import os\nos.environ["HOSTNAME"]\n',
+        'import os\nos.getenv("COMPUTERNAME")\n',
+    ],
+)
+def test_the_hostname_guard_catches_every_equivalent_read(source: str) -> None:
+    """Each of these would otherwise be an unaudited hostname read."""
+    finder = _HostnameReadFinder()
+    finder.visit(ast.parse(source))
+
+    assert finder.hits, source
 
 
 def _layout(
