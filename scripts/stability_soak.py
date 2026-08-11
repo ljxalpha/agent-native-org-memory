@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from memory_net.shared.schema import SchemaError, validate_health
+from memory_net.shared.schema.validation import HEALTH_OPS_IDENTITY_FIELDS
 
 SCHEMA_VERSION = "memory-net/stability-soak/v1"
 DEFAULT_SCRIPT = Path("tests/integration/local_repo_three_leaves.sh")
@@ -51,11 +52,16 @@ DEFAULT_LEAVES = 3
 DEFAULT_CYCLES = 3
 
 #: Details the driver builds itself (counters, closed-domain values) are safe by
-#: construction. Details that quote an upstream message are not: schema errors
-#: render the offending *value*, and a corrupted health file can hold anything,
-#: including memory text. Such details go through :func:`sanitize_detail`.
-_DETAIL_ALLOWED = re.compile(r"[^A-Za-z0-9_=,.:/<>\[\]() -]")
+#: construction. Details that quote an upstream message are not: a validator
+#: renders the offending *value* into its message, and a corrupted health file
+#: can hold anything, including memory text. Such details go through
+#: :func:`sanitize_detail`.
+_DETAIL_ALLOWED = re.compile(r"[^A-Za-z0-9_,.()/ -]")
 _DETAIL_MAX_LENGTH = 160
+#: Every character a validator uses to introduce an interpolated value. The
+#: message is cut at the first one: `status=<value>`, `scanner_hits[<key>]`,
+#: `fields: <list>`. Cutting at `=` alone would let a bracketed key through.
+_VALUE_INTRODUCERS = "=[:"
 #: The closed value domain of ``status``; anything else is named, never echoed.
 _KNOWN_STATUSES = frozenset({"healthy", "degraded"})
 
@@ -63,16 +69,21 @@ _KNOWN_STATUSES = frozenset({"healthy", "degraded"})
 def sanitize_detail(text: str) -> str:
     """Reduce an upstream diagnostic string to a bounded, value-free fragment.
 
-    Everything after the first ``=`` is dropped: that is where a validator puts
-    the offending value, and the value is the one part of the message that did
-    not come from this codebase. What survives -- field names, the shape of the
-    complaint -- is what an operator needs anyway.
+    The message is truncated at the first character a validator uses to
+    introduce a value, so nothing that came from the health file survives. The
+    one exception is deliberately built from this repository's own constants:
+    when the message names operational identity fields, the *intersection* with
+    :data:`HEALTH_OPS_IDENTITY_FIELDS` is appended, so the operator still learns
+    which field is missing while the emitted text can only ever be a literal
+    from our own code.
     """
     collapsed = " ".join(text.split())
-    head, separator, _value = collapsed.partition("=")
-    if separator:
-        collapsed = f"{head}=<redacted>"
-    filtered = _DETAIL_ALLOWED.sub("?", collapsed)
+    cuts = [index for index in map(collapsed.find, _VALUE_INTRODUCERS) if index != -1]
+    head = collapsed[: min(cuts)] if cuts else collapsed
+    named = [field for field in HEALTH_OPS_IDENTITY_FIELDS if field in collapsed]
+    if named:
+        head = f"{head} ({', '.join(named)})"
+    filtered = _DETAIL_ALLOWED.sub("?", head).strip()
     if len(filtered) <= _DETAIL_MAX_LENGTH:
         return filtered
     return filtered[:_DETAIL_MAX_LENGTH] + "..."
@@ -196,6 +207,12 @@ def evaluate_leaf(
         validate_health(payload, require_ops_identity=True)
     except SchemaError as exc:
         fail("health_schema", sanitize_detail(str(exc)))
+
+    # The leaf the harness said this file belongs to must be the leaf that wrote
+    # it. Without this, a harness that pointed three node ids at one healthy file
+    # would report three green leaves.
+    if payload.get("node_id") != node_id:
+        fail("node_id_mismatch", "health file belongs to another leaf")
 
     status = payload.get("status")
     if status != "healthy":
@@ -357,6 +374,12 @@ class HarnessCycleExecutor:
             )
             for item in document["leaves"]
         ]
+        # Distinct leaves must be distinct in both directions: a repeated node id
+        # or a shared health file would make one observation look like several.
+        if len({leaf.node_id for leaf in leaves}) != len(leaves):
+            raise SystemExit("the harness declared the same node id twice")
+        if len({leaf.health_path.resolve() for leaf in leaves}) != len(leaves):
+            raise SystemExit("the harness pointed two leaves at one health file")
         if len(leaves) != self._expected_leaves:
             raise SystemExit(
                 f"the harness drove {len(leaves)} leaves, --leaves says "

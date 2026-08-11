@@ -246,6 +246,37 @@ def test_report_never_carries_memory_text() -> None:
         assert forbidden not in serialized
 
 
+def test_validator_messages_cannot_smuggle_text_through_a_key() -> None:
+    """A validator interpolates map *keys* too, not just values after an `=`."""
+    payload = health_payload(
+        "alice-claude-01",
+        1,
+        redaction_incidents={
+            "blocked_reports": 0,
+            "scanner_hits": {f"{MEMORY_SENTENCE} /tmp/leaf-home leaf-b@example.invalid": "no"},
+        },
+    )
+    cycles = green_cycles(1)
+    cycles[0]["alice-claude-01"] = as_read(payload)
+
+    summary = soak(FakeExecutor(cycles), cycles=1)
+    serialized = json.dumps(summary)
+
+    assert ("alice-claude-01", "health_schema") in checks(summary)
+    for forbidden in ("OAuth", "429", "backoff", "/home/", "bob@example.com"):
+        assert forbidden not in serialized
+
+
+def test_a_health_file_from_another_leaf_fails() -> None:
+    cycles = green_cycles(1)
+    # Three ids, one leaf's payload: the shape a broken harness would produce.
+    cycles[0]["carol-claude-01"] = as_read(health_payload("alice-claude-01", 1))
+
+    summary = soak(FakeExecutor(cycles), cycles=1)
+
+    assert ("carol-claude-01", "node_id_mismatch") in checks(summary)
+
+
 def test_harness_failure_stops_the_run() -> None:
     executor = FakeExecutor(green_cycles(3), returncodes={2: 3})
 
@@ -296,10 +327,16 @@ def test_exactly_one_stopping_condition_is_required() -> None:
 
 def test_sanitize_detail_bounds_and_filters() -> None:
     assert sanitize_detail("unsupported health status=  'degraded'\n") == (
-        "unsupported health status=<redacted>"
+        "unsupported health status"
     )
-    assert sanitize_detail("missing fields: adapter, install_id") == (
-        "missing fields: adapter, install_id"
+    # Field names survive because they are matched against this repository's own
+    # constant, not copied out of the message.
+    assert sanitize_detail(
+        "missing required operational identity fields: adapter, install_id"
+    ) == ("missing required operational identity fields (adapter, install_id)")
+    # A bracketed key is an interpolated value too, and used to slip through.
+    assert sanitize_detail(f"scanner_hits[{MEMORY_SENTENCE}] must be int") == (
+        "scanner_hits"
     )
     assert len(sanitize_detail("x" * 500)) == 163
 
@@ -326,6 +363,33 @@ def test_executor_rejects_a_leaf_count_mismatch(tmp_path: Path) -> None:
     (tmp_path / "leaves.json").write_text(
         json.dumps(
             {"leaves": [{"node_id": "alice-claude-01", "health_path": "/tmp/a.json"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    def runner(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=[], returncode=0)
+
+    executor = HarnessCycleExecutor(
+        script=Path("unused.sh"),
+        workspace=tmp_path,
+        expected_leaves=3,
+        runner=runner,
+    )
+
+    with pytest.raises(SystemExit):
+        executor(1)
+
+
+def test_executor_rejects_two_leaves_sharing_one_health_file(tmp_path: Path) -> None:
+    shared = str(tmp_path / "shared.json")
+    (tmp_path / "leaves.json").write_text(
+        json.dumps(
+            {
+                "leaves": [
+                    {"node_id": node_id, "health_path": shared} for node_id in LEAF_IDS
+                ]
+            }
         ),
         encoding="utf-8",
     )
