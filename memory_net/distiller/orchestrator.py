@@ -823,7 +823,7 @@ class DistillOrchestrator:
             for distillation_id, entry in products_tombstones.items()
             if distillation_id not in products_active
         }
-        return {
+        manifest = {
             "schema_version": "memory-net/master-manifest/v1",
             "compatible_leaf_range": ">=0.1.0,<0.2.0",
             "last_run_id": run_id,
@@ -836,6 +836,19 @@ class DistillOrchestrator:
             "subject_index": _subject_index(products_active, products_tombstones),
             "topic_migrations": {},
         }
+        # Scanned here because this is the single construction point both the
+        # dry-run and the publishing writer share, and because the manifest is
+        # a *published* artifact that the staged-bundle scan cannot reach: it
+        # carries product paths, contributors and everything the previous
+        # manifest already held, none of which this run has otherwise scanned.
+        self._scan_published(manifest, field_path="manifest")
+        return manifest
+
+    def _scan_published(self, payload: Any, *, field_path: str) -> None:
+        """Run the output scanner over an artifact about to be written."""
+        scanner = self.context.scanner if self.context is not None else None
+        if isinstance(scanner, OutputScanner):
+            scanner.check(payload, field_kind=PROSE, field_path=field_path)
 
     def _product_manifest_entry(self, product: Any, run_id: str) -> dict[str, Any]:
         frontmatter = product.frontmatter
@@ -1135,22 +1148,29 @@ class DistillOrchestrator:
         for entry in entries:
             relative = str(entry["path"])
             path = staging / relative
+            # Every regular file's *content*, not only the ones whose name says
+            # JSON: dispatching on the extension leaves an innocuously named
+            # file publishing whatever is inside it, with only its path, size
+            # and hash ever looked at.
+            text = path.read_bytes().decode("utf-8", errors="replace")
             if relative == "calls.jsonl":
-                for index, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(), start=1
-                ):
+                for index, line in enumerate(text.splitlines(), start=1):
                     if line.strip():
                         scanner.check(
                             json.loads(line),
                             field_kind=PROSE,
                             field_path=f"{relative}:{index}",
                         )
-            elif relative.endswith(".json"):
-                scanner.check(
-                    json.loads(path.read_text(encoding="utf-8")),
-                    field_kind=PROSE,
-                    field_path=relative,
-                )
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                # Not JSON, so it is scanned as the text it is. Undecodable
+                # bytes were replaced above rather than skipped: skipping is an
+                # invitation to write the secret in another encoding.
+                scanner.check(text, field_kind=PROSE, field_path=relative)
+                continue
+            scanner.check(payload, field_kind=PROSE, field_path=relative)
 
     def _write_record_bundle(
         self,

@@ -1388,6 +1388,18 @@ bundle 的写入过去不是事务性的：`BundleRecorder.record()` 逐调用 a
 3. `calls.jsonl` 与 `requests/*.json` 在出站/落盘时已逐调用扫过，此处**再全量复扫一遍**，
    防有人绕过 `RecordingProvider` 直接落文件。`enforce` 下逐调用扫过的内容复扫必然 0 命中，
    因此**复扫出现任何命中就等价于"逐调用与全量结果不一致"**，直接 abort。
+4. **按扩展名分派会留下缺口**：只解析 `*.json` 与 `calls.jsonl` 的话，
+   `requests/9999-note.txt` 这类文件只有路径、大小、哈希被看见，正文原样发布。
+   因此扫描口径是"staging 内**每一个普通文件的正文**"：能解析成 JSON 的按结构树扫，
+   其余按纯文本扫（无法按 UTF-8 解码的字节用替换字符解码后再扫，
+   而不是跳过——跳过等于给"换个编码写进去"开了门）。
+
+**master `manifest.json` 在写盘前也要过一次扫描**：它由产物条目、上一份 manifest
+与运行标识拼成，是**发布物**而不是 bundle 的一部分，因此 `_scan_staged_bundle` 覆盖不到它；
+其中的 `relative_path` / `contributors` / `snapshot_ref` 都是字符串字段，
+上一份 manifest 里的条目更是从未经过本次 run 的任何扫描。
+`_master_manifest()` 是 dry-run 与正式发布两条写路径的**唯一**共同构造点，
+扫描放在它的返回之前，两条路径就都被覆盖，且不会有第二处口径。
 
 两条 CLI 侧断言：`--record` 与 `--record-dir` 不得同时给；
 **生产 profile 拒绝平面 `--record`**——平面文件不经过 commit 前的全量复扫，

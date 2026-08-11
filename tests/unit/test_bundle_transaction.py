@@ -320,6 +320,87 @@ def test_a_leaking_path_name_is_caught_at_commit(
     assert not (tmp_path / "bundle").exists()
 
 
+@pytest.mark.parametrize("name", ["requests/9999-smuggled.txt", "notes", "blob.bin"])
+def test_a_file_the_extension_does_not_advertise_is_still_read(
+    name: str, tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """Dispatching on ``.json`` would leave the content of everything else
+    published with only its path, size and hash ever looked at."""
+    recorder = _staged(tmp_path)
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=recorder)
+    orchestrator._write_record_bundle(
+        run_id=RUN_ID, snapshot_sha="deadbeef", output=_output()
+    )
+    assert recorder.staging is not None
+    smuggled = recorder.staging / name
+    smuggled.parent.mkdir(parents=True, exist_ok=True)
+    smuggled.write_bytes(f"see {HOME_PATH}".encode())
+
+    with pytest.raises(RedactionViolation):
+        orchestrator._commit_record_bundle()
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_undecodable_bytes_are_scanned_rather_than_skipped(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    recorder = _staged(tmp_path)
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=recorder)
+    orchestrator._write_record_bundle(
+        run_id=RUN_ID, snapshot_sha="deadbeef", output=_output()
+    )
+    assert recorder.staging is not None
+    (recorder.staging / "blob.bin").write_bytes(
+        b"\xff\xfe" + f"see {HOME_PATH}".encode()
+    )
+
+    with pytest.raises(RedactionViolation):
+        orchestrator._commit_record_bundle()
+
+
+# --------------------------------------------------------------------------
+# The published manifest
+# --------------------------------------------------------------------------
+
+
+def test_the_master_manifest_is_scanned_before_it_is_written(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """The manifest is a published artifact the staged-bundle scan cannot see,
+    and it carries entries the previous manifest contributed."""
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=None)
+
+    with pytest.raises(RedactionViolation):
+        orchestrator._master_manifest(
+            run_id=RUN_ID,
+            snapshot_sha="deadbeef",
+            products=[],
+            previous_manifest={
+                "products_active": {
+                    "distill-old-001": {
+                        "relative_path": f"team/{HOME_PATH}",
+                        "category": "practice",
+                        "contributors": ["alice"],
+                    }
+                }
+            },
+        )
+
+
+def test_a_clean_manifest_is_returned_unchanged(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=None)
+
+    manifest = orchestrator._master_manifest(
+        run_id=RUN_ID, snapshot_sha="deadbeef", products=[], previous_manifest={}
+    )
+
+    assert manifest["last_run_id"] == RUN_ID
+    assert manifest["products_active"] == {}
+
+
 # --------------------------------------------------------------------------
 # Regression and CLI wiring
 # --------------------------------------------------------------------------
