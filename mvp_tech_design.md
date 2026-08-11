@@ -2813,6 +2813,50 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
 - `prompt_hash` 口径不变（仍只覆盖 `system_prompt + user_prompt`），
   provenance 字段**不进** hash，既有 bundle 的请求文件名与匹配行为不受影响。
 
+#### 9.2.1 产物规范化与比较器（`memory_net/distiller/normalize.py`）
+
+"两次 run 的产物是否等价"这个问题，用"剥离若干易变字段"是**答不了**的：
+`products_active` 的 **map key 本身**就是含 run_id 的 `distillation_id`，
+而 `citation_backrefs` / `subject_index` / 每一个 `snapshot_ref` 都由这些 key 派生。
+没有字段可剥——标识符只能**重映射**，且必须在它出现的**所有**地方一起改。
+
+因此本模块定义的是**算法**：
+
+```
+normalize(assets):
+  1. 收集全部 distillation_id（products_active 的 key、products_tombstones 的 key、
+     每个产物 frontmatter 的 distillation_id）与全部 run_id
+     （run_id / last_run_id / last_contribution_at 三个字段）。
+  2. 建立稳定重映射：distillation_id 按 (category, canonical_topic_key, relative_path)
+     三元组排序后依次改名为 "distill-<NNN>"；排序键不含任何时钟/run_id 派生量。
+     两个 id 的排序键完全相同时**抛错**——此时没有稳定顺序可言，
+     随便选一个会让比较结果在两次运行之间抖动。
+  3. 全树替换：遍历整棵 JSON 树（含嵌套 list/dict 与**键名**），
+     按"长串优先"替换（distillation_id 包含 run_id，先替换短的会把长的打碎）。
+  4. 时钟归零：generated_at / updated_at / deleted_at / published_at → 固定占位；
+     master_snapshot_sha / config_revision → 固定占位。
+     ※ `last_contribution_at` 看起来像时间戳，**实际存的是 run_id**
+     （`_subject_index` 如此写入），按时钟归零会抹掉一个真实引用，故归入 run_id 一类。
+  5. content_hash 按**归一化后的文档**重算（不是置空——置空会让"正文变了但哈希字段被剥离"
+     这类回归漏过去）。
+  6. 稳定序列化：dict 按 key 排序，**list 保持原序**（顺序本身是被测语义），
+     `sort_keys=True, indent=2, ensure_ascii=False`。
+```
+
+两处与初版计划的偏离，理由都来自代码事实：
+
+- **`evidence_hash` 不重算**。它由 citations + summary + evidence 派生
+  （`pipeline.render_products`），三者都不含时钟与 run_id，**本身就跨 run 稳定**；
+  而产物文件名里嵌的正是这个哈希（生产口径），重算成另一套公式只会让文件名与字段对不上。
+  正文改动依然会经由生产公式改变它，负向测试仍然成立。
+- **产物的"发射顺序"不构成差异**。第 2 步的排序键刻意不含发射序，
+  因此两次 run 以不同顺序产出同一组产物时，规范化后相等——这是该排序键存在的目的。
+  被当作语义的是**资产内部的 list 顺序**（citations / contributors / 索引列表），
+  负向测试对的是这一类。
+
+比较器 `assert_normalized_equal()` 输出**结构化 diff**（路径 + 两侧值），
+而不是一个布尔断言：几百个字段的两棵树"不相等"这句话，读的人无法据此定位。
+
 ### 9.3 dry-run
 
 - `leaf-daemon report --dry-run`：输出将上报的文件列表、脱敏 diff、预计 commit 消息，**不 commit、不 push**。
