@@ -475,7 +475,7 @@ def test_the_wall_clock_ceiling_accounts_for_the_backoff_before_retrying() -> No
     means the second attempt can run to 121s.
     """
     budget = RunBudget(1.0, 10.0, max_usd=None, max_wall_clock_s=120.5)
-    provider, client, _ = _clocked_provider(
+    provider, client, clock = _clocked_provider(
         [_HTTPError(500), _Completion(usage=_Usage(1, 1))],
         budget=budget,
         max_retries=2,
@@ -487,4 +487,8 @@ def test_the_wall_clock_ceiling_accounts_for_the_backoff_before_retrying() -> No
 
     # The retry was refused before it went out, not after.
     assert len(client.calls) == 1
+    # And refused before the backoff was even waited out: an unmoved clock rules
+    # out a "sleep first, refuse afterwards" ordering that client.calls alone
+    # cannot distinguish.
+    assert clock.now == pytest.approx(0.0)
     budget.assert_all_settled()
