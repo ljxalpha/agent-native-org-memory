@@ -694,3 +694,42 @@ def test_an_inlined_index_would_be_caught_by_the_upper_bound() -> None:
         verifier.assert_hint_reached_the_prompt(
             with_hint=168 + inlined, without_hint=168, instructions="x" * 140
         )
+
+
+# -- auditing a negative control without quoting a model -----------------
+
+
+def test_a_silent_control_is_not_a_control() -> None:
+    """ "The control did not return the sentinel" covers two different runs: one
+    that answered and did not know the token, and one that produced nothing.
+
+    The second is an agent that failed quietly, and it satisfies the sentinel
+    test for a reason with nothing to do with the hint -- so it must not read
+    as the comparison holding.
+    """
+    verdict = verify_consumption(_evidence(control_output="   \n"))
+
+    assert not verdict.consumed
+    assert "control run produced no answer at all" in verdict.failures
+
+
+def test_the_verdict_reports_sizes_so_a_negative_can_be_audited() -> None:
+    verdict = verify_consumption(
+        _evidence(control_output="I do not have a verification token.")
+    )
+
+    assert verdict.consumed
+    assert verdict.answer_sizes["control"] == len("I do not have a verification token.")
+    assert verdict.answer_sizes["positive"] > 0
+
+
+def test_the_report_gives_sizes_and_still_quotes_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    verdict = verify_consumption(_evidence(control_output="no token here"))
+    verifier._report(verdict, path=None)
+
+    printed = capsys.readouterr().out
+    assert SENTINEL not in printed
+    assert "no token here" not in printed
+    assert json.loads(printed)["answer_sizes"]["control"] == len("no token here")

@@ -509,6 +509,7 @@ def _report(verdict: ConsumptionVerdict, *, path: Path | None) -> None:
     the model happened to say into a report.
     """
     payload = {
+        "answer_sizes": dict(verdict.answer_sizes),
         "consumed": verdict.consumed,
         "evidence_basis": verdict.evidence_basis,
         "failures": list(verdict.failures),

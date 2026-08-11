@@ -107,6 +107,16 @@ class ConsumptionVerdict:
     evidence_basis: str
     failures: tuple[str, ...] = ()
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: Characters each arm answered with. Sizes, never text.
+    answer_sizes: Mapping[str, int] = field(default_factory=dict)
+    """Enough to audit a negative control without quoting a model.
+
+    "The control did not return the sentinel" covers two very different runs:
+    one that answered and did not know the token, and one that produced nothing
+    at all -- the second being an agent that failed quietly rather than a
+    control that held. The verdict cannot show which without this, and it must
+    not show the text, which is model output generated from a file we injected.
+    """
 
 
 def verify_consumption(evidence: ConsumptionEvidence) -> ConsumptionVerdict:
@@ -142,6 +152,11 @@ def verify_consumption(evidence: ConsumptionEvidence) -> ConsumptionVerdict:
     # producing the passing pattern without ever following anything.
     if evidence.sentinel in evidence.control_output:
         failures.append("sentinel present in the control run, which had no hint")
+    if not evidence.control_output.strip():
+        # A silent control is not a control: an agent that produced nothing
+        # fails the sentinel test for a reason that has nothing to do with the
+        # hint, and would otherwise read as the comparison holding.
+        failures.append("control run produced no answer at all")
 
     # Matched on the last path component: the dump's directory varies with the
     # profile in use, and a residue one level down is the same key on disk.
@@ -189,6 +204,10 @@ def verify_consumption(evidence: ConsumptionEvidence) -> ConsumptionVerdict:
         )
 
     return ConsumptionVerdict(
+        answer_sizes={
+            "positive": len(evidence.positive_output),
+            "control": len(evidence.control_output),
+        },
         consumed=not failures,
         evidence_basis=basis,
         failures=tuple(failures),
