@@ -11,7 +11,8 @@
 
 1. Stop leaf daemon or run with `--no-push`.
 2. Review `state/scanner_audit/*.jsonl`; entries never include raw secret values.
-3. Add or tighten rules in `config/redaction_patterns.yaml` and run `scripts/redaction_benchmark.py`.
+3. Add or tighten rules in `config/redaction_patterns.yaml` and run
+   `python3 scripts/redaction_benchmark.py`.
 4. Re-report after rules pass benchmark.
 
 ## Reinstalling Over a Running Leaf
@@ -98,7 +99,7 @@ printing an unusable payload.
 
 ## Stability Check
 
-`scripts/stability_smoke.py --iterations 3` repeats the single-pass end-to-end
+`python3 scripts/stability_smoke.py --iterations 3` repeats the single-pass end-to-end
 regression and reports how many iterations returned zero. It is a quick "does
 the flow still work" check and says nothing about any leaf's health over time.
 
@@ -240,8 +241,11 @@ Three rules, and the tooling enforces all three rather than asking you to:
    through `/proc`; neither is used, and a test asserts neither string appears
    in the sources.
 3. **Allowlisted.** The credential file is a personal store with dozens of
-   unrelated keys. `aomt-with-env` reads exactly `DEEPSEEK_API_KEY` and
-   `DEEPSEEK_BASE_URL` and drops the rest while parsing.
+   unrelated keys. `aomt-with-env` reads only its allowlist — by default
+   `DEEPSEEK_API_KEY` and `DEEPSEEK_BASE_URL` — and drops every other key
+   *while parsing*, so an unrelated secret never exists in the process at all.
+   `--key NAME` (repeatable) **replaces** that default allowlist rather than
+   adding to it.
 
 Resolution order, for both `aomt-with-env` and `agent_sandbox`:
 
@@ -265,12 +269,15 @@ tool: both would put a credential on a terminal and into a shell history.
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `AOMT_DISTILL_PROFILE` | `memory_net/distiller/cli.py` | Overrides the run's profile class. Cannot widen a production profile into one that accepts `mock`. |
+| `AOMT_DISTILL_PROFILE` | `memory_net/distiller/cli.py` | Selects **which profile file** the run reads, as a repo-relative path; the fallback for `--config`, which beats it. It does not set `profile_class` — that is declared inside the file — so pointing it at a non-production profile switches the run onto that profile wholesale. A named profile missing from the frozen snapshot stops the run; only the default one falls back. |
 | `AOMT_OUTPUT_SCANNER_MODE` | `memory_net/distiller/output_scanner.py` | `enforce` or `observe`. `observe` records hits without failing the run; production runs use `enforce`. |
 | `AOMT_ATTEMPT_CEILING` | `memory_net/distiller/llm/ledger.py` | May only **lower** the hard ceiling. A larger value is ignored, so the guard cannot be raised by an environment. It covers every billable provider this project builds (`deepseek` reserves for itself; `anthropic` is wrapped in `LedgeredProvider`), but not an agent under test that calls a model itself. |
 | `AOMT_ATTEMPT_LEDGER` | `memory_net/distiller/llm/ledger.py` | Path to the attempt ledger. Point it at a scratch file when rehearsing with a fake transport, so rehearsals do not consume the real budget. |
 | `AOMT_SANDBOX_ROOT` | `scripts/agent_sandbox` | Default sandbox root. Refused if it resolves inside a real agent state directory or inside this repository -- `clean` is `rm -rf` on it. |
 | `AOMT_AGENT_RUNTIME_ROOT` | `scripts/agent_sandbox` | The agent's source tree, bound read-only at its own path. Required unless `--runtime-root` is given. |
+| `AOMT_PR_COMMAND` | `memory_net/distiller/publisher.py` | The pull-request command `--open-pr` runs, split with `shlex`. Defaults to `gh pr create`. Only consulted when `--open-pr` is passed, which is off by default. |
+| `AOMT_PR_ENV_ALLOWLIST` | `memory_net/distiller/publisher.py` | Comma-separated key names forwarded into that subprocess. Its environment is **built, not inherited**, so a key absent from this list is absent from the child. |
+| `AOMT_PLATFORM_TOKEN` | `scripts/validate_shared_pilot_gate.py` | Presence enables a platform-side probe. Without it the validator prints that protection is not empirically verified and exits 0 rather than pretending it checked. |
 
 The ledger is an append-only record of *attempts*, not of successes: a request
 that failed still consumed rate budget, and a guard that counted only successes
@@ -387,8 +394,9 @@ value. There is no `env` subcommand and no eval-able output mode.
 
 Two environment allowlists, defined and tested separately: what the launcher
 process itself may read, and the complete environment visible inside the
-namespace. The second is `HOME`, `PATH`, `HERMES_HOME`, the two DeepSeek
-variables, and optionally `HERMES_MAX_TOKENS`. Everything else is absent,
+namespace. The second is exactly `HOME`, `PATH`, `HERMES_HOME`, the two DeepSeek
+variables, and the two tunables `HERMES_MAX_TOKENS` and `HERMES_MAX_ITERATIONS`
+(the only keys `--limit KEY=VALUE` will set). Everything else is absent,
 including the three dozen unrelated keys in the shared credential file.
 
 Usage:

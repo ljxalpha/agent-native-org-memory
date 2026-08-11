@@ -2,19 +2,19 @@
 
 ## Project Structure & Progressive Disclosure
 
-This repo is still implementation-light and document-first. Use `AGENTS.md` for working rules only; keep detailed architecture, schemas, and milestone scope in `mvp_tech_design.md` and `todo.md`. This progressive-disclosure split is intentional: keep high-frequency contributor guidance short, and push deep design details into the design docs to save context and reduce drift.
+This repo is document-first. Use `AGENTS.md` for working rules only; keep detailed architecture, schemas, and milestone scope in `mvp_tech_design.md` and `todo.md`. This progressive-disclosure split is intentional: keep high-frequency contributor guidance short, and push deep design details into the design docs to save context and reduce drift.
 
 When work grows large enough to threaten context quality, prefer splitting it into focused subtasks and delegating those subtasks to sub-agents when available. Keep delegated scopes concrete and bounded, then integrate their results through the main thread.
 
-Planned source layout is `memory_net/shared/`, `memory_net/leaf/`, and `memory_net/distiller/`; tests belong in `tests/unit/` and `tests/integration/`.
+Source lives in `memory_net/shared/`, `memory_net/leaf/`, and `memory_net/distiller/`; tests belong in `tests/unit/` and `tests/integration/`.
 
 ## Build, Test, and Dev Commands
 
-- `pip install -e ".[dev]"`: editable install once `pyproject.toml` exists.
+- `pip install -e ".[dev]"`: editable install. Add the `llm` extra (`".[dev,llm]"`) for the production distillation backend.
 - `pytest`: run the full test suite.
 - `pytest tests/unit/test_redaction.py -v`: run one focused unit test file.
 - `bash tests/integration/local_repo.sh`: offline end-to-end regression for the local Git flow.
-- `black . && isort . && ruff check . && mypy .`: format, lint, and type-check before commit.
+- `black . && isort . && ruff check . && mypy memory_net`: format, lint, and type-check before commit. `mypy memory_net` — not `mypy .` — is what CI runs and what `pyproject.toml` is configured for.
 
 ## Coding Style & Module Design
 

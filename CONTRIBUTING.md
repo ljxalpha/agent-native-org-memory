@@ -16,7 +16,7 @@ natively — use WSL2. Startup deliberately blocks other platforms.
 
 ```bash
 git clone https://github.com/ljxalpha/agent-native-org-memory.git
-cd aomt
+cd agent-native-org-memory
 python3 -m pip install -e ".[dev]"   # Python 3.11+
 ```
 
@@ -78,10 +78,16 @@ config (`config/`, `prompts/` on its `master` branch; leaf reports on
 only — see `mvp_tech_design.md` and `AGENTS.md` for the full constraints.
 
 New agents are supported by **adding an adapter YAML** under `config/adapters/`,
-not by writing new code classes. Experimental adapters (`support_status:
-experimental`, e.g. `codex`, `hermes`) require the opt-in env flag
-`MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1` and stay experimental until their
-behavior is verified against the real agent.
+not by writing new code classes — as long as the agent's memory lives in
+files on disk. A memory surface that is not a filesystem tree still needs a new
+`MemoryAdapter` implementation; `FileSystemMdAdapter` is currently the only one.
+
+Four of the five shipped adapters are experimental (`support_status:
+experimental`): `codex`, `hermes`, `openclaw` and `opencode`. Loading any of
+them requires the opt-in env flag `MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1`.
+Only `claude-code` is not — and it is stable by the loader's default, since it
+declares no `support_status` at all. An adapter stays experimental until a real,
+quota-costing agent run shows the injected hint is actually consumed.
 
 ## Reporting bugs / requesting features
 

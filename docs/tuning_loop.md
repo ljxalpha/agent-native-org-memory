@@ -3,8 +3,16 @@
 1. Record a baseline distill run with `--record`.
 2. Adjust prompts in `prompts/`.
 3. Replay with `--replay-mode prompt-only` or `allow-live-on-miss`.
-4. Compare product text with `scripts/prompt_ab.py` and render with `scripts/prompt_ab_view.py`.
+4. Compare product text with `python3 scripts/prompt_ab.py` and render with
+   `python3 scripts/prompt_ab_view.py`.
 5. Check golden eval and run metrics separately before promotion.
+
+Step 1 is for a development profile. A **production** profile refuses `--record`
+outright and requires `--record-dir` instead: a flat recording never passes the
+commit-time full rescan that a bundle does, so it is not an acceptable
+production artifact. A production profile also refuses `output_scanner.mode`
+other than `enforce`, and `observe` cannot be combined with either recording
+flag — an unblocked run would write the matched content into the recording.
 
 The current MVP tools provide readable text diffs only. Structured frontmatter,
 citation, quality, and cost comparisons are a planned follow-up extension.
@@ -28,7 +36,7 @@ spends live quota to reduce reproducibility.
 ### The procedure
 
 1. Build the golden input repository, which is deterministic and synthetic:
-   `python tests/fixtures/golden_repo/build_repo.py --out <path>`.
+   `python3 tests/fixtures/golden_repo/build_repo.py --out <path>`.
 2. Read the attempt ledger and note the count. Recording spends live quota.
 3. Record into a **staging directory outside the repository**, so a failed or
    half-reviewed recording can never be committed by accident:

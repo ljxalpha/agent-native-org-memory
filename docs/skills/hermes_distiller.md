@@ -23,16 +23,25 @@ the mock lane against a strict replay of a real recorded run.
 
 The tool command is read from `HERMES_TOOL_COMMAND`. It receives one JSON object
 on stdin with `system_prompt`, `user_prompt`, `model`, `max_tokens`, and
-`metadata`; it must return JSON with `text`, optional `model`, and optional
-integer `usage` fields.
+`metadata`. It must return a JSON object carrying `text`; `model`, integer
+`usage`, `usage_source`, `provider_backend` and a string-valued `raw_meta` are
+all optional.
 
 ```bash
 HERMES_TOOL_COMMAND="hermes-memory-distill" \
   memory-net-distiller run --repo . --provider hermes_tool
 ```
 
-Because the tool reports its own usage, runs through this provider record
-`usage_source: "estimated"` rather than `"reported"`. Recordings made through it
-carry `provider_backend: "hermes_tool"` and are refused by a production profile
-at replay time -- a bundle is trusted on its own per-call provenance, not on the
-name of the config that replays it.
+The last three of those keys are the provenance the recording will carry, and
+they are **declared by the tool**, not observed by this side of the bridge:
+
+- `usage_source` is accepted only if it is one of `reported` / `estimated` /
+  `unknown`. A tool that declares nothing, or declares something else, records
+  `unknown` — never an optimistic fallback to `reported`.
+- `provider_backend` defaults to `hermes_tool` when the tool says nothing, but a
+  tool that names something else is taken at its word. The bridge cannot verify
+  the claim; what it can do is refuse to invent one.
+
+A production profile refuses to replay a bundle whose calls name `hermes_tool`,
+`mock`, or `unknown` — a bundle is trusted on its own per-call provenance, not
+on the name of the config that replays it.
