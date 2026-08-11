@@ -222,3 +222,136 @@ def test_cli_prints_the_stage_and_exits_non_zero(tmp_path: Path, capsys: Any) ->
 def test_cli_preflight_succeeds_quietly(tmp_path: Path, capsys: Any) -> None:
     assert install_probe.main(["preflight", "--home", str(tmp_path / "home")]) == 0
     assert capsys.readouterr().err == ""
+
+
+SAMPLE_SHA = "0123456789abcdef0123456789abcdef01234567"
+GIT_REF = f"git+ssh://git@example.invalid/org/aomt.git@{SAMPLE_SHA}"
+
+
+def test_schema_probe_rejects_an_incompatible_leaf_range() -> None:
+    """compatible_leaf_range existed but the installer never consulted it."""
+    manifest = {**MASTER_MANIFEST, "compatible_leaf_range": ">=9.0.0,<10.0.0"}
+
+    failure = schema_probe(
+        bootstrap_state=json.dumps(BOOTSTRAP_STATE),
+        manifest=json.dumps(manifest),
+    )
+
+    assert failure is not None
+    assert "compatible_leaf_range" in failure.reason
+
+
+def test_schema_probe_rejects_a_build_id_outside_the_remote_allowlist() -> None:
+    state = {**BOOTSTRAP_STATE, "approved_build_ids": ["f" * 40]}
+
+    failure = schema_probe(
+        bootstrap_state=json.dumps(state),
+        manifest=json.dumps(MASTER_MANIFEST),
+        build_id=SAMPLE_SHA,
+    )
+
+    assert failure is not None
+    assert "bootstrap_state.json" in failure.reason
+
+
+def test_schema_probe_accepts_a_build_id_inside_the_remote_allowlist() -> None:
+    state = {**BOOTSTRAP_STATE, "approved_build_ids": [SAMPLE_SHA]}
+
+    assert (
+        schema_probe(
+            bootstrap_state=json.dumps(state),
+            manifest=json.dumps(MASTER_MANIFEST),
+            build_id=SAMPLE_SHA,
+        )
+        is None
+    )
+
+
+def test_a_remote_without_an_allowlist_admits_every_build() -> None:
+    """Regression: the allowlist is opt-in, so existing installs keep working.
+
+    Adding the key unconditionally would fail-close every leaf already in the
+    field, which is why bootstrap_state.json does not ship with it.
+    """
+    assert "approved_build_ids" not in BOOTSTRAP_STATE
+
+    assert (
+        schema_probe(
+            bootstrap_state=json.dumps(BOOTSTRAP_STATE),
+            manifest=json.dumps(MASTER_MANIFEST),
+            build_id=SAMPLE_SHA,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("package_ref", "expected"),
+    [
+        (GIT_REF, SAMPLE_SHA),
+        ("/local/path/to/aomt", None),
+        (f"git+ssh://git@example.invalid/org/aomt.git@{SAMPLE_SHA[:39]}", None),
+        (None, None),
+    ],
+)
+def test_only_a_commit_pinning_ref_yields_a_build_id(
+    package_ref: str | None, expected: str | None
+) -> None:
+    """A version string in a commit allowlist matches by accident or never."""
+    assert install_probe._probe_build_id(package_ref) == expected
+
+
+def test_build_info_records_the_resolved_build_and_its_source(tmp_path: Path) -> None:
+    build_info = install_probe.write_build_info(
+        tmp_path / "state",
+        package_ref=GIT_REF,
+        master_sha="a" * 40,
+        installed_at="2026-04-20T09:00:00Z",
+    )
+
+    written = json.loads(
+        (tmp_path / "state" / "build_info.json").read_text(encoding="utf-8")
+    )
+    assert written == build_info
+    assert written == {
+        "package_ref": GIT_REF,
+        "build_id": SAMPLE_SHA,
+        "build_id_source": "package_ref",
+        "code_version": memory_net.__version__,
+        "installed_at": "2026-04-20T09:00:00Z",
+        "master_sha": "a" * 40,
+    }
+
+
+def test_build_info_reports_a_degraded_build_id_rather_than_hiding_it(
+    tmp_path: Path,
+) -> None:
+    build_info = install_probe.write_build_info(
+        tmp_path / "state",
+        package_ref="/local/path/to/aomt",
+        master_sha="a" * 40,
+        installed_at="2026-04-20T09:00:00Z",
+    )
+
+    assert build_info["build_id"] == memory_net.__version__
+    assert build_info["build_id_source"] == "code_version"
+
+
+def test_build_info_agrees_with_the_runtime_identity(tmp_path: Path) -> None:
+    """Install time and runtime must derive the build id the same way.
+
+    Two derivations that disagree turn the audit trail into a contradiction.
+    """
+    from memory_net.leaf.identity import build_id_from_package_ref
+
+    build_info = install_probe.write_build_info(
+        tmp_path / "state",
+        package_ref=GIT_REF,
+        master_sha="a" * 40,
+        installed_at="2026-04-20T09:00:00Z",
+    )
+
+    assert build_id_from_package_ref(GIT_REF) == (
+        build_info["build_id"],
+        build_info["build_id_source"],
+    )

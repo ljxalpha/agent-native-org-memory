@@ -120,20 +120,31 @@ def _adapter_name(adapter_path: Path) -> str:
     return name.strip()
 
 
-def _build_id(local_yaml_path: Path) -> tuple[str, str]:
-    """Return ``(build_id, build_id_source)``.
+def build_id_from_package_ref(package_ref: object) -> tuple[str, str]:
+    """Return ``(build_id, build_id_source)`` for one ``package_ref``.
 
-    Falls back to the package version when ``package_ref`` does not pin a commit
-    (the development install path). The fallback is reported through
-    ``build_id_source`` rather than applied silently, so a degraded build id is
-    auditable.
+    Falls back to the package version when the ref does not pin a commit (the
+    development install path, and any local-path ref). The fallback is reported
+    through ``build_id_source`` rather than applied silently, so a degraded
+    build id is auditable.
+
+    Public because the installer records the same pair in ``build_info.json``:
+    the install-time and runtime answers have to be derived identically or the
+    audit trail contradicts itself.
     """
+    if isinstance(package_ref, str) and "@" in package_ref:
+        candidate = package_ref.rsplit("@", 1)[1]
+        if _COMMIT_SHA_RE.match(candidate):
+            return candidate.lower(), "package_ref"
+    return memory_net.__version__, "code_version"
+
+
+def _build_id(local_yaml_path: Path) -> tuple[str, str]:
+    """Return ``(build_id, build_id_source)`` from the installed ``local.yaml``."""
     if local_yaml_path.is_file():
-        package_ref = _load_yaml_mapping(local_yaml_path).get("package_ref")
-        if isinstance(package_ref, str) and "@" in package_ref:
-            candidate = package_ref.rsplit("@", 1)[1]
-            if _COMMIT_SHA_RE.match(candidate):
-                return candidate.lower(), "package_ref"
+        return build_id_from_package_ref(
+            _load_yaml_mapping(local_yaml_path).get("package_ref")
+        )
     return memory_net.__version__, "code_version"
 
 

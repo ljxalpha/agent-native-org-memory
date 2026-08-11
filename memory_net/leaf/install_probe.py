@@ -16,6 +16,7 @@ later.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 import memory_net
+from memory_net.leaf.identity import build_id_from_package_ref
 from memory_net.shared.schema import (
     SchemaError,
     validate_bootstrap_state,
@@ -168,6 +170,41 @@ def schema_probe(
     return None
 
 
+def write_build_info(
+    state_dir: Path,
+    *,
+    package_ref: str,
+    master_sha: str,
+    installed_at: str,
+) -> dict[str, str]:
+    """Record what this install actually installed.
+
+    Without it there is no on-disk answer to "which build is this leaf running,
+    and against which master snapshot was it installed" that survives the
+    install script exiting -- ``local.yaml`` holds the ref but not the resolved
+    build id, nor the degradation that produced it.
+
+    :returns: the recorded mapping, so callers can assert on it directly.
+    """
+    build_id, build_id_source = build_id_from_package_ref(package_ref)
+    build_info = {
+        "package_ref": package_ref,
+        "build_id": build_id,
+        "build_id_source": build_id_source,
+        "code_version": memory_net.__version__,
+        "installed_at": installed_at,
+        "master_sha": master_sha,
+    }
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = state_dir / "build_info.json"
+    tmp = target.with_name(f".{target.name}.tmp")
+    tmp.write_text(
+        json.dumps(build_info, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    tmp.replace(target)
+    return build_info
+
+
 def _parse_json_mapping(raw: str, label: str) -> dict[str, Any]:
     """Parse JSON, reporting a syntax error as a schema failure.
 
@@ -181,6 +218,19 @@ def _parse_json_mapping(raw: str, label: str) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise SchemaError(f"{label} is not a mapping")
     return document
+
+
+def _probe_build_id(package_ref: str | None) -> str | None:
+    """Resolve a package ref to a build id, or ``None`` when it pins no commit.
+
+    Passing the fallback (the code version) would be worse than passing nothing:
+    ``approved_build_ids`` is a commit allowlist, and a version string would
+    either never match or match by accident.
+    """
+    if package_ref is None:
+        return None
+    build_id, source = build_id_from_package_ref(package_ref)
+    return build_id if source == "package_ref" else None
 
 
 def _render(version: tuple[int, ...]) -> str:
@@ -233,9 +283,29 @@ def main(argv: list[str] | None = None) -> int:
     schema.add_argument("--bootstrap-state", required=True, type=Path)
     schema.add_argument("--manifest", required=True, type=Path)
     schema.add_argument("--team-product", type=Path, action="append", default=[])
-    schema.add_argument("--build-id")
+    schema.add_argument(
+        "--package-ref",
+        help=(
+            "resolved into the build id fed to approved_build_ids; a ref that "
+            "does not pin a commit yields no build id rather than a fake one"
+        ),
+    )
+
+    build_info = sub.add_parser("build-info")
+    build_info.add_argument("--state-dir", required=True, type=Path)
+    build_info.add_argument("--package-ref", required=True)
+    build_info.add_argument("--master-sha", required=True)
+    build_info.add_argument("--installed-at", required=True)
 
     args = parser.parse_args(argv)
+    if args.stage == "build-info":
+        write_build_info(
+            args.state_dir,
+            package_ref=args.package_ref,
+            master_sha=args.master_sha,
+            installed_at=args.installed_at,
+        )
+        return 0
     if args.stage == "preflight":
         failure = preflight_probe(args.home)
     else:
@@ -245,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             team_products=[
                 path.read_text(encoding="utf-8") for path in args.team_product
             ],
-            build_id=args.build_id,
+            build_id=_probe_build_id(args.package_ref),
         )
     if failure is not None:
         print(str(failure), file=sys.stderr)
