@@ -96,7 +96,19 @@ output_scanner_thresholds:
   # with no whitespace), not over the whole string: measured whole, ordinary
   # English prose sits near 4 bits per character and would always fire.
   high_entropy_min_length: 32
-  high_entropy_min_bits_per_char: 3.5
+  # 4.1 bits per character sits in the gap between two measured populations.
+  # Lowercase hex cannot exceed 4.0 by construction and, sampled over sha1 /
+  # sha256 / md5 digests, tops out near 3.94; base64 of random bytes starts
+  # near 4.22. Digests are not optional traffic here -- this system mints a
+  # 40-character commit sha into every prompt and every citation -- so a
+  # threshold below 4.0 refuses every real run, and a gate that refuses
+  # everything is a gate that gets switched off.
+  #
+  # The residual is a hex-encoded secret, which is exempt at this threshold.
+  # The 25 vendor patterns above match those by their own shape, and this
+  # project's credentials never reach an artifact by construction: they are
+  # read by key name into a process environment and are never written.
+  high_entropy_min_bits_per_char: 4.1
 output_scanner_dynamic_rules:
   # Values are injected by the caller at load time, never stored here: writing
   # the real hostname into a tracked file is the leak this rule exists to catch.

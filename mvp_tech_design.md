@@ -1234,6 +1234,22 @@ team 目录 / bundle / CI artifact 之前**没有任何扫描**。叶子侧的 `
    "很长的英文句子 vs 40 字符的密钥"，而按 token（连续的非空白 base64/hex 字符段）
    算每字符熵可以——自然语言的长 token 极少，且英文正文的整体熵会被短词稀释。
 
+   该规则有**两条按形状的豁免**，都不是"信任"，而是"这个度量在这一类上无法判别"：
+
+   - **十六进制摘要**：小写 hex 每字符熵上界就是 4.0，实测 sha1/sha256/md5 摘要
+     落在 3.94 以下，而随机字节的 base64 从 4.22 起步。阈值取 **4.1** 落在两个总体之间。
+     这不是可选流量——系统自己就把 40 位 commit sha 写进**每一条 prompt 与每一条 citation**，
+     阈值低于 4.0 等于拒绝每一次真实运行，而一个永远拒绝的闸门会被整个关掉。
+   - **路径形状**：`/` 属于 base64 字母表，因此 `memories/<category>/<stem>-<rev>.md`
+     整条被当成一个 token，且密度与密钥无异。豁免条件是**两条同时成立**：
+     整体匹配"由 `/` 连接、且不含 `+` 与 `=` 的段"，**且每一段都短于长度阈值**。
+     只判形状会放走带 `/` 的 blob，只判长度会放走任何长路径。
+
+   **残余风险（显式登记，不隐藏）**：hex 编码的密钥、以及恰好被 `/` 切成两段短片段的
+   base64 blob，这两类不会被本规则命中。两者都由上方 25 条厂商 pattern 按**前缀形状**覆盖；
+   且本项目自身的凭据在结构上不会出现在产物里——它们按键名读进进程环境，从不落盘（§5.5.x 凭据规则）。
+   两条残余各有一个**正面固定它们的测试**，避免它们退化为无人知晓的漏洞。
+
 **动态规则的值不进 `version`**（有意为之）：注入值是本机事实（主机名），
 把它折进版本号会让同一份规则在两台机器上产生两个 version，
 录制期与回放期的 bundle 就永远对不上。可见性由 `Ruleset.dynamic_rule_names`
@@ -3218,6 +3234,45 @@ MVP 阶段**这四类故障都允许停服修复**；更强的自动恢复与租
 
 当前文档的 **MVP-ready** 仅指"受信任小集群内的可落地基线"，至少完成上表 S1 / S2 / S5 / S6 / S7。若面向不受信任贡献者、对外环境或更高安全要求，必须再补齐上表 S3 / S4 的强化项，才能视为生产可用。
 
+### 9.10 Golden 输入仓（`tests/fixtures/golden_repo/`）
+
+离线回归需要两样东西：一个录好的 bundle（§9.2）与一个**可复现的输入仓**。
+bundle 只记录 LLM 调用，重放时仍要 fetch 远端、读叶子分支、跑聚类、组装请求；
+输入仓一变，组装出的 prompt 就变，strict 比对的四元组随之 miss。
+因此 golden 输入仓必须**现造现用且逐 commit 可复现**。
+
+**形态**：`tests/fixtures/golden_repo/build_repo.py --out <dir>` 在临时目录里
+现场构建，**构好的 `.git` 不入库**。产出两件东西：
+
+- `<dir>` —— 一个普通工作克隆，直接作为 `memory-net-distiller run --repo <dir>`；
+- `<dir>.remote.git` —— 同级的 bare remote，`<dir>` 的 `origin` 指向它。
+  bare remote 必须与工作克隆分离（一个目录不能同时是二者），
+  放在同级而不是 `<dir>` 内部，是为了让 `--repo` 与 `--out` 取同一个值。
+
+**入库的只有输入资产（9 个）**：`leaves/{auth_retry,deploy_window,search_index}.json`、
+`manifest.json`、`bootstrap.json`、`config/distill.deepseek.yaml`、
+`config/redaction_patterns.yaml`、`prompts/distill_system.md`、`prompts/distill_user.md`。
+叶子记录一律是**合成的中性内容**，不含任何真实个人记忆、真实主机名、家目录绝对路径或凭据。
+
+**commit sha 可复现**的构成条件（缺一条即不成立）：固定的 author/committer 身份与
+`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`、固定的文件模式位、固定的写入顺序、
+以及**记录派生量本身可复现**——`revision_hash` 取正文哈希、`report_fingerprint`
+取一份 `stable_json` 载荷的哈希，两者都不含时钟。测试把 master 与三条叶子分支的
+sha 作为常量断言：sha 一漂移，golden bundle 就已经作废，这条断言就是它的告警。
+
+**profile 同名同路径**：仓内生产 profile 的路径必须是 `config/distill.deepseek.yaml`，
+与主仓 §8.3 的生产 profile 一致。理由是 `--config` 取的是**仓内相对路径**并从冻结快照
+`git show` 读出（§5.5.5），两处不同名就意味着同一个 `--config` 取值在两个仓里指向不同文件。
+测试断言两份 YAML 在运行相关字段上完全相等（`profile_class` / `llm.provider` /
+`llm.model` / `llm.max_tokens` / `llm.pricing.*` / `clustering.*` / `output_scanner.*`），
+只允许 `llm.budget_usd` 与 prompt 路径不同。
+
+**离线依赖预检**：profile 引用的**一切**仓相对资源都必须在冻结快照里可 `git show`——
+不只是 `prompts/*`，还包括 `output_scanner.patterns_path` 指向的规则文件。
+builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + 两份 prompt），
+任一缺失即失败。把这条放在 builder 里而不是留给运行期，是因为运行期发现缺失时
+一次 live 录制已经开始付费了。
+
 ## 10. Sandbox 与权限兼容
 
 实现者必须遵守：
@@ -4096,3 +4151,23 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   输出约束，不能承担把不可信叶子记录喂给模型的生产职责；而它此前既无超时也无进程组管理，
   被桥接拉起的孙进程会在蒸馏侧放弃后继续消耗额度并继续写状态。
 - Change time: 2026-08-03
+
+## Change Record - 2026-08-11 golden 输入仓
+
+- Change summary: 新增 §9.10，定义 `tests/fixtures/golden_repo/` 的形态（builder 现造现用、
+  `.git` 不入库、bare remote 与工作克隆分列同级）、9 个入库资产、commit sha 可复现的构成条件、
+  fixture profile 与主仓生产 profile 同名同路径的理由，以及 build 后的离线依赖预检。
+- Change reason: 录制好的 bundle 只覆盖 LLM 调用，重放仍要读叶子分支并重新组装 prompt；
+  输入仓不可复现时 strict 比对的四元组会漂移，离线回归实际上不成立。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 输出 scanner 熵规则的两条形状豁免
+
+- Change summary: §5.5.8 的 `high_entropy_blob` 增加两条按形状的豁免（十六进制摘要、
+  路径形状），`high_entropy_min_bits_per_char` 由 3.5 提高到 4.1，并显式登记两条残余风险。
+- Change reason: 规则原样运行会在**每一次真实运行**上命中——模型 prompt 是一整段扁平文本，
+  其中天然含 40 位 commit sha（每字符熵 3.7–3.83）与仓相对路径（`/` 属 base64 字母表，
+  整条路径被当成一个高密度 token）。以合成 fixture 仓实测：单次出站 prompt 命中 20 次，
+  运行在 recorder 的出站闸处直接失败。阈值取 4.1 是因为实测两个总体不重叠
+  （hex 摘要 ≤3.94，随机字节 base64 ≥4.22）。
+- Change time: 2026-08-11

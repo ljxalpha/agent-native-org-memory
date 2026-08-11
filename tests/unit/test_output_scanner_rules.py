@@ -35,6 +35,8 @@ HOSTNAME = "build-box" + "." + "local"
 
 REAL_SHA = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 SHORT_SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+BASE64_BLOB = "c2VjcmV0LXZhbHVlLXRoYXQtaXMtbm90LWEtZGlnZXN0="
+BASE64_BLOB_UNPADDED = "U29tZVJhbmRvbUJ5dGVzWHlaMTIzNDU2Nzg5MA"
 
 
 @pytest.fixture()
@@ -106,10 +108,61 @@ def test_high_entropy_blob_fires_on_prose_and_is_exempt_on_structural(
     ruleset: Ruleset,
 ) -> None:
     """The false-positive test the field typing exists for."""
-    for value in (REAL_SHA, SHORT_SHA):
+    for value in (BASE64_BLOB, BASE64_BLOB_UNPADDED):
         prose_hits = scan(value, field_kind=PROSE, ruleset=ruleset)
         assert HIGH_ENTROPY_RULE in _rules(prose_hits)
         assert scan(value, field_kind=STRUCTURAL, ruleset=ruleset) == []
+
+
+def test_digests_do_not_trip_the_entropy_rule_even_as_prose(
+    ruleset: Ruleset,
+) -> None:
+    """Hex digests are below the threshold, not merely exempt by field name.
+
+    A commit sha reaches the model inside the rendered prompt, which is one
+    flat string: there is no key there to type it ``structural`` by. Firing on
+    it would refuse every real run.
+    """
+    for value in (REAL_SHA, SHORT_SHA):
+        assert _rules(scan(value, field_kind=PROSE, ruleset=ruleset)) == set()
+
+
+def test_repo_paths_do_not_trip_the_entropy_rule_even_as_prose(
+    ruleset: Ruleset,
+) -> None:
+    """``/`` is in base64's alphabet, so a path is one long dense token."""
+    text = (
+        "see memories/common_knowledge/oauth-retry-a27b0324.md and "
+        "distill_runs/20260810T101010Z-a1b2c3d4/snapshot.json"
+    )
+    assert _rules(scan(text, field_kind=PROSE, ruleset=ruleset)) == set()
+
+
+def test_a_blob_with_a_slash_in_it_is_not_treated_as_a_path(
+    ruleset: Ruleset,
+) -> None:
+    """The length half of the path exemption: a blob segment is blob-sized."""
+    blob = "QUFB/QkJCQ0NDRERFRkZGR0dHSEhISUlJSktLTExMTU1Ndg"
+    assert HIGH_ENTROPY_RULE in _rules(scan(blob, field_kind=PROSE, ruleset=ruleset))
+
+
+def test_the_entropy_rule_states_its_residual_rather_than_hiding_it(
+    ruleset: Ruleset,
+) -> None:
+    """Two shapes this rule knowingly does not catch, pinned so they stay known.
+
+    Neither is a shape this project's own credentials can take: they are read
+    by key name into a process environment and never written to an artifact.
+    Both are covered instead by the vendor patterns, which match a key by its
+    prefix rather than by its density.
+    """
+    hex_encoded_secret = "8f14e45fceea167a5a36dedd4bea2543" * 2
+    assert _rules(scan(hex_encoded_secret, field_kind=PROSE, ruleset=ruleset)) == set()
+
+    blob_split_by_a_slash = "QUFBQkJCQ0NDRERF/RkZGR0dHSEhISUlJSktLTExN"
+    assert (
+        _rules(scan(blob_split_by_a_slash, field_kind=PROSE, ruleset=ruleset)) == set()
+    )
 
 
 def test_ordinary_prose_does_not_trip_the_entropy_rule(ruleset: Ruleset) -> None:

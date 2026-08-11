@@ -79,10 +79,22 @@ HIGH_ENTROPY_RULE = "high_entropy_blob"
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "high_entropy_min_length": 32,
-    "high_entropy_min_bits_per_char": 3.5,
+    # Above what lowercase hex can reach, below what base64 of random bytes
+    # starts at. See the note on the rule file's threshold block for the
+    # measurement this number comes from.
+    "high_entropy_min_bits_per_char": 4.1,
 }
 
 _ENTROPY_ALPHABET = "A-Za-z0-9+/=_-"
+
+_PATH_SHAPED = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+")
+"""A repo-relative path: segments joined by ``/``, and no base64 punctuation.
+
+Every prompt and every artifact this system writes is full of these
+(``memories/<category>/<stem>-<rev>.md``), and measured as one token a path is
+as dense as a key. Excluding ``+`` and ``=`` keeps padded base64 out of the
+shape, and the length condition at the call site keeps a long blob out of it.
+"""
 
 
 class RedactionViolation(RuntimeError):
@@ -508,6 +520,8 @@ def _entropy_hits(
     token_re = re.compile(f"[{_ENTROPY_ALPHABET}]{{{minimum},}}")
     hits: list[RuleHit] = []
     for match in token_re.finditer(text):
+        if _is_path_shaped(match.group(), minimum=minimum):
+            continue
         if _shannon_bits_per_char(match.group()) >= ruleset.min_entropy_bits:
             hits.append(
                 RuleHit(
@@ -518,6 +532,19 @@ def _entropy_hits(
                 )
             )
     return hits
+
+
+def _is_path_shaped(token: str, *, minimum: int) -> bool:
+    """A path only counts as one when no single segment is itself blob-sized.
+
+    Both halves are needed. Without the shape test every long token with a
+    slash in it would be waved through; without the length test a blob that
+    happens to contain a ``/`` would be, because base64's alphabet includes it.
+    A real path segment is a file or directory name, and those are short.
+    """
+    if _PATH_SHAPED.fullmatch(token) is None:
+        return False
+    return all(len(segment) < minimum for segment in token.split("/"))
 
 
 def _shannon_bits_per_char(token: str) -> float:
