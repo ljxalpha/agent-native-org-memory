@@ -119,6 +119,7 @@ class DistillationPipeline:
         )
 
     def run(self, records: list[dict[str, Any]], *, run_id: str) -> DistillationOutput:
+        run_id = self._checked_run_id(run_id)
         system_prompt = self.system_prompt_path.read_text(encoding="utf-8")
         template = self.user_prompt_path.read_text(encoding="utf-8")
         clusters = self._cluster_records(records)
@@ -332,15 +333,20 @@ class DistillationPipeline:
         )
 
     def _budget_exhausted(self, estimated_cost_usd: float) -> bool:
-        """The legacy self-accounting gate; used only when no budget is injected.
+        """The post-hoc cost accumulator, kept as a backstop for every lane.
 
-        With ``context.budget`` present this always yields ``False``: the run
-        budget refuses an over-ceiling call itself, inside ``reserve()``, before
-        the request goes out. Keeping a second gate here would mean two copies
-        of the budget rules, free to drift apart, deciding the same question.
+        This deliberately stays active even when ``context.budget`` is injected.
+        A ``RunBudget`` only constrains providers that actually call
+        ``reserve()`` -- today just the production backend -- so switching this
+        off whenever a budget exists would leave the mock, Anthropic and bridge
+        lanes with no ceiling at all. That is precisely the default profile
+        (a mock provider plus a configured ``budget_usd``).
+
+        The two are not duplicates of one rule: the budget is the *pre-call*
+        ceiling that stops an over-ceiling request from being issued, while this
+        is an *after the fact* accumulator over observed usage. They are
+        computed from the same profile pricing, so they agree.
         """
-        if self.run_budget is not None:
-            return False
         if self.cost_budget_usd is None:
             return False
         return estimated_cost_usd >= self.cost_budget_usd
@@ -353,6 +359,24 @@ class DistillationPipeline:
         """The run's clock: injected identity first, wall clock otherwise."""
         identity = self.context.identity if self.context is not None else None
         return identity.now() if identity is not None else utc_now()
+
+    def _checked_run_id(self, run_id: str) -> str:
+        """With an identity injected, it is the only source of the run id.
+
+        A caller-supplied id that disagrees is a wiring bug, not something to
+        paper over: the two would end up in different artifacts of the same run
+        (the request metadata against the product ids), and the mismatch would
+        only surface much later, in a manifest nobody can reconcile.
+        """
+        identity = self.context.identity if self.context is not None else None
+        if identity is None:
+            return run_id
+        if run_id and run_id != identity.run_id:
+            raise ValueError(
+                f"run_id {run_id!r} conflicts with the injected identity "
+                f"{identity.run_id!r}"
+            )
+        return identity.run_id
 
     def _estimate_response_cost(self, response: LLMResponse) -> float:
         input_tokens = int(response.usage.get("input_tokens", 0))

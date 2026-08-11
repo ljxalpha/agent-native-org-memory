@@ -82,7 +82,9 @@ class DistillOrchestrator:
         # The single injection carrier (§5.5.3). None keeps the pre-injection
         # behaviour: a freshly generated run id and the wall clock.
         self.context = context
-        self._identity: RunIdentity = RunIdentity.system()
+        # Resolved lazily, per run: minting one here would burn a run id at
+        # construction time, which is not what the pre-injection code did.
+        self._identity: RunIdentity | None = None
         self.repo = GitRepo(repo_path, dry_run=dry_run, no_push=no_push)
         self.leaf_refs: dict[str, str] = {}
         self.leaf_health_by_branch: dict[str, dict[str, Any]] = {}
@@ -97,6 +99,8 @@ class DistillOrchestrator:
 
     def _now(self) -> str:
         """This run's clock. Never ``datetime.now`` directly (§5.5.3)."""
+        if self._identity is None:
+            self._identity = self._resolve_identity()
         return self._identity.now()
 
     def run(self) -> OrchestratorResult:

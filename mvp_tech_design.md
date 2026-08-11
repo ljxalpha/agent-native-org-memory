@@ -846,11 +846,18 @@ wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直�
 - `context.identity` 存在时，`run_id` 与所有时间戳（`generated_at` / `updated_at` /
   `snapshot.json` 的时间字段）**全部**取自它。`content_hash` 由含 `generated_at` 的正文派生，
   因此只要冻结 identity，两次 run 的产物与 manifest 就逐字节一致。
-- `context.budget` 存在时，pipeline **不再自行累加成本做闸**：额度由 budget 在
-  `reserve()` 里拒绝，pipeline 只负责尊重这个拒绝（捕获 `BudgetExhausted`，
-  把该 cluster 计入 `skipped_clusters`）。这是"单一预算真相源"的实现方式——
-  让 pipeline 自己再算一遍剩余额度，等于把预算规则复制成两份，它们迟早会漂移。
-  `estimated_cost_usd` 仍照常统计并写进 metrics，它只是**观测值**，不再是闸。
+- `context.budget` 存在时，pipeline 捕获 `BudgetExhausted` 并把该 cluster 计入
+  `skipped_clusters`（尊重 budget 的拒绝，不自己再判一次剩余额度）。
+  但**既有的 `cost_budget_usd` 累加闸必须继续生效，不得因为注入了 budget 就关掉**：
+  `RunBudget` 只约束**真的会调 `reserve()`** 的 provider（当前只有生产后端），
+  而 mock / Anthropic / 桥接三条 lane 都不调。一旦"有 budget 就关旧闸"，
+  这三条 lane 就彻底没有上限了——而**发布默认 profile 恰好就是
+  `provider: mock` + 配了 `budget_usd`** 的组合。
+  两者不是同一条规则的两份拷贝：budget 是**调用前**的上界（阻止请求发出），
+  旧闸是**事后**基于已观测 usage 的累加器；二者取自同一份 profile 定价，结论一致。
+- `context.identity` 存在时，它是 run_id 的**唯一**来源。调用方传入的 run_id
+  若与之不符直接抛错：两个 id 会分别落进同一个 run 的不同产物（请求元数据 vs 产物 id），
+  而这种不一致只会在很久之后以"对不上的 manifest"的形式暴露。
 - `context.profile` 的落盘（`snapshot.json` / `metrics.json` 追加
   `profile_path` / `profile_blob_sha256` / `master_snapshot_sha`）与
   `ProfileProvenance` 类型本身同批交付：在生产者存在之前，消费侧只能对着一个
@@ -1768,6 +1775,13 @@ MVP 强校验字段为 `schema_version`、`node_id`、`role`、`status`、
 
 `HEALTH_SCHEMA_VERSION` 保持 `memory-net/health/v1` 不变：这些字段只增不必填，
 既有安装的 `bootstrap_state.json` 协议版本校验不受影响。
+
+校验分两档，由 `validate_health(value, *, require_ops_identity=False)` 的开关选择：
+
+- **宽松档（默认）**：运维身份字段可以缺席；一旦出现，必须是非空字符串，否则 `SchemaError`。
+  既有安装写出的 `.health.json` 在该档下仍然合法（向后兼容）。
+- **严格档（`require_ops_identity=True`）**：七个字段缺一即 `SchemaError`，错误信息列出全部
+  缺失字段名。该档供安装后自检与稳定性巡检等运维路径显式开启。
 
 ### 8.8 `platform.yaml`（平台元信息，兼容替换）
 

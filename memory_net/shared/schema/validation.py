@@ -11,6 +11,18 @@ from memory_net.shared.util.paths import (
 LEAF_MANIFEST_SCHEMA_VERSION = "memory-net/leaf-manifest/v1"
 REPORTED_MEMORY_SCHEMA_VERSION = "memory-net/reported-memory/v1"
 HEALTH_SCHEMA_VERSION = "memory-net/health/v1"
+#: Operational identity keys of ``.health.json`` (mvp_tech_design.md § 8.7.1).
+#: They are additive and never required by the schema version itself, so the
+#: constant above must NOT be bumped when they are added or extended.
+HEALTH_OPS_IDENTITY_FIELDS: tuple[str, ...] = (
+    "adapter",
+    "install_id",
+    "code_version",
+    "host",
+    "build_id",
+    "config_source_master_sha",
+    "started_at",
+)
 BOOTSTRAP_PROTOCOL_SCHEMA_VERSIONS = {
     "manifest_schema_version": 1,
     "record_frontmatter_schema_version": 1,
@@ -72,7 +84,18 @@ def validate_master_manifest(
         _validate_team_relative_path(str(product["relative_path"]))
 
 
-def validate_health(value: dict[str, Any]) -> None:
+def validate_health(
+    value: dict[str, Any],
+    *,
+    require_ops_identity: bool = False,
+) -> None:
+    """Validate a ``.health.json`` payload.
+
+    Operational identity fields are optional by default so that payloads written
+    before they existed remain valid. Pass ``require_ops_identity=True`` for the
+    strict operational lane (post-install self-check, stability soak), where all
+    seven fields must be present.
+    """
     _require_mapping(value, "health")
     schema_version = _require(value, "schema_version", str)
     if schema_version != HEALTH_SCHEMA_VERSION:
@@ -101,6 +124,23 @@ def validate_health(value: dict[str, Any]) -> None:
     for scanner, count in scanner_hits.items():
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise SchemaError(f"scanner_hits[{scanner}] must be non-negative int")
+    _validate_health_ops_identity(value, require=require_ops_identity)
+
+
+def _validate_health_ops_identity(value: dict[str, Any], *, require: bool) -> None:
+    missing = [field for field in HEALTH_OPS_IDENTITY_FIELDS if field not in value]
+    if require and missing:
+        raise SchemaError(
+            "missing required operational identity fields: " + ", ".join(missing)
+        )
+    for field in HEALTH_OPS_IDENTITY_FIELDS:
+        if field not in value:
+            continue
+        item = value[field]
+        if not isinstance(item, str):
+            raise SchemaError(f"{field} must be str")
+        if not item:
+            raise SchemaError(f"{field} must not be empty")
 
 
 def validate_owner(value: dict[str, Any]) -> None:

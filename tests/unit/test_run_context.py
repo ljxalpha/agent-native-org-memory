@@ -50,6 +50,17 @@ def _record() -> dict[str, str]:
     }
 
 
+class _CountingMock(MockLLMProvider):
+    """A mock that reports whether the gate let a call through."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, request: LLMRequest) -> LLMResponse:
+        self.calls += 1
+        return super().generate(request)
+
+
 def _prompts(tmp_path: Path) -> tuple[Path, Path]:
     system = tmp_path / "system.md"
     user = tmp_path / "user.md"
@@ -81,12 +92,16 @@ def test_a_frozen_identity_makes_two_runs_produce_identical_products(
     identity = RunIdentity(run_id="run-fixed", now=lambda: "2026-01-01T00:00:00Z")
     context = RunContext(identity=identity)
 
-    first = _pipeline(tmp_path, context=context).run([_record()], run_id="run-fixed")
-    second = _pipeline(tmp_path, context=context).run([_record()], run_id="run-fixed")
+    # Deliberately passing a *different* run_id than the identity carries would
+    # raise; passing none lets the identity supply it, which is the contract.
+    first = _pipeline(tmp_path, context=context).run([_record()], run_id="")
+    second = _pipeline(tmp_path, context=context).run([_record()], run_id="")
 
     assert first.products
     assert [p.content for p in first.products] == [p.content for p in second.products]
     assert "2026-01-01T00:00:00Z" in first.products[0].content
+    # The identity supplied the id, not the caller.
+    assert "run-fixed" in first.products[0].frontmatter["distillation_id"]
 
 
 def test_without_a_context_the_pipeline_keeps_its_wall_clock_behaviour(
@@ -100,8 +115,21 @@ def test_without_a_context_the_pipeline_keeps_its_wall_clock_behaviour(
     assert output.products[0].frontmatter["generated_at"].endswith("Z")
 
 
+def test_a_run_id_conflicting_with_the_injected_identity_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """Two ids for one run would land in different artifacts of that run and
+    only surface later, as a manifest nobody can reconcile."""
+    context = RunContext(
+        identity=RunIdentity(run_id="run-a", now=lambda: "2026-01-01T00:00:00Z")
+    )
+
+    with pytest.raises(ValueError, match="conflicts with the injected identity"):
+        _pipeline(tmp_path, context=context).run([_record()], run_id="run-b")
+
+
 # --------------------------------------------------------------------------
-# Budget injection: the run budget is the only gate
+# Budget injection
 # --------------------------------------------------------------------------
 
 
@@ -136,20 +164,41 @@ def test_a_refused_reservation_skips_the_cluster_instead_of_failing_the_run(
     assert output.parse_failures == 0
 
 
-def test_an_injected_budget_disables_the_legacy_self_accounting_gate(
-    tmp_path: Path,
-) -> None:
-    """Two gates deciding the same question is two copies of the budget rules."""
+def test_the_legacy_gate_survives_an_injected_budget(tmp_path: Path) -> None:
+    """A RunBudget only constrains providers that call reserve(). Switching the
+    accumulator off whenever a budget exists would leave the mock, Anthropic and
+    bridge lanes with no ceiling at all -- which is the default profile exactly:
+    a mock provider plus a configured budget_usd.
+    """
     pipeline = _pipeline(
         tmp_path,
         cost_budget_usd=0.0,
         context=RunContext(budget=RunBudget(1.0, 10.0, max_usd=100.0)),
     )
 
-    # cost_budget_usd=0.0 alone would skip every cluster; the injected budget
-    # has headroom, so the run proceeds.
-    assert pipeline._budget_exhausted(999.0) is False
-    assert pipeline.run([_record()], run_id="run").products
+    assert pipeline._budget_exhausted(0.0) is True
+    assert pipeline.run([_record()], run_id="run").skipped_clusters == 1
+
+
+def test_a_mock_lane_under_a_configured_budget_is_still_gated(
+    tmp_path: Path,
+) -> None:
+    """The regression this guards: the shipped default profile pairs
+    provider: mock with budget_usd, and the mock never reserves."""
+    provider = _CountingMock()
+    pipeline = _pipeline(
+        tmp_path,
+        provider=provider,
+        cost_budget_usd=0.0,
+        # Ample headroom, and never consulted: the mock lane never reserves.
+        context=RunContext(budget=RunBudget(1.0, 10.0, max_usd=1000.0)),
+    )
+
+    output = pipeline.run([_record()], run_id="run")
+
+    assert provider.calls == 0, "an exhausted cost budget must stop the call"
+    assert output.products == []
+    assert output.skipped_clusters == 1
 
 
 def test_without_a_context_the_legacy_cost_gate_still_applies(tmp_path: Path) -> None:
