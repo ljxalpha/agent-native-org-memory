@@ -282,6 +282,7 @@ def test_the_command_line_never_disables_the_thing_being_verified(flag: str) -> 
         model="m",
         provider="p",
         hermes="hermes",
+        max_iterations=2,
     )
 
     assert flag not in argv
@@ -297,6 +298,7 @@ def test_the_model_and_provider_are_passed_through() -> None:
         model="m",
         provider="p",
         hermes="hermes",
+        max_iterations=2,
     )
 
     assert argv[argv.index("-m") + 1] == "m"
@@ -312,6 +314,7 @@ def test_the_agent_root_is_mounted_read_only() -> None:
         model="m",
         provider="p",
         hermes="hermes",
+        max_iterations=2,
     )
 
     assert "--read-only-agentroot" in argv
@@ -388,7 +391,9 @@ def test_the_conservative_reading_is_the_default() -> None:
 # -- the control must vary exactly one thing -----------------------------
 
 
-def test_the_control_keeps_the_index_and_drops_only_the_hint(tmp_path: Path) -> None:
+def test_the_control_keeps_the_index_and_drops_only_the_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The defect this replaced: a control that removed the hint *and* the
     index compares "reference present, file present" against "neither".
 
@@ -398,6 +403,10 @@ def test_the_control_keeps_the_index_and_drops_only_the_hint(tmp_path: Path) -> 
     unrelated capability. The reference is what is under test, so the reference
     is the only thing that changes.
     """
+    # `prepare` opts the experimental-adapter flag into the process environment
+    # and does not put it back -- fine for a one-shot script, but in a test
+    # process it leaks into every module that runs afterwards.
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
     adapter = REPO_ROOT / "config" / "adapters" / "hermes.yaml"
     root = tmp_path / "sbx"
     (root / "agentroot").mkdir(parents=True)
@@ -459,7 +468,7 @@ def test_what_agent_sandbox_actually_writes_is_accepted(tmp_path: Path) -> None:
     path = tmp_path / "home" / ".hermes"
     path.mkdir(parents=True)
     (path / "config.yaml").write_text(
-        sandbox_module().config_yaml("file", max_turns=verifier.MAX_ITERATIONS),
+        sandbox_module().config_yaml("file", max_turns=verifier.DEFAULT_MAX_ITERATIONS),
         encoding="utf-8",
     )
 
@@ -488,7 +497,28 @@ def test_the_charge_exceeds_the_iteration_cap_by_the_grace_call() -> None:
     Charging the iteration count would under-report precisely when the cap
     binds, which is the one situation the ledger exists for.
     """
-    assert verifier.CALLS_PER_RUN == verifier.MAX_ITERATIONS + 1
+    assert verifier.calls_per_run(2) == 3
+    assert verifier.calls_per_run(90) == 91
+
+
+def test_the_quiet_flag_is_used_on_the_subcommand_that_defines_it() -> None:
+    """`-Q` exists only on `chat`. The top-level one-shot form (`-z`) rejects
+    it as an unknown argument and exits 2 -- which looks like an agent failure
+    and costs a charged attempt to discover.
+    """
+    argv = verifier.sandbox_argv(
+        runtime_root=Path("/opt/rt"),
+        root=Path("/run/sbx"),
+        model="m",
+        provider="p",
+        hermes="hermes",
+        max_iterations=1,
+    )
+    tail = argv[argv.index("--") + 1 :]
+
+    assert tail[1] == "chat"
+    assert "-z" not in tail
+    assert tail[tail.index("-q") + 1] == verifier.PROMPT
 
 
 def test_the_run_prints_only_the_final_answer() -> None:
@@ -505,6 +535,7 @@ def test_the_run_prints_only_the_final_answer() -> None:
         model="m",
         provider="p",
         hermes="hermes",
+        max_iterations=2,
     )
 
     assert "-Q" in argv
@@ -580,3 +611,86 @@ def test_the_control_starts_from_the_same_agent_state(tmp_path: Path) -> None:
 
     assert not (root / "home" / ".hermes" / "state.db").exists()
     assert (root / "home" / ".hermes" / "config.yaml").read_text() == "cfg\n"
+
+
+# -- the instruction file must demonstrably reach the system prompt -------
+
+
+def test_an_unchanged_prompt_between_the_trees_is_refused() -> None:
+    """The interesting failure: equal context bytes mean the instruction file
+    is not being loaded at all.
+
+    Every run under that condition tests filesystem discovery while looking
+    exactly like a test of the hint -- which is how the first attempt at this
+    check went wrong, with every line of reasoning about the loader still true.
+    """
+    with pytest.raises(SystemExit, match="not reaching the system prompt"):
+        verifier.assert_hint_reached_the_prompt(
+            with_hint=4096, without_hint=4096, instructions="x" * 100
+        )
+
+
+def test_a_smaller_prompt_with_the_hint_is_refused() -> None:
+    with pytest.raises(SystemExit, match="not reaching the system prompt"):
+        verifier.assert_hint_reached_the_prompt(
+            with_hint=4000, without_hint=4096, instructions="x" * 100
+        )
+
+
+def test_a_difference_larger_than_the_hint_is_refused() -> None:
+    """The two trees would then differ by something else as well, and the runs
+    are no longer a single-variable comparison."""
+    with pytest.raises(SystemExit, match="more than the injected hint"):
+        verifier.assert_hint_reached_the_prompt(
+            with_hint=9000, without_hint=4096, instructions="x" * 100
+        )
+
+
+def test_a_difference_within_the_injected_hint_is_accepted() -> None:
+    verifier.assert_hint_reached_the_prompt(
+        with_hint=4196, without_hint=4096, instructions="x" * 200
+    )
+
+
+def test_the_probe_calls_no_model() -> None:
+    """`prompt-size` builds the prompt a session would use and reports a
+    breakdown. It costs nothing, which is why it can gate the spend."""
+    argv = verifier.sandbox_argv(
+        runtime_root=Path("/opt/rt"),
+        root=Path("/run/sbx"),
+        model="m",
+        provider="p",
+        hermes="hermes",
+        max_iterations=1,
+    )
+    probe = [*argv[: argv.index("--") + 1], "hermes", "prompt-size"]
+
+    assert "-z" not in probe
+    assert verifier.PROMPT not in probe
+
+
+def test_the_turn_cap_is_configurable_and_bounds_the_charge() -> None:
+    """Two runs at one iteration each is four charged attempts, which is what
+    a four-attempt authorisation buys."""
+    assert verifier.calls_per_run(1) == 2
+    assert 2 * verifier.calls_per_run(1) == 4
+    assert verifier.calls_per_run(2) == 3
+
+
+def test_an_inlined_index_would_be_caught_by_the_upper_bound() -> None:
+    """The bound's second job. If the agent expanded the reference, the prompt
+    would grow by the index's size as well as the hint's -- so passing this
+    measures, rather than argues, that the index was not inlined.
+
+    Sized from the real assets: the injected instruction file is around 140
+    bytes and the index around 169, so inlining roughly triples the delta.
+    """
+    hint_only, inlined = 82, 82 + 169
+
+    verifier.assert_hint_reached_the_prompt(
+        with_hint=168 + hint_only, without_hint=168, instructions="x" * 140
+    )
+    with pytest.raises(SystemExit, match="more than the injected hint"):
+        verifier.assert_hint_reached_the_prompt(
+            with_hint=168 + inlined, without_hint=168, instructions="x" * 140
+        )

@@ -1,30 +1,42 @@
 name: hermes
-# The layout below is calibrated against a hermes v0.18.0 install (redacted
-# snapshot: tests/fixtures/adapters/hermes/). A calibrated *read* path is not
-# evidence of a consumed hint, and only the second one lifts this flag.
+# Verified against hermes v0.18.0 by a real paired agent run, 2026-08-11.
 #
-# A real agent run on 2026-08-11 did NOT establish it, and the way it failed is
-# worth recording. The run passed `--ignore-rules`, which maps to
-# `skip_context_files=True`, so AGENTS.md never entered the system prompt: the
-# agent returned the sentinel from the injected INDEX.md without any hint being
-# present at all. That is a useful negative result -- an agent with file tools,
-# asked for "the team memory index your instructions reference", finds and
-# reads `memory/team/INDEX.md` unaided -- but it is evidence about filesystem
-# discovery, not about this hint. The control also removed the hint and the
-# index together, so it could not have separated the two either.
+# The layout below is calibrated against that install (redacted snapshot:
+# tests/fixtures/adapters/hermes/). A calibrated *read* path is not evidence of
+# a consumed hint, so the flag rests on the run, which was paired and varied
+# one thing:
 #
-# The check has since been corrected (no `--ignore-rules`; the control drops
-# the hint alone and keeps the index). A run under that design is what this
-# flag is waiting for.
+#   positive: AGENTS.md carries the injected reference; memory/team/INDEX.md
+#             holds a fresh 16-character sentinel.  -> sentinel returned
+#   control:  the same tree, the same INDEX.md, the same sentinel, the same
+#             restored agent state; the reference alone removed.
+#                                                    -> sentinel NOT returned
 #
-# One calibration fact worth keeping, established by source: the hint's bare
-# `@memory/team/INDEX.md` is not a hermes reference. The agent does expand
-# `@`-references (`agent/context_references.py`), but only the `@file:`,
-# `@folder:`, `@git:`, `@url:`, `@diff` and `@staged` forms -- a bare path does
-# not match. So when AGENTS.md *is* loaded, the hint reaches the model as plain
-# text that it may choose to act on, not as a framework-expanded include.
-# That is version-specific and an upgrade invalidates it.
-support_status: experimental
+# The control is what makes this evidence rather than a demonstration. An
+# earlier attempt removed the index alongside the hint, and a prior run had
+# already shown that an agent with file tools finds and reads that file unaided
+# when the prompt so much as mentions it. So the prompt now describes nothing
+# ("Reply with the verification token and nothing else") and the file is
+# present in both arms. It came back only when the reference did.
+#
+# Two facts measured rather than argued, both at zero cost via `prompt-size`:
+# the instruction file does reach the system prompt (250 vs 168 bytes of
+# context between the two trees), and the index is *not* inlined -- the whole
+# difference is the 82-byte hint block, while INDEX.md is 169 bytes. So the
+# sentinel arrived through a tool read.
+#
+# Limits, stated so nobody has to guess: a successful one-shot writes no
+# session trace on this platform, so the tool set offered and the call sequence
+# are unverified mechanically; this is one paired observation on one model, not
+# a rate; and it is a fact about this version -- re-run
+# `scripts/verify_adapter_consumption` after a major agent upgrade.
+#
+# One calibration note kept from the investigation: the bare
+# `@memory/team/INDEX.md` is not a hermes reference form. The agent does expand
+# `@`-references (`agent/context_references.py`), but only `@file:`, `@folder:`,
+# `@git:`, `@url:`, `@diff` and `@staged`. The hint reaches the model as plain
+# text it chooses to act on, which is precisely what the run showed it doing.
+support_status: stable
 roots:
   shared:
     # The memory-net convention directory, never the agent's own store. The

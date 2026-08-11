@@ -309,29 +309,32 @@ def test_the_hermes_fixture_carries_no_real_content(tmp_path: Path) -> None:
         assert "@" not in text.replace("@memory/team/INDEX.md", "")
 
 
-def test_hermes_stays_experimental_and_says_what_is_still_missing() -> None:
-    """A real agent run on 2026-08-11 did not establish consumption, twice over:
-    it passed `--ignore-rules`, so AGENTS.md never reached the system prompt,
-    and its control removed the hint and the index together.
+def test_hermes_is_stable_only_alongside_the_evidence_and_its_limits() -> None:
+    """Promoted on a paired real agent run, 2026-08-11.
 
-    The status is a claim to an integrator, so the file has to carry what was
-    tried and why it did not count. Pinned here because "we ran it against a
-    real agent" is exactly the kind of statement that gets rounded up into "and
-    it worked".
+    The status is a claim to an integrator, and the file has to carry what
+    makes it checkable: the control that turns a demonstration into evidence,
+    the two zero-cost measurements, and the limits. Pinned because "we ran it
+    against a real agent" is exactly the sentence that gets rounded up -- an
+    earlier attempt at this promotion was rounded up, and was wrong.
     """
     raw = (ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8")
     config = yaml.safe_load(raw)
     # Comment text is line-wrapped, so it is joined before matching: an
-    # assertion that a reflow can break would get "fixed" by deleting it.
+    # assertion a reflow can break would get "fixed" by deleting it.
     text = " ".join(line.lstrip("# ") for line in raw.splitlines())
 
-    assert config["support_status"] == "experimental"
-    # Why the run did not establish consumption, in both of its ways.
-    assert "skip_context_files=True" in text
-    assert "removed the hint and the index together" in text
-    # The calibration fact the run did leave behind.
-    assert "a bare path does not match" in text
-    assert "an upgrade invalidates" in text
+    assert config["support_status"] == "stable"
+    # The control, which is the part that makes it evidence.
+    assert "the reference alone removed" in text
+    assert "sentinel NOT returned" in text
+    # The two things measured rather than argued.
+    assert "does reach the system prompt" in text
+    assert "is *not* inlined" in text
+    # And the limits.
+    assert "writes no session trace" in text
+    assert "one paired observation on one model" in text
+    assert "after a major agent upgrade" in text
 
 
 def test_the_other_calibrated_adapters_are_still_experimental() -> None:

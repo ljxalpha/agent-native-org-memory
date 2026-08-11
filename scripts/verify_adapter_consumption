@@ -52,7 +52,7 @@ from memory_net.shared.adapters import FileSystemMdAdapter
 
 SANDBOX = Path(__file__).resolve().parent / "agent_sandbox"
 
-MAX_ITERATIONS = 2
+DEFAULT_MAX_ITERATIONS = 2
 """Tool-calling iterations one agent invocation may make.
 
 An agent in a tool loop decides how many times it calls a model, and nothing
@@ -61,15 +61,22 @@ budget for this check is a hope. Two is the minimum that can succeed: one call
 to decide on the read, one to answer with what came back.
 """
 
-CALLS_PER_RUN = MAX_ITERATIONS + 1
-"""Wire requests one invocation can make, which is *not* the iteration cap.
 
-On exhausting its iteration budget the agent makes one further, toolless
-request to summarise (`agent/turn_finalizer.py`), so N iterations permit N+1
-requests. Charging the iteration count would have under-counted every capped
-run -- the direction that makes a ledger useless, since it under-reports
-exactly when the cap binds.
-"""
+def calls_per_run(max_iterations: int) -> int:
+    """Wire requests one invocation can make, which is *not* the iteration cap.
+
+    On exhausting its iteration budget the agent makes one further, toolless
+    request to summarise (`agent/turn_finalizer.py`), so N iterations permit
+    N+1 requests. Charging the iteration count would under-count every capped
+    run -- the direction that makes a ledger useless, since it under-reports
+    exactly when the cap binds.
+
+    This bounds the error-free, non-delegating path only. Retries inside one
+    iteration do not advance the iteration counter, and nothing here interposes
+    on egress, so the figure is an upper-bound claim rather than a bill.
+    """
+    return max_iterations + 1
+
 
 FILE_TOOLSET = ("read_file", "search_files", "patch", "write_file")
 """What the ``file`` toolset offers, measured. It includes write tools, which is
@@ -119,6 +126,7 @@ def sandbox_argv(
     model: str,
     provider: str,
     hermes: str,
+    max_iterations: int,
 ) -> list[str]:
     """The full command line for one verification run.
 
@@ -152,10 +160,14 @@ def sandbox_argv(
         "--read-only-agentroot",
         # The only structural bound on this run's cost.
         "--limit",
-        f"HERMES_MAX_ITERATIONS={MAX_ITERATIONS}",
+        f"HERMES_MAX_ITERATIONS={max_iterations}",
         "--",
         hermes,
-        "-z",
+        # `chat -q` rather than the top-level `-z`: they are both one-shot, but
+        # `-Q` is defined only on this subparser, and the top-level form
+        # rejects it as an unknown argument.
+        "chat",
+        "-q",
         PROMPT,
         "-m",
         model,
@@ -216,13 +228,15 @@ the budget rather than a nicety: a delegation tool starts child agents whose
 iteration budgets are their own and much larger.
 """
 
-_REMEDY = (
-    "sandbox is not configured for this check; re-run "
-    f"`agent_sandbox up --toolset file --max-turns {MAX_ITERATIONS}`"
-)
+
+def _remedy(max_iterations: int) -> str:
+    return (
+        "sandbox is not configured for this check; re-run "
+        f"`agent_sandbox up --toolset file --max-turns {max_iterations}`"
+    )
 
 
-def assert_turn_cap(root: Path) -> None:
+def assert_turn_cap(root: Path, max_iterations: int = DEFAULT_MAX_ITERATIONS) -> None:
     """Refuse to start unless the sandbox config carries the cap and the toolset.
 
     Both live in a file written by a *previous* command
@@ -237,22 +251,61 @@ def assert_turn_cap(root: Path) -> None:
     """
     config = root / "home" / ".hermes" / "config.yaml"
     if not config.is_file():
-        raise SystemExit(_REMEDY)
+        raise SystemExit(_remedy(max_iterations))
     try:
         loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
     except (yaml.YAMLError, OSError, UnicodeDecodeError):
         # Not chained: PyYAML's diagnostics quote the offending source line.
-        raise SystemExit(_REMEDY) from None
+        raise SystemExit(_remedy(max_iterations)) from None
     if not isinstance(loaded, Mapping):
-        raise SystemExit(_REMEDY)
+        raise SystemExit(_remedy(max_iterations))
     agent = loaded.get("agent")
     turns = agent.get("max_turns") if isinstance(agent, Mapping) else None
-    if not isinstance(turns, int) or isinstance(turns, bool) or turns != MAX_ITERATIONS:
-        raise SystemExit(_REMEDY)
+    if not isinstance(turns, int) or isinstance(turns, bool) or turns != max_iterations:
+        raise SystemExit(_remedy(max_iterations))
     toolsets = loaded.get("platform_toolsets")
     offered = toolsets.get("cli") if isinstance(toolsets, Mapping) else None
     if offered != REQUIRED_TOOLSET:
-        raise SystemExit(_REMEDY)
+        raise SystemExit(_remedy(max_iterations))
+
+
+CONTEXT_SECTION = "context (AGENTS.md/cwd files)"
+"""The prompt-size section that carries the instruction file.
+
+Named by the agent itself (`hermes_cli/prompt_size.py`), which is why it is
+matched rather than reconstructed.
+"""
+
+
+def context_bytes(argv: Sequence[str], *, hermes: str) -> int:
+    """Bytes the instruction file contributes to the system prompt, measured.
+
+    `hermes prompt-size` builds the very prompt a session would use and reports
+    a per-section breakdown. It calls no model, so this costs nothing and can
+    run on both trees.
+
+    This is the answer to "did AGENTS.md actually reach the system prompt". The
+    alternative was to reason from the loader's source and call that evidence,
+    which is exactly how the first attempt at this check went wrong: a flag was
+    switching the injection off while every line of reasoning about it stayed
+    true.
+    """
+    probe = [
+        *argv[: argv.index("--") + 1],
+        hermes,
+        "prompt-size",
+        "--platform",
+        "cli",
+        "--json",
+    ]
+    result = subprocess.run(probe, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise SystemExit("could not measure the system prompt; see the sandbox")
+    breakdown = json.loads(result.stdout)
+    for label, _chars, byts in breakdown["sections"]:
+        if label == CONTEXT_SECTION:
+            return int(byts)
+    raise SystemExit(f"prompt-size reported no {CONTEXT_SECTION!r} section")
 
 
 def snapshot_home(root: Path, destination: Path) -> Path:
@@ -270,6 +323,35 @@ def restore_home(root: Path, pristine: Path) -> None:
     """
     shutil.rmtree(root / "home")
     shutil.copytree(pristine, root / "home")
+
+
+def assert_hint_reached_the_prompt(
+    *, with_hint: int, without_hint: int, instructions: str
+) -> None:
+    """The two trees' prompts must differ by the hint, and by nothing else.
+
+    An equality would be the interesting failure: it means the instruction file
+    is not being loaded, and every run under it tests filesystem discovery
+    while looking like a test of the hint.
+
+    The upper bound does a second job. If the agent expanded the reference and
+    pulled the index into the prompt, the difference would exceed the injected
+    hint by roughly the index's own size -- so a run that passes this has
+    measured, rather than argued, that the index was not inlined. Any sentinel
+    that comes back afterwards came through a tool.
+    """
+    if with_hint <= without_hint:
+        raise SystemExit(
+            "the instruction file is not reaching the system prompt "
+            f"({with_hint} vs {without_hint} bytes); the check cannot observe "
+            "a hint being followed"
+        )
+    injected = len(instructions.encode("utf-8"))
+    if with_hint - without_hint > injected:
+        raise SystemExit(
+            "the two prompts differ by more than the injected hint "
+            f"({with_hint - without_hint} bytes); the runs are not comparable"
+        )
 
 
 def session_files(root: Path) -> list[str]:
@@ -302,7 +384,9 @@ def trace_lines(root: Path, names: Sequence[str]) -> list[str]:
     return []
 
 
-def run_once(argv: Sequence[str], *, ledger: AttemptLedger, run_id: str) -> str:
+def run_once(
+    argv: Sequence[str], *, ledger: AttemptLedger, run_id: str, calls: int
+) -> str:
     """One agent invocation, charged to the project ledger before it starts.
 
     Charged at the cap rather than at the actual call count, and charged up
@@ -311,7 +395,7 @@ def run_once(argv: Sequence[str], *, ledger: AttemptLedger, run_id: str) -> str:
     counting after the money was spent. Over-counting is the safe direction:
     the ledger exists to stop a runaway, not to bill accurately.
     """
-    for index in range(CALLS_PER_RUN):
+    for index in range(calls):
         attempt = ledger.reserve(
             kind="agent_run",
             run_id=run_id,
@@ -343,6 +427,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=None)
     # Only from evidence about the agent under test. See ConsumptionEvidence.
     parser.add_argument("--inlining-ruled-out", default="", metavar="REASON")
+    parser.add_argument(
+        "--max-turns", type=int, default=DEFAULT_MAX_ITERATIONS, metavar="N"
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     command = sandbox_argv(
@@ -351,13 +438,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         model=args.model,
         provider=args.provider,
         hermes=args.hermes,
+        max_iterations=args.max_turns,
     )
     if args.dry_run:
         print(json.dumps({"argv": command, "prompt": PROMPT}, indent=2))
         return 0
 
     ledger = AttemptLedger()
-    needed = 2 * CALLS_PER_RUN
+    calls = calls_per_run(args.max_turns)
+    needed = 2 * calls
     if ledger.remaining() < needed:
         raise SystemExit(
             f"refusing to start: {needed} attempts are needed and "
@@ -365,22 +454,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     run_id = f"verify-{new_sentinel()[:8]}"
 
-    assert_turn_cap(args.root)
+    assert_turn_cap(args.root, args.max_turns)
     pristine = snapshot_home(args.root, args.root / "pristine-home")
 
     sentinel = new_sentinel()
     index_text, instructions = prepare(
         args.root, adapter_path=args.adapter, sentinel=sentinel, inject_hint=True
     )
+    # Measured before spending anything: if the hint is not in the prompt there
+    # is nothing to test, and the first attempt at this check failed exactly
+    # there while looking entirely healthy.
+    with_hint = context_bytes(command, hermes=args.hermes)
+
     before = session_files(args.root)
-    positive = run_once(command, ledger=ledger, run_id=run_id)
+    positive = run_once(command, ledger=ledger, run_id=run_id, calls=calls)
     after = session_files(args.root)
 
     # Same tree, same index, same sentinel, same agent state -- only the hint
     # is gone.
     restore_home(args.root, pristine)
     prepare(args.root, adapter_path=args.adapter, sentinel=sentinel, inject_hint=False)
-    control = run_once(command, ledger=ledger, run_id=run_id)
+    without_hint = context_bytes(command, hermes=args.hermes)
+    assert_hint_reached_the_prompt(
+        with_hint=with_hint, without_hint=without_hint, instructions=instructions
+    )
+    control = run_once(command, ledger=ledger, run_id=run_id, calls=calls)
 
     verdict = verify_consumption(
         ConsumptionEvidence(
