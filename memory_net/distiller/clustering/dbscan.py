@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 from memory_net.distiller.clustering.policy import (
     FASTEMBED,
     TEST_CHEAP,
@@ -30,20 +28,22 @@ def cluster_vectors(
     """
     if not vectors:
         return []
-    if _backend(policy) == TEST_CHEAP:
+    # No policy means no decision was made, and the stand-in is the only safe
+    # reading of that: running real DBSCAN over vectors of unknown provenance
+    # would be a guess. This module reads no environment variable -- doing so
+    # would be a second, independent decision (§5.5.7).
+    if policy is None or policy.backend == TEST_CHEAP:
         return [0 for _ in vectors]
     try:
         from sklearn.cluster import DBSCAN
     except ImportError as exc:
-        if policy is not None:
-            # A policy naming fastembed selected the real stack. Collapsing
-            # every record into one cluster instead would hand the model a
-            # single undifferentiated blob and still report a successful run.
-            raise RuntimeError(
-                f"embedding backend {FASTEMBED!r} needs scikit-learn for "
-                f"clustering: {type(exc).__name__}"
-            ) from exc
-        return [0 for _ in vectors]
+        # Reached only with fastembed selected, so the real stack was asked for.
+        # Collapsing every record into one cluster instead would hand the model
+        # a single undifferentiated blob and still report a successful run.
+        raise RuntimeError(
+            f"embedding backend {FASTEMBED!r} needs scikit-learn for "
+            f"clustering: {type(exc).__name__}"
+        ) from exc
     labels = DBSCAN(eps=eps, min_samples=min_samples).fit(vectors).labels_
     normalized = [int(label) for label in labels]
     next_noise_label = (max(normalized) + 1) if normalized else 0
@@ -55,14 +55,3 @@ def cluster_vectors(
         result.append(next_noise_label)
         next_noise_label += 1
     return result
-
-
-def _backend(policy: EmbeddingPolicy | None) -> str:
-    if policy is not None:
-        return policy.backend
-    # Deprecated compatibility path, mirroring the embedder's: with no injected
-    # policy the old development switch still decides. Every production path
-    # goes through the policy.
-    if os.environ.get("MEMORY_NET_USE_FASTEMBED") == "1":
-        return FASTEMBED
-    return TEST_CHEAP

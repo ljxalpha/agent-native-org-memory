@@ -6,7 +6,6 @@ backends, and a run with real vectors collapsed into a single cluster reports
 success with entirely ordinary metrics.
 """
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -66,25 +65,16 @@ def test_a_selected_real_backend_without_sklearn_raises(monkeypatch: Any) -> Non
 
 
 # --------------------------------------------------------------------------
-# The deprecated compatibility path
+# No second decision
 # --------------------------------------------------------------------------
 
 
-def test_without_a_policy_the_old_switch_still_decides(monkeypatch: Any) -> None:
-    monkeypatch.delenv("MEMORY_NET_USE_FASTEMBED", raising=False)
+def test_no_policy_falls_back_regardless_of_the_environment(
+    monkeypatch: Any,
+) -> None:
+    """No policy means no decision was made, and the stand-in is the only safe
+    reading of that -- real DBSCAN over vectors of unknown provenance would be
+    a guess."""
+    monkeypatch.setenv("MEMORY_NET_USE_FASTEMBED", "1")
 
     assert cluster_vectors(CHEAP_VECTORS) == [0, 0, 0]
-
-
-def test_the_embedding_switch_is_read_in_exactly_one_module_per_role() -> None:
-    """Each of the two roles keeps one deprecated read, and only one. A third
-    read anywhere reopens the disagreement this policy exists to close."""
-    clustering = Path(cluster_vectors.__module__.replace(".", "/")).parent
-    hits = sorted(
-        path.name
-        for path in (Path.cwd() / clustering).glob("*.py")
-        if 'os.environ.get("MEMORY_NET_USE_FASTEMBED")'
-        in path.read_text(encoding="utf-8")
-    )
-
-    assert hits == ["dbscan.py", "embedder.py"]

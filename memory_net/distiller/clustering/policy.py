@@ -70,6 +70,21 @@ class EmbeddingPolicy:
         )
         return cls(backend=narrowed, model_name=model_name)
 
+    @classmethod
+    def from_environment(cls) -> EmbeddingPolicy:
+        """The deprecated development switch, read exactly once.
+
+        Kept only so a caller that predates the policy still behaves as it did.
+        Reading it here, at construction, rather than at each use is the whole
+        point: a value re-read later can differ from the one the vectors were
+        produced under.
+        """
+        import os
+
+        if os.environ.get("MEMORY_NET_USE_FASTEMBED") == "1":
+            return cls(backend=FASTEMBED)
+        return cls(backend=TEST_CHEAP)
+
     @property
     def test_only(self) -> bool:
         """Whether this run's vectors are the stand-in rather than real ones."""

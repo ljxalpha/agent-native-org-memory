@@ -1145,7 +1145,11 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 2. `test-cheap` 保持既有的"确定性单簇回落"行为不变：CI 的 hermetic 性依赖它。
 
 未传 policy 的兼容路径保留 `MEMORY_NET_USE_FASTEMBED` 作为**开发便利开关**并标注 deprecated，
-使这一步可以独立合并。
+但它现在**只在 `policy.py` 一个地方、且只在 embedder 构造时读一次**，
+读完即固化成一个 policy 对象。原来的写法在每次 `embed()` 里重读：同一个 embedder
+的两批向量可以来自两个不同后端，而中途改环境变量没有任何运行期症状。
+`cluster_vectors()` 则**完全不读**这个变量——它读就是第二处判定，
+正是本节要消除的东西；未传 policy 时它一律走确定性单簇回落。
 
 **接线方式：`cluster_vectors()` 的 policy 取自"产出这批向量的那个 embedder"**
 （`pipeline.py` 传 `policy=self.embedder.policy`），而不是再查一次 profile。

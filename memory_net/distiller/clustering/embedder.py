@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from memory_net.distiller.clustering.policy import (
@@ -29,20 +28,27 @@ class FastEmbedder:
         *,
         policy: EmbeddingPolicy | None = None,
     ) -> None:
-        self.policy = policy
+        # Resolved once, here, and never re-read. A policy read at each use can
+        # differ from the one the vectors were produced under, and the clusterer
+        # reads this attribute back to stay in step.
+        self.policy = (
+            policy if policy is not None else EmbeddingPolicy.from_environment()
+        )
+        # Strict only when a policy was actually injected. Without one the
+        # caller predates the policy and keeps its old degrade-on-import-error
+        # behaviour, which is what let this land one step at a time.
+        self.strict = policy is not None
         # An explicit model_name still wins, so the pre-policy call sites keep
         # working unchanged.
-        self.model_name = model_name or (
-            policy.model_name if policy is not None else EmbeddingPolicy().model_name
-        )
+        self.model_name = model_name or self.policy.model_name
 
     def embed(self, texts: list[str]) -> EmbeddingResult:
-        if self._backend() == TEST_CHEAP:
+        if self.policy.backend == TEST_CHEAP:
             return EmbeddingResult(vectors=[_cheap_vector(text) for text in texts])
         try:
             from fastembed import TextEmbedding
         except (ImportError, OSError, RuntimeError) as exc:
-            if self.policy is not None:
+            if self.strict:
                 # A policy naming fastembed is a decision, not a preference.
                 # Falling back would cluster three-dimensional word counts with
                 # DBSCAN parameters tuned for semantic distance: meaningless
@@ -54,18 +60,6 @@ class FastEmbedder:
             return EmbeddingResult(vectors=[_cheap_vector(text) for text in texts])
         model = TextEmbedding(model_name=self.model_name)
         return EmbeddingResult(vectors=[list(vector) for vector in model.embed(texts)])
-
-    def _backend(self) -> str:
-        if self.policy is not None:
-            return self.policy.backend
-        # Deprecated compatibility path, kept only so this change can land on
-        # its own: with no injected policy the old development switch still
-        # decides. Every production path goes through the policy.
-        return (
-            FASTEMBED
-            if os.environ.get("MEMORY_NET_USE_FASTEMBED") == "1"
-            else TEST_CHEAP
-        )
 
 
 def _cheap_vector(text: str) -> list[float]:

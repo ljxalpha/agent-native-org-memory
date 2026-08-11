@@ -65,12 +65,10 @@ def test_the_clusterer_is_handed_the_policy_of_the_embedder_that_made_the_vector
 ) -> None:
     """Resolved from the producer rather than looked up a second time: two
     lookups can disagree, and reading it off the producer cannot."""
+    import memory_net.distiller.pipeline as pipeline_module
     from memory_net.distiller.clustering.embedder import FastEmbedder
 
     seen: list[Any] = []
-    real = cli_module.DistillationPipeline.__module__
-
-    import memory_net.distiller.pipeline as pipeline_module
 
     def spy(vectors: Any, **kwargs: Any) -> list[int]:
         seen.append(kwargs.get("policy"))
@@ -90,7 +88,6 @@ def test_the_clusterer_is_handed_the_policy_of_the_embedder_that_made_the_vector
         user_prompt_path=user,
     ).run([_record()], run_id="run")
 
-    assert real  # the import above is what makes the patch land
     assert seen == [policy]
 
 
