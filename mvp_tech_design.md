@@ -2063,7 +2063,10 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
    同一 cluster 各 sub-prompt 的产物在 render 之前按 `(category, canonical_topic_key)`
    归并：首次出现的标题/摘要/证据/置信度保留，citation 按 `memory_id@revision_hash`
    去重合并，conflicts 追加。归并后整簇只 render 一次，因此不会产生重复 `topic_id`，
-   citation 仍在整簇记录集内逐条反查。
+   citation 仍在整簇记录集内逐条反查。若某个 sub-prompt 因预算被拒（`NotExecuted`），
+   **整簇记 `skipped_budget`**，已成功的前几段产物一并丢弃：把它们 render 出去，
+   等于产出一个证据只覆盖部分簇的产物，而下游无法把它与"整簇蒸馏"区分开——
+   与"一段解析失败即整簇失败"同一条理由。
 2. **singleton / noise fallback lane**（`clustering.singleton_lane.enabled`，默认 `false`）。
    开启后，`size == 1` 的 cluster（DBSCAN 噪声点，`dbscan.py` 已把它们各自编号成独立簇）
    不在主序中就地蒸馏，而是延后到所有多记录 cluster 之后再跑，使预算优先落在真正成簇的
@@ -2082,6 +2085,10 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
    - `soft_max_usd`：一旦已花费+在途预留触及该值，**不再开新簇**，已开的簇跑完；
    - `per_cluster_max_usd`：单簇上界，触顶只跳该簇（记 `skipped_budget`）并继续下一簇，
      不整 run 停。
+   - 三个 USD 上界与两项单价（`input_per_mtok_usd` / `output_per_mtok_usd`）都必须是
+     **有限非负数**：NaN 与任何比较都为假，一个 NaN 单价会让 `cost_of()` 返回 NaN，
+     于是每次 `projected > max_usd` 都不成立——硬上界形同虚设，run 还照样报告自己
+     配了预算。构造期直接拒绝。
    三者优先级 hard > soft > per-cluster，且全部走既有 `RunBudget.reserve()` /
    `Reservation` 三终态机制（新增 `enter_scope()` 只是给同一条计费路径加一层 scope 累计），
    **不新增第二套计费路径**；primary 与 fallback 共用同一 `RunBudget` 实例，不双花。
@@ -2109,6 +2116,10 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
    以及记录级 `input_records == records_cited + records_unclustered`
    （`unclustered.json` 是**记录级**清单，不进簇级等式）。任一不成立即写
    `accounting_mismatch: true`，并让质量闸失败。
+   另有 `accounting_audited`：只有真正做过该对账时才为 `true`。scanner 中途中止的
+   run 天然有簇没有终态，此时**不判定** mismatch，但也不能以 `accounting_mismatch:
+   false` 冒充"账对上了"——`accounting_audited: false` 表示"本次没有对账"，
+   与 `usage_source` 的 provenance 语义同构。
 9. **`--resume <run_id>` 续跑合同**：
    - 复用 `distill_runs/<run_id>/snapshot.json` 的 `master_snapshot_sha`；
      当前 `origin/master` 与快照不一致即**拒绝续跑**（不在漂移的输入上续跑，
@@ -2249,6 +2260,13 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
   携带 stdout 与 stderr 的错误。
 - **PR 正文只能来自 `review_request.json`**（单一真相源），不在此处二次组装。
 
+**resume 的输入边界**：
+- `--resume <run_id>` 只接受 run id 形状（`^[A-Za-z0-9][A-Za-z0-9._-]*$`），
+  且 `distill_runs/<run_id>/` 目录本身、其 `snapshot.json` 与被携带的每个产物
+  文件都**不得是符号链接**，解析后必须仍位于 `distill_runs/<run_id>/` 之内。
+  否则一个名字合法的目录即可把仓外内容引入发布路径——它虽然仍会过 scanner，
+  但不再是"这个仓的上一轮 run"。
+
 **merge gate 与平台保护探针**：
 - `.github/workflows/ci.yml` 的 `merge-gate` job 只在 `pull_request` 且
   `base == master` 且 `head` 匹配 `release/*` 时执行，对 release 分支内容重跑
@@ -2258,6 +2276,11 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
   `distill_runs/*/review_request.json` **缺失即失败**——产物与 manifest 结构合法
   但没有评审记录，正是"评审被绕过"的安静形态。该开关默认关闭，使同一函数也能
   校验本就不产生 review request 的普通树。
+- 该要求**绑定到本次发布的 run**，而不是"目录里有任意一份 request 即可"：
+  release 分支保留历史 `distill_runs/`，只要求"存在某份 request"等于允许新一轮
+  发布靠一份陈旧 request 蒙混过关。因此校验对象是
+  `distill_runs/<manifest.last_run_id>/review_request.json`，且其 `run_id`
+  必须等于 `manifest.json` 的 `last_run_id`。
 - `scripts/validate_shared_pilot_gate.py` 从布尔位检查升级为**配置自洽探针**：
   review gate 开启时要求 `config/platform.yaml` 的
   `branch_protection.master_writers_only` 非空，且 `branch_protection.protected_branch`
@@ -4651,6 +4674,22 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   否则同一次调用会被两套计费路径各扣一次；(b) 不重定义 `clusters_attempted`，
   它的现有语义被 `total_calls` / replay / parse 失败率依赖，改它会连带打穿录制指标；
   (c) 成本调度默认必须关，否则 strict replay 的顺序比对会让 golden bundle 全部 miss。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 调度/续跑/发布闸的五处收紧
+
+- Change summary: (a) `--resume` 除 run id 形状外，还要求 `distill_runs/<run_id>/`
+  目录、其 `snapshot.json` 与每个被携带产物均非符号链接且解析后仍在该目录内。
+  (b) merge gate 的 review request 要求绑定 `manifest.last_run_id`，不再"目录里有
+  任意一份即可"。(c) `RunBudget` 拒绝非有限或负的单价（`input_per_mtok_usd` /
+  `output_per_mtok_usd`），不只是三个 USD 上界。(d) 二次切分中任一 sub-prompt 被
+  预算拒绝时整簇记 `skipped_budget`，已成功的分段产物一并丢弃。(e) metrics 新增
+  `accounting_audited`，中止的 run 不再用 `accounting_mismatch: false` 表示"账对上了"。
+- Change reason: 前四条各自是一个可绕过的等价面：符号链接能把仓外内容送进发布路径；
+  release 分支保留历史 `distill_runs/`，只查"存在某份 request"等于允许旧 request 顶替；
+  NaN 单价让 `cost_of()` 返回 NaN，硬上界的每次比较都为假；部分分段成功即 render，
+  会产出证据只覆盖半个簇却标为 `distilled` 的产物。第五条是 provenance 问题：
+  "没有对账"和"对账通过"必须可区分。
 - Change time: 2026-08-11
 
 ## Change Record - 2026-08-11 M2-004 review gate 产物与 merge gate
