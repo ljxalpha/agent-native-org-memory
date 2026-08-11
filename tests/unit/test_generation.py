@@ -5,6 +5,7 @@ from memory_net.shared.config import (
     materialize_generation,
     subscribe_contract_revision,
 )
+from memory_net.shared.config.generation import GENERATION_MARKER_FILES
 
 
 def test_canonical_generation_hash_maps_config_to_generation_root(
@@ -236,3 +237,69 @@ def _config_tree(root: Path) -> None:
         "name: claude-code\nteam_target: /tmp/team\n",
         encoding="utf-8",
     )
+
+
+def test_markers_under_a_config_source_layout_are_not_hashed(tmp_path: Path) -> None:
+    """A source tree with a ``config/`` dir is walked with rglob, so the marker
+    exclusion has to be explicit there or provenance would enter the hash."""
+    _config_tree(tmp_path)
+    baseline = canonical_generation_hash(tmp_path)
+
+    for marker in GENERATION_MARKER_FILES:
+        (tmp_path / "config" / marker).write_text("x" * 40, encoding="utf-8")
+
+    assert canonical_generation_hash(tmp_path) == baseline
+
+
+def test_markers_under_a_flat_source_layout_are_not_hashed(tmp_path: Path) -> None:
+    """The materialized-generation layout is flat; markers live at its root."""
+    (tmp_path / "adapters").mkdir(parents=True)
+    (tmp_path / "bootstrap_state.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "subscribe.yaml").write_text("a: 1\n", encoding="utf-8")
+    (tmp_path / "adapters" / "claude-code.yaml").write_text(
+        "name: claude-code\n", encoding="utf-8"
+    )
+    baseline = canonical_generation_hash(tmp_path)
+
+    for marker in GENERATION_MARKER_FILES:
+        (tmp_path / marker).write_text("x" * 40, encoding="utf-8")
+
+    assert canonical_generation_hash(tmp_path) == baseline
+
+
+def test_a_nested_file_named_like_a_marker_is_still_hashed(tmp_path: Path) -> None:
+    """Only the root markers are provenance; a nested same-named file is content."""
+    _config_tree(tmp_path)
+    baseline = canonical_generation_hash(tmp_path)
+
+    (tmp_path / "config" / "adapters" / "config_revision").write_text(
+        "content\n", encoding="utf-8"
+    )
+
+    assert canonical_generation_hash(tmp_path) != baseline
+
+
+def test_source_master_sha_marker_write_leaves_no_temporary_file(
+    tmp_path: Path,
+) -> None:
+    """The marker is replaced atomically, so no ``.tmp`` residue may survive."""
+    _config_tree(tmp_path)
+    generations = tmp_path / "generations"
+
+    generation = materialize_generation(
+        tmp_path,
+        generations,
+        adapter_name="claude-code",
+        source_master_sha="a" * 40,
+    )
+    materialize_generation(
+        tmp_path,
+        generations,
+        adapter_name="claude-code",
+        source_master_sha="c" * 40,
+    )
+
+    assert [path.name for path in generation.glob(".*tmp")] == []
+    assert (generation / "config_source_master_sha").read_text(
+        encoding="utf-8"
+    ) == "c" * 40

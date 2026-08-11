@@ -11,6 +11,28 @@ from memory_net.shared.util.hashing import hash_path_bytes
 
 SUBSCRIBER_ADAPTER_FIELDS = ("team_target",)
 
+#: Provenance markers written *next to* a generation's content, never into it.
+#: They record how a generation came to be (its content hash, its subscribe
+#: contract, the master snapshot it was exported from) and therefore must stay
+#: out of :func:`collect_generation_files`: hashing a marker would make one
+#: unchanged config resolve to a different generation directory whenever master
+#: moved, destroying content addressing.
+GENERATION_MARKER_FILES = frozenset(
+    {
+        "config_revision",
+        "subscribe_contract_revision",
+        "config_source_master_sha",
+    }
+)
+
+
+def _is_marker(relative_path: Path) -> bool:
+    """True for a marker file at the root of a generation or source tree."""
+    return (
+        relative_path.parent == Path(".")
+        and relative_path.name in GENERATION_MARKER_FILES
+    )
+
 
 def collect_generation_files(source_root: Path) -> list[tuple[Path, bytes]]:
     pairs: list[tuple[Path, bytes]] = []
@@ -21,8 +43,9 @@ def collect_generation_files(source_root: Path) -> list[tuple[Path, bytes]]:
     config_root = source_root / "config"
     if config_root.exists():
         for path in sorted(config_root.rglob("*")):
-            if path.is_file():
-                pairs.append((path.relative_to(config_root), path.read_bytes()))
+            relative = path.relative_to(config_root)
+            if path.is_file() and not _is_marker(relative):
+                pairs.append((relative, path.read_bytes()))
     else:
         for path in sorted(source_root.glob("*.yaml")):
             pairs.append((path.relative_to(source_root), path.read_bytes()))
@@ -212,13 +235,18 @@ def _write_source_master_sha(generation: Path, source_master_sha: str | None) ->
 
     Absent provenance leaves no marker at all, so generations materialized by
     callers that predate this parameter stay byte-identical.
+
+    A generation is a shared, reusable directory, so this write also lands on
+    generations another process may be reading. It goes through a temporary file
+    and an atomic replace: a concurrent reader sees either the old sha or the
+    new one, never a truncated value.
     """
     if source_master_sha is None:
         return
-    (generation / "config_source_master_sha").write_text(
-        source_master_sha,
-        encoding="utf-8",
-    )
+    marker = generation / "config_source_master_sha"
+    tmp = marker.with_name(f".{marker.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(source_master_sha, encoding="utf-8")
+    tmp.replace(marker)
 
 
 def _quarantine_corrupted_generation(target: Path, *, actual: str) -> Path:
