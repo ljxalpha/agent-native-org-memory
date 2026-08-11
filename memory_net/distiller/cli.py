@@ -21,6 +21,12 @@ from memory_net.distiller.llm.anthropic_sdk import (
 from memory_net.distiller.llm.base import LLMProvider
 from memory_net.distiller.llm.hermes_tool import HermesToolProvider
 from memory_net.distiller.llm.mock import MockLLMProvider
+from memory_net.distiller.llm.openai_compat import (
+    DEFAULT_MODEL as DEFAULT_DEEPSEEK_MODEL,
+)
+from memory_net.distiller.llm.openai_compat import (
+    OpenAICompatProvider,
+)
 from memory_net.distiller.llm.recording import (
     BundleRecorder,
     RecordingProvider,
@@ -28,6 +34,11 @@ from memory_net.distiller.llm.recording import (
 )
 from memory_net.distiller.orchestrator import DistillOrchestrator
 from memory_net.distiller.pipeline import DistillationPipeline
+from memory_net.distiller.runctx import (
+    RunBudget,
+    RunContextBuilder,
+    RunIdentity,
+)
 from memory_net.shared.git_io import GitRepo
 from memory_net.shared.observability import setup_logging
 from memory_net.shared.schema import validate_bootstrap_state
@@ -37,18 +48,21 @@ MOCK_MODEL = "mock-memory-distiller"
 LOGGER = logging.getLogger(__name__)
 
 
-def main(argv: list[str] | None = None) -> int:
-    _enforce_supported_platform()
+PROVIDER_CHOICES = ["mock", "anthropic", "hermes_tool", "deepseek"]
+"""Selectable distillation backends. ``deepseek`` is the production one (§5.3.3);
+``hermes_tool`` is the experimental out-of-process entry point (§5.3.2)."""
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="memory-net-distiller")
     sub = parser.add_subparsers(dest="command", required=True)
+
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--repo", required=True, type=Path)
-    run_parser.add_argument(
-        "--provider", choices=["mock", "anthropic", "hermes_tool"], default=None
-    )
+    run_parser.add_argument("--provider", choices=PROVIDER_CHOICES, default=None)
     run_parser.add_argument(
         "--fallback-provider",
-        choices=["none", "mock", "anthropic", "hermes_tool"],
+        choices=["none", *PROVIDER_CHOICES],
         default=None,
     )
     run_parser.add_argument("--model", default=None)
@@ -70,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--no-push", action="store_true")
     run_parser.add_argument("--eval", dest="eval_fixture", type=Path)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    _enforce_supported_platform()
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -79,10 +99,20 @@ def main(argv: list[str] | None = None) -> int:
         distill_config = _distill_config(args.repo, snapshot_sha)
         provider_name = _provider_name(args, distill_config)
         fallback_name = _fallback_provider_name(args, distill_config)
+        # One assembly, one freeze, before any consumer exists (§5.5.4). The
+        # run id has to precede its consumers: anything named after it could
+        # not be constructed otherwise.
+        context = (
+            RunContextBuilder()
+            .set_identity(RunIdentity.system())
+            .set_budget(_run_budget(distill_config))
+            .freeze()
+        )
         provider, fallback_provider = _build_providers(
-            args, provider_name, fallback_name, distill_config
+            args, provider_name, fallback_name, distill_config, budget=context.budget
         )
         pipeline = DistillationPipeline(
+            context=context,
             provider=provider,
             fallback_provider=fallback_provider,
             system_prompt_path=_resolve_prompt(
@@ -115,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             min_contributors_by_category=_min_contributors_by_category(distill_config),
         )
         result = DistillOrchestrator(
+            context=context,
             repo_path=args.repo,
             pipeline=pipeline,
             dry_run=args.dry_run,
@@ -143,6 +174,8 @@ def _build_providers(
     provider_name: str,
     fallback_name: str,
     config: dict[str, Any],
+    *,
+    budget: RunBudget | None = None,
 ) -> tuple[LLMProvider, LLMProvider | None]:
     """Build the (primary, fallback) providers, sharing record/replay state.
 
@@ -152,34 +185,50 @@ def _build_providers(
     order; the fallback is attached only when one is configured, otherwise a
     recorded primary parse failure with no fallback would consume the next
     cluster's record.
+
+    ``budget`` follows the same rule as the recorder: run-level state exists once
+    and both lanes get that one instance, so the primary cannot spend a ceiling
+    the fallback then spends again.
     """
     if args.replay:
-        replay = _replay_provider(args, provider_name)
+        replay = _replay_provider(args, provider_name, budget=budget)
         if fallback_name == "none":
             return replay, None
         # Share one ordered cursor, but give the fallback lane its own
         # live-on-miss provider (the configured fallback) so allow-live-on-miss
         # misses do not fall through to the primary provider.
         fallback_live = (
-            _base_provider(fallback_name, args.model or _fallback_model(config))
+            _base_provider(
+                fallback_name,
+                args.model or _fallback_model(config),
+                budget=budget,
+            )
             if args.replay_mode == "allow-live-on-miss"
             else None
         )
         return replay, replay.sharing_cursor(fallback_provider=fallback_live)
     recorder = _record_recorder(args)
-    primary = _wrap_record(_base_provider(provider_name, args.model), recorder)
+    primary = _wrap_record(
+        _base_provider(provider_name, args.model, budget=budget), recorder
+    )
     if fallback_name == "none":
         return primary, None
     fallback_model = _fallback_model(config)
     fallback = _wrap_record(
-        _base_provider(fallback_name, args.model or fallback_model), recorder
+        _base_provider(fallback_name, args.model or fallback_model, budget=budget),
+        recorder,
     )
     return primary, fallback
 
 
-def _replay_provider(args: argparse.Namespace, provider_name: str) -> ReplayProvider:
+def _replay_provider(
+    args: argparse.Namespace,
+    provider_name: str,
+    *,
+    budget: RunBudget | None = None,
+) -> ReplayProvider:
     live_on_miss = (
-        _base_provider(provider_name, args.model)
+        _base_provider(provider_name, args.model, budget=budget)
         if args.replay_mode == "allow-live-on-miss"
         else None
     )
@@ -240,7 +289,19 @@ def _fallback_model(config: dict[str, Any]) -> str | None:
     return None
 
 
-def _base_provider(provider_name: str, model: str | None) -> LLMProvider:
+def _base_provider(
+    provider_name: str,
+    model: str | None,
+    *,
+    budget: RunBudget | None = None,
+) -> LLMProvider:
+    """The single provider factory.
+
+    ``budget`` is injected at construction rather than passed per call, so a
+    provider's internal retries do not have to thread it through.
+    """
+    if provider_name == "deepseek":
+        return OpenAICompatProvider(model=model, budget=budget)
     if provider_name == "anthropic":
         return AnthropicSDKProvider(model=model)
     if provider_name == "hermes_tool":
@@ -269,6 +330,8 @@ def _pipeline_model(
         return str(llm["model"])
     if provider_name == "anthropic":
         return DEFAULT_ANTHROPIC_MODEL
+    if provider_name == "deepseek":
+        return DEFAULT_DEEPSEEK_MODEL
     return MOCK_MODEL
 
 
@@ -289,6 +352,23 @@ def _cost_budget_usd(config: dict[str, Any]) -> float | None:
     if isinstance(cost_budget, dict) and cost_budget.get("budget_usd") is not None:
         return float(cost_budget["budget_usd"])
     return None
+
+
+def _run_budget(config: dict[str, Any]) -> RunBudget | None:
+    """The run's shared budget, or None when the profile configures no ceiling.
+
+    Absent configuration must keep the pre-injection behaviour: without a budget
+    the pipeline falls back to its own cost gate rather than silently gaining a
+    new one that nobody asked for.
+    """
+    max_usd = _cost_budget_usd(config)
+    if max_usd is None:
+        return None
+    return RunBudget(
+        input_per_mtok_usd=_input_cost_per_mtok_usd(config),
+        output_per_mtok_usd=_output_cost_per_mtok_usd(config),
+        max_usd=max_usd,
+    )
 
 
 def _input_cost_per_mtok_usd(config: dict[str, Any]) -> float:

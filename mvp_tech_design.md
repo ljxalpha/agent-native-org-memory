@@ -864,6 +864,30 @@ wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直�
 目录名（与 `os.getpid()` 一起保证并发唯一），该值不进入任何产物、manifest 或 metrics。
 白名单按"模块 + 函数"逐条具名，新模块因此无法悄悄混入一处自造 id。
 
+#### 5.5.4 `cli.py`：唯一的装配点
+
+`memory_net/distiller/cli.py` 是**唯一**构造 `DistillationPipeline`、`DistillOrchestrator`
+与 primary/fallback provider 的地方。因此凡是"由 CLI 注入"的东西，落点都在这里：
+
+1. 从冻结的 profile 读出配置后，用 `RunContextBuilder` 收集 `identity` 与 `budget`，
+   `freeze()` 产出唯一的 `RunContext`；
+2. **然后才**构造 provider → pipeline → orchestrator，三者拿到的是同一个实例。
+
+两条由此确立的事实：
+
+- **`run_id` 在 CLI 生成**（`RunIdentity.system()`），不再由 orchestrator 自造。
+  run_id 必须先于消费者存在，否则任何以 run_id 命名的运行期资源都无从构造。
+- **primary 与 fallback 拿到同一个 `RunBudget` 实例**。这与 record 车道里两条 lane
+  共享同一个 `BundleRecorder` 是同一个模式：run 级的东西只能有一份。
+
+`RunBudget` 的定价与上界来自 profile 的 `llm.pricing.*` 与 `llm.budget_usd`。
+**profile 没有配 `llm.budget_usd` 时不构造 budget**（`context.budget` 为 `None`），
+pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就跟今天一样"。
+
+`--provider` / `--fallback-provider` 的取值域新增 `deepseek` → `OpenAICompatProvider`。
+`_base_provider()` 的签名扩为带 `budget` 关键字参数：预算是构造期注入的，
+不是调用期参数，这样 provider 内部的重试无需把它一路传下去。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
