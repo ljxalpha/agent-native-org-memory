@@ -22,6 +22,12 @@ categories:
 clustering:
   eps: 0.5
   min_samples: 2
+  # TEST ONLY. Three-dimensional word counts, no model to load, deterministic
+  # single cluster -- which is what keeps CI hermetic and this profile's runs
+  # free. Stated explicitly rather than left to the default so that reading this
+  # file answers "were these real vectors?"; a production profile is refused
+  # outright if it names this backend. See config/distill.deepseek.yaml.
+  embedding_backend: test-cheap
 category_evidence_rules:
   common_knowledge:
     min_citations: 1

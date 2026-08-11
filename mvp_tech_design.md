@@ -2205,6 +2205,29 @@ llm_review:
 
 ### 8.3 `distill.yaml`（蒸馏规则）
 
+**仓内有两个 profile，用途不同，谁也不能替谁**：
+
+| 文件 | `profile_class` | 用途 | 关键取值 |
+|---|---|---|---|
+| `config/distill.yaml` | 不声明（= development） | 默认 / CI / 本地开发，零额度 | `llm.provider: mock`、`clustering.embedding_backend: test-cheap`（**显式标注 test-only**） |
+| `config/distill.deepseek.yaml` | `production` | 生产蒸馏 | `llm.provider: deepseek`、真实 model id、DeepSeek 量纲 pricing、`fastembed` + 真实模型名、`output_scanner.mode: enforce` |
+
+三条硬规则（由 `tests/unit/test_profile_files.py` 守住）：
+
+1. **生产 profile 里不允许出现 `<…>` 占位值**（`*_template` 键除外——
+   `release/<run_id>` 是运行期替换点，不是没填的空）。带占位值的 profile 会让 run
+   "像配置好了一样"跑起来，而这正是 profile 校验存在的理由。
+2. **pricing 必须是 DeepSeek 量纲**。默认 profile 的 `3.0 / 15.0`（Anthropic 量纲）
+   用在这个端点上会把成本高估一到两个数量级，`budget_exhausted` 因此提前误停；
+   两个价格只用于计算预扣**上界**，所以取值**向上取整**——
+   高估让 run 提前停，低估让 run 在自以为守着上限的情况下超支。
+3. **默认 profile 必须显式写出 `embedding_backend: test-cheap`**。
+   它过去是"什么都不写就落到 test-cheap"，读文件的人无从判断那一跑用的是不是真向量。
+
+生产 profile 的 `llm.model` 取值与 `OpenAICompatProvider` 的默认 model 常量保持一致
+（仓内只有一个生产 model id）；首次 live 运行前需 operator 用端点的 model 列表
+（一次纯 `GET`，不产生 token 计费）确认该 id 仍然有效。
+
 
 ```yaml
 version: 1
