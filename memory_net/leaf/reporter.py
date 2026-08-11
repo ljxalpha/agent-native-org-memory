@@ -65,11 +65,13 @@ def report(
         parameter existed.
     """
     repo_path.mkdir(parents=True, exist_ok=True)
-    _exclude_lock_from_status(repo_path)
     lock_path = repo_path / LOCK_FILE_NAME
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            # Under the lock: two reporters racing on the same clone would
+            # otherwise both find the entry absent and both append it.
+            _exclude_lock_from_status(repo_path)
             return _report_unlocked(
                 repo_path=repo_path,
                 node_id=node_id,
@@ -97,13 +99,24 @@ def _exclude_lock_from_status(repo_path: Path) -> None:
     that also repairs leaf branches created before this call site existed, and
     because a lock file is a property of the working copy, not of the branch.
 
-    Best effort by design: a repository shape without ``.git/info`` (a linked
-    worktree, a submodule) or an unwritable one simply keeps the previous
-    behaviour instead of failing the report here.
+    A linked worktree and a submodule keep ``.git`` as a *file* pointing at the
+    real git directory, so the location is resolved through it rather than
+    assumed; those shapes hit the same dirty-worktree abort as a plain clone and
+    need the same repair. For a linked worktree the rule has to land in the
+    *common* git directory, because that is the only ``info/exclude`` git reads.
+
+    Best effort by design: a repository this cannot resolve, or an unwritable
+    one, keeps the previous behaviour instead of failing the report here.
     """
-    exclude_path = repo_path / ".git" / "info" / "exclude"
-    if not exclude_path.parent.is_dir():
+    git_dir = _resolve_git_dir(repo_path)
+    if git_dir is None:
         return
+    exclude_path = git_dir / "info" / "exclude"
+    if not exclude_path.parent.is_dir():
+        try:
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
     entry = f"/{LOCK_FILE_NAME}"
     try:
         existing = (
@@ -116,6 +129,48 @@ def _exclude_lock_from_status(repo_path: Path) -> None:
             handle.write(f"{separator}{entry}\n")
     except OSError:
         return
+
+
+def _resolve_git_dir(repo_path: Path) -> Path | None:
+    """Locate the git directory whose ``info/exclude`` applies to ``repo_path``.
+
+    A plain clone keeps a ``.git`` directory. A linked worktree or a submodule
+    keeps a ``.git`` *file* holding ``gitdir: <path>``, possibly relative to the
+    worktree. A linked worktree's own git directory additionally holds a
+    ``commondir`` pointer, and only the common directory's ``info/exclude`` is
+    consulted by git, so that is the one this returns.
+
+    :returns: the git directory, or ``None`` when the repository shape cannot be
+        resolved (no ``.git``, an unreadable pointer, a dangling target).
+    """
+    git_path = repo_path / ".git"
+    if git_path.is_dir():
+        return _common_git_dir(git_path)
+    if not git_path.is_file():
+        return None
+    try:
+        pointer = git_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    prefix = "gitdir:"
+    if not pointer.startswith(prefix):
+        return None
+    target = Path(pointer[len(prefix) :].strip())
+    resolved = target if target.is_absolute() else repo_path / target
+    return _common_git_dir(resolved) if resolved.is_dir() else None
+
+
+def _common_git_dir(git_dir: Path) -> Path | None:
+    """Follow a ``commondir`` pointer, if this git directory has one."""
+    commondir = git_dir / "commondir"
+    if not commondir.is_file():
+        return git_dir
+    try:
+        target = Path(commondir.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        return git_dir
+    resolved = target if target.is_absolute() else git_dir / target
+    return resolved if resolved.is_dir() else git_dir
 
 
 def _report_unlocked(

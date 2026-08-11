@@ -940,3 +940,42 @@ def test_report_without_a_git_dir_still_works(tmp_path: Path) -> None:
 
     assert result.records_written == 1
     assert not (leaf_repo / ".git").exists()
+
+
+def test_report_excludes_the_lock_in_a_linked_worktree(tmp_path: Path) -> None:
+    """A linked worktree keeps `.git` as a file; it needs the same repair."""
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(main_repo)], check=True)
+    (main_repo / "seed.txt").write_text("seed", encoding="utf-8")
+    for args in (
+        ["add", "seed.txt"],
+        [
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+        ["worktree", "add", "-q", "-b", "leaf", str(tmp_path / "linked")],
+    ):
+        subprocess.run(["git", "-C", str(main_repo), *args], check=True)
+    linked = tmp_path / "linked"
+    assert (linked / ".git").is_file()
+
+    report(
+        repo_path=linked,
+        node_id="alice-01",
+        adapter=_minimal_adapter(tmp_path),
+        redactor=null_redactor(),
+    )
+
+    status = subprocess.run(
+        ["git", "-C", str(linked), "status", "--porcelain"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+    assert reporter_module.LOCK_FILE_NAME not in status
