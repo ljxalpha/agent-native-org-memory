@@ -750,6 +750,11 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 
 - `provider_backend = "deepseek"`；服务端回了 usage → `usage_source = "reported"`；
   没回才回落 `len(text)//4` 估算并标 `estimated`。
+- **"回了 usage"的判定是"两个计数都是真整数"**：`usage` 对象存在但
+  `prompt_tokens` / `completion_tokens` 缺失或为 `null` 时，**一律按 `estimated` 处理**，
+  不得把缺口补 0 后仍标 `reported`。补 0 的 `reported` 读起来是"服务端说这次没花钱"，
+  既低估花费，也让 A1 的 `usage_source == "reported"` 判据变成重言式。
+  （`bool` 显式排除：它是 `int` 子类，`True` 会被当成"1 个 token"。）
 - `raw_meta` 记 `response_model` 与 `finish_reason`（仅字符串标量）。
 - **`finish_reason == "length"` 必须抛错**：被截断的半个 JSON 不是成功返回，
   把它交给下游解析只会得到一个更难定位的解析失败。抛错前**先结算**——钱已经花了。
@@ -782,7 +787,8 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
 
 | 结果 | 终态 | 理由 |
 |---|---|---|
-| 2xx | `settle` | 有真实 usage 可结算 |
+| 2xx **且 usage 完整回报** | `settle` | 有真实 usage 可结算 |
+| 2xx **但 usage 未完整回报** | `settle_unknown` | `settle` 会按结算额回补预扣差额，而本地估算只看得见响应文本、对服务端计费的 input token 一无所知；拿估算去回补等于为已经发生的花费释放额度 |
 | 超时 / 连接中断 / 传输异常 / **5xx** | `settle_unknown` | 5xx 不能证明服务端没执行——可能执行完在返回路径上失败 |
 | **429** | `settle_unknown` | 响应体无法区分"入口就被限流"与"推理中被掐"，因此一律按可能已计费处理 |
 | 其它 4xx（缺 key、参数非法等） | `release` | 请求在进入推理前被拒，可证明未计费 |

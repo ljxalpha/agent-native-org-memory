@@ -19,8 +19,15 @@ from memory_net.distiller.runctx import BudgetExhausted, RunBudget
 
 
 class _Usage:
-    def __init__(self, prompt_tokens: int, completion_tokens: int) -> None:
+    def __init__(self, prompt_tokens: Any, completion_tokens: Any) -> None:
         self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class _PartialUsage:
+    """A usage object carrying only the output side, as a terse backend may."""
+
+    def __init__(self, completion_tokens: int) -> None:
         self.completion_tokens = completion_tokens
 
 
@@ -155,6 +162,52 @@ def test_a_missing_usage_object_is_estimated_never_claimed_as_reported() -> None
 
     assert response.usage_source == "estimated"
     assert response.usage["output_tokens"] == 2
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        pytest.param(_Usage(None, 22), id="null-prompt-tokens"),
+        pytest.param(_Usage(11, None), id="null-completion-tokens"),
+        pytest.param(_PartialUsage(22), id="prompt-tokens-absent"),
+    ],
+)
+def test_a_usage_object_missing_a_counter_is_not_a_report(usage: Any) -> None:
+    """A present-but-incomplete usage object is not the service reporting its
+    billing. Coercing the gap to zero would claim ``reported`` for a call the
+    backend never accounted for, which is exactly the claim A1 rests on."""
+    provider, _ = _provider([_Completion(content="12345678", usage=usage)])
+
+    response = provider.generate(_request())
+
+    assert response.usage_source == "estimated"
+    assert response.usage == {"input_tokens": 0, "output_tokens": 2}
+
+
+def test_an_unreported_usage_keeps_the_whole_hold_instead_of_refunding_it() -> None:
+    """Settling refunds the difference against the reserved bound. An estimate
+    derived from the response text knows nothing about the input tokens that
+    were billed, so refunding against it releases budget for real spend."""
+    reported_budget = RunBudget(1.0, 10.0, max_usd=None)
+    estimated_budget = RunBudget(1.0, 10.0, max_usd=None)
+    reported, _ = _provider(
+        [_Completion(content="12345678", usage=_Usage(1, 1))], budget=reported_budget
+    )
+    estimated, _ = _provider(
+        [_Completion(content="12345678", usage=None)], budget=estimated_budget
+    )
+
+    reported.generate(_request())
+    estimated.generate(_request())
+
+    # The reserved upper bound is the same for both: the same prompt, the same
+    # max_tokens. Only the settlement differs.
+    assert estimated_budget.spent_usd > reported_budget.spent_usd
+    assert estimated_budget.spent_usd == pytest.approx(
+        estimated_budget.cost_of(input_tokens=6, output_tokens=1234)
+    )
+    reported_budget.assert_all_settled()
+    estimated_budget.assert_all_settled()
 
 
 def test_a_truncated_response_raises_instead_of_returning_half_a_json() -> None:

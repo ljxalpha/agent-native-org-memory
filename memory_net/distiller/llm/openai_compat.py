@@ -265,7 +265,18 @@ class OpenAICompatProvider(LLMProvider):
 
         # Settle before raising: the tokens were generated and billed even
         # though the output is unusable.
-        self._close(reservation, billable=True, started=started, usage=usage)
+        #
+        # Only a *reported* usage may settle at its real cost, because settling
+        # refunds the difference against the reserved upper bound. An estimate
+        # derived from the response text knows nothing about the input tokens
+        # the service billed, so refunding against it would release budget for
+        # spend that did happen. Without a report the hold is kept in full.
+        self._close(
+            reservation,
+            billable=True,
+            started=started,
+            usage=usage if usage_source == "reported" else None,
+        )
 
         if finish_reason == "length":
             raise RuntimeError(
@@ -295,13 +306,33 @@ def _usage_of(completion: Any, text: str) -> tuple[dict[str, int], str]:
 
     The estimate is never labelled ``reported``: doing so would make the
     run-level aggregate assert something the backend never said.
+
+    "Present" means *both* counters are real integers. A ``usage`` object that
+    exists but carries ``None`` or a missing counter is not a report; treating
+    it as one would coerce the gap to zero and hand the run a
+    ``usage_source="reported"`` with no tokens behind it -- a claim that reads
+    as "the service billed us nothing" and both understates the spend and makes
+    the A1 acceptance criterion pass vacuously.
     """
     usage = getattr(completion, "usage", None)
-    if usage is None:
+    input_tokens = _reported_count(usage, "prompt_tokens")
+    output_tokens = _reported_count(usage, "completion_tokens")
+    if input_tokens is None or output_tokens is None:
         return {"input_tokens": 0, "output_tokens": math.ceil(len(text) / 4)}, (
             "estimated"
         )
-    return {
-        "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-        "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-    }, "reported"
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens}, "reported"
+
+
+def _reported_count(usage: Any, name: str) -> int | None:
+    """One service-reported counter, or ``None`` when it was not reported.
+
+    ``bool`` is rejected explicitly: it is an ``int`` subclass, so a stray
+    ``True`` would otherwise pass for a token count of one.
+    """
+    if usage is None:
+        return None
+    value = getattr(usage, name, None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
