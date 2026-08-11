@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,13 +39,106 @@ class BundleRecorder:
     ``prompt_hash``, and only the shared sequence keeps the names distinct.
     """
 
-    def __init__(self, path: Path, *, requests_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        requests_dir: Path | None = None,
+        staging: Path | None = None,
+        target: Path | None = None,
+    ) -> None:
         self.path = path
         # When set (run-scoped bundle), every call is also written as its own JSON
         # file under requests_dir, alongside the consolidated JSONL at ``path``.
         # Left None for the flat --record file.
         self.requests_dir = requests_dir
+        # Both None on the direct-write path, which is what a recorder built
+        # without a run id keeps doing.
+        self.staging = staging
+        self.target = target
         self._sequence = 0
+        self._committed = False
+
+    @classmethod
+    def staged_bundle(cls, target: Path, *, run_id: str) -> BundleRecorder:
+        """A run-scoped bundle written to staging and renamed on commit.
+
+        The staging directory is a *sibling* of the target so the commit is a
+        rename within one filesystem, which is the only kind that is atomic. The
+        target itself is not created here, and must not be created before the
+        commit: "a hit leaves no bundle" has to mean no directory either.
+        """
+        staging = _staging_path(target, run_id=run_id)
+        _refuse_leftover(staging)
+        return cls(
+            staging / "calls.jsonl",
+            requests_dir=staging / "requests",
+            staging=staging,
+            target=target,
+        )
+
+    @classmethod
+    def staged_file(cls, target: Path, *, run_id: str) -> BundleRecorder:
+        """The flat ``--record`` file, inside the same transaction boundary.
+
+        Written straight to its final path, a failed second cluster would leave
+        the first one's calls behind. Note this makes a flat recording a
+        *replacement* rather than an append: half a run mixed into a previous
+        file is not usable replay material.
+        """
+        staging = _staging_path(target, run_id=run_id)
+        _refuse_leftover(staging)
+        return cls(staging, staging=staging, target=target)
+
+    def commit(self, *, precheck: Callable[[Path], None] | None = None) -> Path:
+        """Publish the staged bundle atomically, or leave it staged.
+
+        ``precheck`` runs against the staging path; if it raises, nothing is
+        renamed and the staging directory is *kept* -- deleting it is the
+        caller's decision (``abort``), and keeping it is what allows the failure
+        to be diagnosed.
+        """
+        if self.staging is None or self.target is None:
+            # Direct-write recorder: there is nothing to publish.
+            return self.path
+        if self._committed:
+            raise RuntimeError(f"bundle already committed: {self.target}")
+        if precheck is not None:
+            precheck(self.staging)
+        if self._is_bundle:
+            # A run that made no call wrote nothing, but a bundle directory has
+            # to exist for a replay to load it, so materialize the empty shape.
+            (self.staging / "requests").mkdir(parents=True, exist_ok=True)
+            (self.staging / "calls.jsonl").touch()
+            if self.target.exists():
+                raise FileExistsError(f"bundle target already exists: {self.target}")
+        elif not self.staging.exists():
+            # Flat recording with no calls: nothing was written before staging
+            # existed either, so nothing is published.
+            self._committed = True
+            return self.target
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        _fsync_dir(self.staging if self._is_bundle else self.staging.parent)
+        # os.replace, not rename: the flat target may already exist. A
+        # directory target is refused above rather than replaced.
+        os.replace(self.staging, self.target)
+        _fsync_dir(self.target.parent)
+        self._committed = True
+        return self.target
+
+    def abort(self) -> None:
+        """Drop everything staged. Idempotent, and never creates the target."""
+        if self.staging is None or self._committed:
+            return
+        if self.staging.is_file():
+            self.staging.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(self.staging, ignore_errors=True)
+
+    @property
+    def _is_bundle(self) -> bool:
+        """A directory bundle, as opposed to the flat ``--record`` file."""
+        return self.requests_dir is not None
 
     def record(
         self, request: LLMRequest, response: LLMResponse, *, scanned: ScanVerdict
@@ -288,6 +383,49 @@ class _ReplaySource:
         if not candidates:
             return None
         return candidates.pop(0)
+
+
+def _staging_path(target: Path, *, run_id: str) -> Path:
+    """``<target>.staging-<run_id>``, always beside the target.
+
+    Same parent directory is not a stylistic choice: ``os.replace`` is atomic
+    only within one filesystem, and a staging area under /tmp routinely is not
+    on the same one as the repository.
+    """
+    if not run_id:
+        raise ValueError("a staged recorder requires a run id")
+    return target.parent / f"{target.name}.staging-{run_id}"
+
+
+def _refuse_leftover(staging: Path) -> None:
+    """Never reuse or clean up an existing staging path.
+
+    It may belong to a run that is still going. Silently removing it would
+    delete another run's work, and reusing it would publish that run's calls as
+    this one's.
+    """
+    if staging.exists():
+        raise FileExistsError(
+            f"staging path already exists, refusing to reuse it: {staging}"
+        )
+
+
+def _fsync_dir(path: Path) -> None:
+    """Flush a directory entry, so a crash right after the rename keeps it.
+
+    Best effort: not every filesystem allows opening a directory for fsync, and
+    failing the run over the durability hint would be worse than the hint.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:  # pragma: no cover - platform dependent
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # pragma: no cover - platform dependent
+        pass
+    finally:
+        os.close(fd)
 
 
 def _record_item(request: LLMRequest, response: LLMResponse) -> dict[str, object]:
