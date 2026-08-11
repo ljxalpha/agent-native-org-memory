@@ -191,3 +191,80 @@ A green soak — accelerated or 24h — says the cycle logic and the health cont
 hold. It is **not** evidence about real agents consuming memory, daemon
 residency and restart, cron triggering, real embeddings or real LLM calls. A CI
 run of `--cycles 5` is in particular **not** a 24h stability result.
+
+## Agent Sandbox Mount Manifest
+
+`scripts/agent_sandbox` runs an agent under test inside a bubblewrap namespace.
+The three real agent state directories (`~/.hermes`, `~/.codex`, `~/.claude`)
+are never bound: they do not exist inside the namespace at all, which is
+stronger than a read-only mount, because a path that is absent cannot be read
+and cannot be restored after a write.
+
+The plan below is the contract. A test parses this block and compares it, item
+for item, against what `agent_sandbox doctor` actually assembles -- so this
+section cannot drift from the code without turning the suite red.
+
+```sh
+bwrap \
+  --unshare-all --share-net --die-with-parent \
+  --ro-bind /usr /usr \
+  --ro-bind /etc /etc \
+  --ro-bind ${RESOLV_TARGET} ${RESOLV_TARGET} \
+  --symlink usr/bin /bin \
+  --symlink usr/lib /lib \
+  --symlink usr/lib64 /lib64 \
+  --symlink usr/sbin /sbin \
+  --ro-bind ${AGENT_RUNTIME_ROOT} ${AGENT_RUNTIME_ROOT} \
+  --bind ${SANDBOX}/home /home/agent \
+  --bind ${SANDBOX}/agentroot /work/agentroot \
+  --tmpfs /tmp \
+  --dev /dev \
+  --chdir /work/agentroot \
+  --
+```
+
+Notes on the entries that are easy to get wrong:
+
+- **`/bin`, `/lib`, `/lib64`, `/sbin` are symlinks, and none is optional.**
+  Without `/lib64` the dynamic loader is missing, and every command fails as
+  `ENOENT` -- which reads like a wrong path rather than a missing linker.
+- **`${AGENT_RUNTIME_ROOT}` is bound at its own path**, not at a new one. An
+  editable install resolves imports through a finder that points at the source
+  tree's absolute path, so mounting only the virtualenv yields a correct
+  `sys.prefix` and no importable package.
+- **`${RESOLV_TARGET}`** is present only where `/etc/resolv.conf` is a symlink
+  pointing outside `/etc` (WSL2 is the common case). `--ro-bind /etc /etc` does
+  not carry the target across, and without it the namespace has no DNS, so
+  every model call fails as a connection error. Binding onto `/etc/resolv.conf`
+  itself does not work, because `/etc` is read-only inside.
+- **`/proc` is not mounted.** The agent holds the API key because it needs one,
+  and with `/proc` present a read-file tool reaches `/proc/self/environ` --
+  putting the key into the model's context and then into the session trace,
+  which is a file we read and quote. `--allow-proc` exists, and using it
+  requires a separate rate-limited key, a canary assertion that the value does
+  not appear in the trace, and a scanner pass over the traces before any of
+  them is filed.
+- **`--bind ${SANDBOX}/agentroot`** becomes `--ro-bind` under
+  `run --read-only-agentroot`. The consumption check uses that, because the
+  toolset it needs includes write tools.
+
+Credentials never appear above. They travel in the `env` argument of `execve`;
+`env -i KEY=VALUE` and bwrap's `--setenv KEY VALUE` both write the value into a
+command line, which any process on the machine can read through `/proc`.
+`doctor` prints each credential's *source* and `<set>` or `<missing>`, and no
+value. There is no `env` subcommand and no eval-able output mode.
+
+Two environment allowlists, defined and tested separately: what the launcher
+process itself may read, and the complete environment visible inside the
+namespace. The second is `HOME`, `PATH`, `HERMES_HOME`, the two DeepSeek
+variables, and optionally `HERMES_MAX_TOKENS`. Everything else is absent,
+including the three dozen unrelated keys in the shared credential file.
+
+Usage:
+
+```sh
+scripts/agent_sandbox --runtime-root <agent source tree> up --toolset none
+scripts/agent_sandbox --runtime-root <agent source tree> run -- <command...>
+scripts/agent_sandbox --runtime-root <agent source tree> doctor --since "<timestamp>"
+scripts/agent_sandbox clean
+```

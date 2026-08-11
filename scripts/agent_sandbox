@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""agent_sandbox — run an agent under test inside a bubblewrap namespace.
+
+    agent_sandbox up      [--root R] [--runtime-root D] [--toolset none|file]
+    agent_sandbox run     [--read-only-agentroot] [--allow-proc] [--dry-run] -- CMD...
+    agent_sandbox doctor  [--since TIMESTAMP]
+    agent_sandbox clean
+
+Why a namespace and not an environment variable: the agent's oneshot path sets
+its own approval bypass unconditionally, so "turn the hooks off" is not
+available, and its home override isolates only its own state -- not the model's
+ability to write through a tool. Process-level isolation is what is left.
+
+Why Python and not a shell script: the credentials have to reach the sandbox,
+and the only acceptable route is the ``env`` argument of ``execve``. A shell
+wrapper that is forbidden to parse the credential file can never hold a value,
+so its credential path is broken by construction; this process imports the
+reader, holds the values for the length of one call, and hands them to
+``execve``. There is no ``env`` subcommand and no eval-able output, because
+both would put a credential on a terminal and into a shell history.
+
+The three real agent directories are never bound. They do not exist inside the
+namespace at all, which is stronger than a read-only mount: a path that is
+absent cannot be read, and cannot be restored after a write.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+if __package__ in (None, ""):  # pragma: no cover - direct script execution
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from memory_net.shared.env_allowlist import (  # noqa: E402
+    MISSING_MARKER,
+    SET_MARKER,
+    CredentialError,
+    exec_in_sandbox,
+    parse_env_file,
+    resolve,
+)
+
+BWRAP = "/usr/bin/bwrap"
+
+SANDBOX_HOME = "/home/agent"
+SANDBOX_AGENT_ROOT = "/work/agentroot"
+"""Fixed, neutral paths inside the namespace.
+
+Not derived from the host's ``$HOME``: reusing the host path would put the
+user's account name into the sandbox, into every plan this prints, and into
+every test that asserts on one.
+"""
+
+LAUNCHER_ENV_ALLOWLIST = (
+    "AOMT_SANDBOX_ROOT",
+    "AOMT_AGENT_RUNTIME_ROOT",
+    "PATH",
+    "HOME",
+    "XDG_RUNTIME_DIR",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+)
+"""Layer one: what this process itself reads.
+
+``HOME`` is here only to locate the read-only credential file, and is not
+passed through to the sandbox.
+"""
+
+SANDBOX_ENV_ALLOWLIST = (
+    "HOME",
+    "PATH",
+    "HERMES_HOME",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "HERMES_MAX_TOKENS",
+)
+"""Layer two: the entire environment visible inside the namespace.
+
+Everything else is absent, the shared credential file's three dozen unrelated
+keys included. Named categories that are deliberately excluded, for audit:
+search and scraping keys, chat-app credentials and webhooks, other model
+vendors' keys, cloud and VCS tokens, proxies, and the SSH and GPG agent
+sockets.
+"""
+
+CREDENTIAL_KEYS = ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL")
+
+FORBIDDEN_ROOT_NAMES = (".hermes", ".codex", ".claude", ".openclaw")
+"""Real agent state directories. A sandbox root at or under one of these would
+have ``clean`` delete it."""
+
+TOOLSETS = {
+    # The default. An empty list is zero tools (the agent's own toolset
+    # validation reads it that way), and it is the right default because most
+    # runs have no reason to give a model a filesystem.
+    "none": "[]",
+    # The consumption check needs this one. A team hint is a lazy reference:
+    # it is not inlined when the system prompt is assembled, so an agent with
+    # no tools cannot follow it, and the check would be structurally
+    # impossible to pass. The set includes write tools, which is why that
+    # check mounts the agent root read-only.
+    "file": '["file"]',
+}
+
+
+def mount_plan(
+    *,
+    sandbox: Path,
+    runtime_root: Path,
+    read_only_agentroot: bool = False,
+    allow_proc: bool = False,
+    resolv_target: Path | None = None,
+) -> list[str]:
+    """The bwrap argv, up to and including the ``--`` separator.
+
+    ``/bin``, ``/lib``, ``/lib64`` and ``/sbin`` are symlinks rather than
+    binds, and none of the four is optional: without ``/lib64`` the dynamic
+    loader is missing and everything fails as ENOENT, which reads like a wrong
+    path rather than a missing linker.
+
+    The runtime root is bound *at its own path* because an editable install
+    resolves imports through a finder that points at the source tree's
+    absolute path -- mounting only the virtualenv gives a correct
+    ``sys.prefix`` and no importable package.
+    """
+    plan = [
+        BWRAP,
+        "--unshare-all",
+        "--share-net",
+        "--die-with-parent",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+    ]
+    if resolv_target is not None:
+        # `/etc/resolv.conf` is a symlink on this class of host, and binding
+        # `/etc` read-only does not carry the target across. Without this the
+        # namespace has no DNS and every model call fails as a connection
+        # error. Binding onto `/etc/resolv.conf` itself cannot work: `/etc` is
+        # read-only inside.
+        plan += ["--ro-bind", str(resolv_target), str(resolv_target)]
+    plan += [
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--symlink",
+        "usr/sbin",
+        "/sbin",
+        "--ro-bind",
+        str(runtime_root),
+        str(runtime_root),
+        "--bind",
+        str(sandbox / "home"),
+        SANDBOX_HOME,
+        "--ro-bind" if read_only_agentroot else "--bind",
+        str(sandbox / "agentroot"),
+        SANDBOX_AGENT_ROOT,
+        "--tmpfs",
+        "/tmp",
+        "--dev",
+        "/dev",
+    ]
+    if allow_proc:
+        # Off by default, and not a convenience switch. The agent holds the
+        # API key because it needs it, and with `/proc` mounted a read-file
+        # tool reaches `/proc/self/environ` -- putting the key into the model's
+        # context and into the session trace, which is a file we read and
+        # quote. Measured: the agent's version and prompt-size paths both run
+        # without `/proc`.
+        plan += ["--proc", "/proc"]
+    plan += ["--chdir", SANDBOX_AGENT_ROOT, "--"]
+    return plan
+
+
+def sandbox_env(*, runtime_root: Path, credentials: Mapping[str, str]) -> dict[str, str]:
+    """Layer two, assembled. Credentials are merged by the caller's ``execve``."""
+    env = {
+        "HOME": SANDBOX_HOME,
+        "PATH": f"{runtime_root / 'venv' / 'bin'}:/usr/bin",
+        "HERMES_HOME": f"{SANDBOX_HOME}/.hermes",
+    }
+    env.update({key: value for key, value in credentials.items() if key in SANDBOX_ENV_ALLOWLIST})
+    return env
+
+
+def launcher_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Layer one, applied. Read once, here, so no other function reads os.environ."""
+    return {key: environ[key] for key in LAUNCHER_ENV_ALLOWLIST if key in environ}
+
+
+def default_root(environ: Mapping[str, str]) -> Path:
+    override = environ.get("AOMT_SANDBOX_ROOT")
+    if override:
+        return Path(override)
+    base = environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return Path(base) / "aomt-agent-sandbox"
+
+
+def resolv_target_of(etc_resolv: Path = Path("/etc/resolv.conf")) -> Path | None:
+    """The symlink target of ``/etc/resolv.conf``, when it points outside ``/etc``."""
+    if not etc_resolv.is_symlink():
+        return None
+    target = Path(os.path.realpath(etc_resolv))
+    if target.is_relative_to(Path("/etc")):
+        return None
+    return target if target.exists() else None
+
+
+def assert_root_is_safe(root: Path, *, environ: Mapping[str, str]) -> None:
+    """Refuse a root that ``clean`` must never be pointed at.
+
+    Two families: a real agent's state directory, and this repository. Both
+    are checked after ``resolve()``, because a symlink is the interesting way
+    to arrive at either.
+    """
+    resolved = root.expanduser().resolve()
+    home = Path(environ.get("HOME") or "~").expanduser()
+    for name in FORBIDDEN_ROOT_NAMES:
+        forbidden = (home / name).resolve()
+        if resolved == forbidden or forbidden in resolved.parents:
+            raise SystemExit(f"refusing a sandbox root inside {home / name}")
+    toplevel = _git_toplevel()
+    if toplevel is not None and (resolved == toplevel or toplevel in resolved.parents):
+        raise SystemExit(f"refusing a sandbox root inside the repository {toplevel}")
+
+
+def _git_toplevel() -> Path | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def config_yaml(toolset: str) -> str:
+    return (
+        "# Generated by scripts/agent_sandbox. The agent reads its enabled\n"
+        "# toolsets from here when none is named on the command line.\n"
+        "#\n"
+        "# Passing an empty toolset on the command line does the opposite of\n"
+        "# what it looks like -- it falls back to the configured sets, which\n"
+        "# means all of them. This file is the only correct control.\n"
+        f"platform_toolsets:\n  cli: {TOOLSETS[toolset]}\n"
+    )
+
+
+def do_up(root: Path, *, toolset: str, environ: Mapping[str, str]) -> int:
+    assert_root_is_safe(root, environ=environ)
+    (root / "home" / ".hermes").mkdir(parents=True, exist_ok=True)
+    (root / "agentroot").mkdir(parents=True, exist_ok=True)
+    # Idempotent: the config is rewritten, and nothing else is touched. In
+    # particular `sessions/` is left alone, because a previous run's traces are
+    # evidence rather than clutter.
+    (root / "home" / ".hermes" / "config.yaml").write_text(
+        config_yaml(toolset), encoding="utf-8"
+    )
+    print(f"sandbox ready: {root} (toolset={toolset})")
+    return 0
+
+
+def do_clean(root: Path, *, environ: Mapping[str, str]) -> int:
+    assert_root_is_safe(root, environ=environ)
+    shutil.rmtree(root, ignore_errors=True)
+    print(f"sandbox removed: {root}")
+    return 0
+
+
+def credential_report(
+    *, env_file: Path | None, environ: Mapping[str, str]
+) -> list[tuple[str, str, str]]:
+    """``(key, source, marker)`` per credential. Never a value.
+
+    ``source`` is the point of this: "set" without saying where from leaves a
+    run that silently fell back to the shared file looking identical to one
+    given a deliberately scoped key.
+    """
+    from_file: dict[str, str] = {}
+    path = (env_file or Path("~/.hermes/.env")).expanduser()
+    if path.is_file():
+        from_file = parse_env_file(
+            path.read_text(encoding="utf-8"), allowlist=CREDENTIAL_KEYS
+        )
+    report = []
+    for key in CREDENTIAL_KEYS:
+        if environ.get(key):
+            report.append((key, "env", SET_MARKER))
+        elif from_file.get(key):
+            report.append((key, str(path), SET_MARKER))
+        else:
+            report.append((key, "-", MISSING_MARKER))
+    return report
+
+
+def do_doctor(
+    root: Path,
+    *,
+    runtime_root: Path,
+    env_file: Path | None,
+    since: str | None,
+    environ: Mapping[str, str],
+) -> int:
+    print("mount plan:")
+    for line in _grouped(
+        mount_plan(
+            sandbox=root,
+            runtime_root=runtime_root,
+            resolv_target=resolv_target_of(),
+        )
+    ):
+        print(f"  {line}")
+    print("\ncredentials (values are never printed):")
+    for key, source, marker in credential_report(env_file=env_file, environ=environ):
+        print(f"  {key}: {marker} from {source}")
+    print("\nreal agent directories are not bound:")
+    home = Path(environ.get("HOME") or "~").expanduser()
+    plan_text = " ".join(
+        mount_plan(sandbox=root, runtime_root=runtime_root, resolv_target=None)
+    )
+    for name in FORBIDDEN_ROOT_NAMES:
+        bound = str(home / name) in plan_text
+        print(f"  {home / name}: {'BOUND' if bound else 'absent'}")
+    if since is not None:
+        print(f"\nfiles changed under those directories since {since}:")
+        for name in FORBIDDEN_ROOT_NAMES:
+            target = home / name
+            if not target.exists():
+                continue
+            found = subprocess.run(
+                ["find", str(target), "-newermt", since],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in found.stdout.splitlines():
+                print(f"  {line}")
+    return 0
+
+
+def _grouped(plan: Sequence[str]) -> list[str]:
+    """The argv rendered one option per line, for a plan a person reads."""
+    lines: list[str] = []
+    current: list[str] = []
+    for item in plan:
+        if item.startswith("--") and current:
+            lines.append(" ".join(current))
+            current = []
+        current.append(item)
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
+def do_run(
+    root: Path,
+    *,
+    runtime_root: Path,
+    command: Sequence[str],
+    read_only_agentroot: bool,
+    allow_proc: bool,
+    dry_run: bool,
+    env_file: Path | None,
+    environ: Mapping[str, str],
+) -> int:
+    assert_root_is_safe(root, environ=environ)
+    if not command:
+        raise SystemExit("no command given after --")
+    plan = mount_plan(
+        sandbox=root,
+        runtime_root=runtime_root,
+        read_only_agentroot=read_only_agentroot,
+        allow_proc=allow_proc,
+        resolv_target=resolv_target_of(),
+    )
+    argv = [*plan, *command]
+    if dry_run:
+        for line in _grouped(argv):
+            print(line)
+        return 0
+    credentials = resolve(allowlist=CREDENTIAL_KEYS, env_file=env_file, environ=environ)
+    # The values exist in this process for exactly as long as it takes to hand
+    # them to execve, and travel in `env` -- never in argv, which any process
+    # on the machine can read out of /proc.
+    exec_in_sandbox(
+        argv,
+        credentials=credentials,
+        environ=sandbox_env(runtime_root=runtime_root, credentials={}),
+    )
+    return 0  # pragma: no cover - execve does not return
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agent_sandbox", description=__doc__)
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument("--runtime-root", type=Path, default=None)
+    parser.add_argument("--env-file", type=Path, default=None)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    up = sub.add_parser("up")
+    up.add_argument("--toolset", choices=sorted(TOOLSETS), default="none")
+
+    run = sub.add_parser("run")
+    run.add_argument("--read-only-agentroot", action="store_true")
+    run.add_argument("--allow-proc", action="store_true")
+    run.add_argument("--dry-run", action="store_true")
+    run.add_argument("argv", nargs=argparse.REMAINDER)
+
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--since", default=None)
+    doctor.add_argument("--dry-run", action="store_true")
+
+    sub.add_parser("clean")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(list(argv) if argv is not None else None)
+    environ = launcher_env(os.environ)
+    root = args.root or default_root(environ)
+    runtime_root = args.runtime_root or Path(
+        environ.get("AOMT_AGENT_RUNTIME_ROOT") or ""
+    )
+    if not str(runtime_root) and args.command in {"run", "doctor"}:
+        raise SystemExit(
+            "--runtime-root or AOMT_AGENT_RUNTIME_ROOT is required: the agent's "
+            "source tree must be bound at its own path"
+        )
+
+    if args.command == "up":
+        return do_up(root, toolset=args.toolset, environ=environ)
+    if args.command == "clean":
+        return do_clean(root, environ=environ)
+    if args.command == "doctor":
+        return do_doctor(
+            root,
+            runtime_root=runtime_root,
+            env_file=args.env_file,
+            since=args.since,
+            environ=environ,
+        )
+    command = [item for item in args.argv if item != "--"]
+    return do_run(
+        root,
+        runtime_root=runtime_root,
+        command=command,
+        read_only_agentroot=args.read_only_agentroot,
+        allow_proc=args.allow_proc,
+        dry_run=args.dry_run,
+        env_file=args.env_file,
+        environ=environ,
+    )
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except CredentialError as exc:
+        # Key names and paths only; see CredentialError.
+        print(f"agent_sandbox: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
