@@ -193,15 +193,33 @@ def test_shipped_adapters_use_convention_shared_root_and_no_list_personal(
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "adapters"
 
 
+FIXTURE_RENAMES = {"_dotgit": ".git", "_dotagents": ".agents", "_dotcodex": ".codex"}
+"""Path components stored under a neutral name and restored on materialization.
+
+A tracked directory named ``.git`` inside this repository would be read as a
+nested checkout and its contents could not be committed at all.
+"""
+
+
 def _materialize(fixture: Path, destination: Path) -> Path:
-    """Copy a redacted install snapshot; return it as AGENT_ROOT."""
+    """Copy a redacted install snapshot; return it as AGENT_ROOT.
+
+    Two fixture conventions are undone here so that what the adapter sees is the
+    install rather than the fixture: neutral directory names are restored to
+    their real dotted spellings, and a ``.keep`` marker becomes the empty
+    directory git could not track.
+    """
     for source in sorted(fixture.rglob("*")):
         if not source.is_file():
             continue
         relative = source.relative_to(fixture)
         if relative == Path("README.md"):
             continue  # fixture documentation, not part of the install
-        target = destination / relative
+        parts = [FIXTURE_RENAMES.get(part, part) for part in relative.parts]
+        target = destination.joinpath(*parts)
+        if target.name == ".keep":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            continue  # the directory is the asset; the marker is not
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
     return destination
@@ -294,5 +312,130 @@ def test_the_hermes_fixture_carries_no_real_content(tmp_path: Path) -> None:
 def test_hermes_stays_experimental_until_a_real_run_says_otherwise() -> None:
     """A calibrated read path is not evidence of a consumed hint."""
     config = yaml.safe_load((ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8"))
+
+    assert config["support_status"] == "experimental"
+
+
+# -- codex: the read path against the layout that exists -----------------
+
+
+def test_codex_fixture_reports_nothing_from_the_native_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``memories/project-notes.md`` is markdown, inside AGENT_ROOT, and still
+    uncollectable.
+
+    Position decides it, before any ``exclude`` is consulted: the reporting root
+    is ``${AGENT_ROOT}/memory/shared``, and the native store is not under it.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "codex", tmp_path / "codex")
+    assert (agent_root / "memories" / "project-notes.md").is_file()
+    shared = agent_root / "memory" / "shared" / "deploy"
+    shared.mkdir(parents=True)
+    (shared / "window.md").write_text("Deploy on weekday mornings.\n", encoding="utf-8")
+
+    records = list(_load("codex", agent_root).list_shared())
+
+    assert [r.source_locator for r in records] == ["codex-shared:deploy/window.md"]
+
+
+def test_codex_fixture_keeps_a_checkout_inside_the_managed_root_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fixture shows the native store is a real checkout, and the same thing
+    happens inside the managed root the moment an operator versions it.
+
+    What rejects these is the hidden-path skip, which runs *before* ``exclude``
+    is consulted (``filesystem_md.py``: ``_is_hidden_path`` precedes the pattern
+    loop) -- so the config's ``.git/**`` and ``**/.git/**`` entries are declared
+    cover for a future config that stops skipping hidden paths, and what this
+    test pins is the boundary rather than the machinery. Both depths are built
+    because a top-level-only rule would be indistinguishable here otherwise.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "codex", tmp_path / "codex")
+    assert (agent_root / "memories" / ".git").is_dir()
+    shared = agent_root / "memory" / "shared"
+    (shared / ".git" / "info").mkdir(parents=True)
+    (shared / ".git" / "info" / "notes.md").write_text("plumbing\n", encoding="utf-8")
+    (shared / "nested" / ".git").mkdir(parents=True)
+    (shared / "nested" / ".git" / "notes.md").write_text("plumbing\n", encoding="utf-8")
+    (shared / "kept.md").write_text("Team-visible note.\n", encoding="utf-8")
+
+    records = list(_load("codex", agent_root).list_shared())
+
+    assert [r.source_locator for r in records] == ["codex-shared:kept.md"]
+
+
+def test_codex_sqlite_siblings_are_out_of_reach_without_an_exclude_for_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately no ``**/*.sqlite*`` pattern in the shipped config.
+
+    The trio sits beside ``memories/``, one level above the managed root, so a
+    relative glob rooted at ``memory/shared`` cannot reach it. A second
+    mechanism agreeing with the first would only suggest that a ``.sqlite``
+    *inside* the managed root is expected -- it is not.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "codex", tmp_path / "codex")
+    for suffix in ("", "-shm", "-wal"):
+        assert (agent_root / f"memories_1.sqlite{suffix}").is_file()
+    config = yaml.safe_load((ADAPTERS_DIR / "codex.yaml").read_text(encoding="utf-8"))
+    excludes = config["roots"]["shared"][0]["exclude"]
+    assert not [pattern for pattern in excludes if "sqlite" in pattern]
+    shared = agent_root / "memory" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "kept.md").write_text("Team-visible note.\n", encoding="utf-8")
+
+    records = list(_load("codex", agent_root).list_shared())
+
+    assert [r.source_locator for r in records] == ["codex-shared:kept.md"]
+
+
+def test_codex_dot_directories_in_the_native_store_stay_unreported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``.agents/`` and ``.codex/`` are empty in a stock install, so a walk that
+    reached them would find nothing and the read path would look correct.
+
+    Filled here with markdown, which is what makes the assertion mean anything:
+    they are still not reported, and the reason is the reporting root rather
+    than luck about what happens to be in them.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "codex", tmp_path / "codex")
+    for name in (".agents", ".codex"):
+        directory = agent_root / "memories" / name
+        assert directory.is_dir() and not list(directory.iterdir())
+        (directory / "agent-private.md").write_text("private\n", encoding="utf-8")
+    shared = agent_root / "memory" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "kept.md").write_text("Team-visible note.\n", encoding="utf-8")
+
+    records = list(_load("codex", agent_root).list_shared())
+
+    assert [r.source_locator for r in records] == ["codex-shared:kept.md"]
+
+
+def test_the_codex_fixture_carries_no_real_content() -> None:
+    """A redacted snapshot, checked as one."""
+    for path in sorted((FIXTURES / "codex").rglob("*")):
+        if not path.is_file() or path.name == "README.md":
+            continue
+        text = path.read_bytes().decode("utf-8")
+        assert "/home/" not in text
+        assert "/Users/" not in text
+        assert "@" not in text
+
+
+def test_codex_stays_experimental_until_a_real_run_says_otherwise() -> None:
+    """A calibrated read path is not evidence of a consumed hint."""
+    config = yaml.safe_load((ADAPTERS_DIR / "codex.yaml").read_text(encoding="utf-8"))
 
     assert config["support_status"] == "experimental"

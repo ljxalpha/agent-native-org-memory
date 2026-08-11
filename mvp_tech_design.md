@@ -619,6 +619,23 @@ team_hint_injection:
 
 **`opencode.yaml`：路径依据未取得**——开发环境无 opencode 安装可供只读核验，取得依据需新装 CLI（属需人工批准的外部动作）。因此该 YAML 首行必须写明 `EXPERIMENTAL / UNVERIFIED: template only`，并注明受管根 `${AGENT_ROOT}/memory/shared` 是 memory-net 约定目录而非实测发现，以及威胁模型（越界读取会把 agent 私有状态/凭据暴露给蒸馏侧）。升级为已校准 adapter 需一次真实安装 + 一次被消费验证。
 
+**`codex.yaml` 的布局快照**存放在 `tests/fixtures/adapters/codex/`，读路径回归在
+`tests/unit/test_adapter_calibration.py`。形态要点（实测）：`memories/` 是**原生库**而非受管根，
+它本身是一个 git checkout（含 `.git/`）并带两个 stock 安装下为空的点目录 `.agents/` 与 `.codex/`；
+原生索引 `memories_1.sqlite`（连接打开期间还有 `-shm` / `-wal` 两个同名兄弟）是
+`memories/` 的**兄弟**，即位于受管根之上一层。
+
+与 openclaw 同一口径，必须按实际生效的机制描述：原生库里的 `.md` 走不到 `exclude`，
+拒绝它的是**位置**——报告根是 `${AGENT_ROOT}/memory/shared`，相对 glob 够不到上一层；
+受管根内的 `.git/` 由**隐藏路径跳过**拒绝，该跳过在 `exclude` 之前执行
+（`filesystem_md.py`：`_is_hidden_path` 先于模式循环），故 YAML 里的 `.git/**` 与 `**/.git/**`
+同样属声明式条目。sqlite 三件套**故意不写 `**/*.sqlite*` 排除项**：位置已经拒绝了它们，
+再加一条只是第二套机制附和第一套，且会暗示"受管根内出现 `.sqlite` 是预期之内"——并不是。
+fixture 里 `.git` / `.agents` / `.codex` 以 `_dotgit` / `_dotagents` / `_dotcodex` 命名跟踪
+（仓库内被跟踪的 `.git` 目录会被当成嵌套 checkout，其内容根本无法提交），
+空目录以 `.keep` 标记占位，两者都在物化到临时目录时还原。
+**该依据同样不含"hint 被真实消费"的证据**，故 `support_status` 保持 `experimental`。
+
 **元规则（防复发）**：任何 `support_status: experimental` 且既没有 `tests/fixtures/adapters/<name>/` 布局 fixture、也没有被校准测试登记的 adapter YAML，**首行必须带 UNVERIFIED banner**。仅靠 `support_status` 不够——它只表达"需显式 opt-in"，不表达"路径是实测还是假设"，集成者需要区分二者。该元规则由 `tests/unit/test_agent_adapters.py` 中的元测试强制，对将来新增的 adapter 同样生效。
 
 `source_locator` 固定为 `<root_alias>:<path_relative_to_base_dir>`；`root_alias` 与 `base_dir` 一旦发布，不应在后续小版本里随意更名或改变语义。新增扫描范围时优先新增 root alias，不要复用旧 alias 指向另一棵目录。
@@ -4347,4 +4364,13 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   只有失败才留下带部分掩码密钥的 `request_dump_*.json`。即"有 trace"与"跑成功"互斥，
   原取证方式在默认 oneshot 下不成立。哨兵 + 对照实验反而是更强的陈述：
   trace 只说明文件被打开，哨兵说明文件内容到达了模型。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 codex 布局快照 fixture
+
+- Change summary: 新增 `tests/fixtures/adapters/codex/` 脱敏布局快照与 4 条读路径回归，
+  并在 § 5.1 记录形态与各道闸的实际生效机制。明确 codex.yaml **不加** `**/*.sqlite*` 排除项。
+- Change reason: codex 的读路径此前只有凭空构造的目录树做回归，而真实安装的形态
+  （原生库是 git checkout、sqlite 索引是原生库的兄弟而非其内容、两个空点目录）
+  与构造树不同；空目录与 `.git` 又都是 git 无法按原名跟踪的，需要固定的命名与物化约定。
 - Change time: 2026-08-11
