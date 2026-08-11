@@ -12,6 +12,7 @@ from memory_net.distiller.cli import (
     _distill_config,
     _freeze_master_snapshot,
     _min_contributors_by_category,
+    _preflight,
     _replay_mode,
     _resolve_prompt,
     _setup_runtime,
@@ -343,3 +344,30 @@ def _git(cwd: Path, *args: str) -> str:
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+def test_preflight_skips_credentials_for_an_offline_replay() -> None:
+    """The regression that has to stay green on a public runner with no
+    secrets. `allow-live-on-miss` is excluded because it can still go live."""
+    for mode in ("strict", "prompt-only"):
+        _preflight(
+            Namespace(provider="deepseek", replay=Path("bundle"), replay_mode=mode)
+        )
+
+
+def test_preflight_still_demands_credentials_when_a_replay_may_go_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+
+    with pytest.raises(SystemExit, match="credentials are absent"):
+        _preflight(
+            Namespace(
+                provider="deepseek",
+                replay=Path("bundle"),
+                replay_mode="allow-live-on-miss",
+            )
+        )
+    with pytest.raises(SystemExit, match="credentials are absent"):
+        _preflight(Namespace(provider="deepseek", replay=None, replay_mode=None))

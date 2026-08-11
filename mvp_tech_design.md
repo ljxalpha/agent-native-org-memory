@@ -3280,6 +3280,22 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 任一缺失即失败。把这条放在 builder 里而不是留给运行期，是因为运行期发现缺失时
 一次 live 录制已经开始付费了。
 
+#### 9.10.1 生产 profile 与 replay 的关系（口径修订）
+
+生产 profile 原先**一律拒绝** `--replay`，理由是"录制可能来自任何后端，包括 mock"。
+理由成立，但结论过宽：它同时拒绝了**对一次生产运行的录制**——而那恰恰是离线回归要重放的东西，
+于是"重新检验真实模型输出"的唯一途径变成了再买一次。
+
+正解是让 bundle 自证：每条调用都带 `provider_backend`，且 replay **原样回放而不改写**（§9.2）。
+因此判据改为——bundle 的**每一条**调用都命名一个被允许的后端才放行；
+出现 `mock` / `hermes_tool` / `unknown`，或 bundle 读不出来、为空，一律拒绝。
+"读不出内容"绝不能被读成"没有可疑内容"。provenance 从 `calls.jsonl` 读，
+不从 `record_metrics.json` 读：前者是真相源，后者是它的派生汇总。
+
+与之配套，**凭据预检对离线 replay 模式豁免**：`strict` 与 `prompt-only` 在结构上不会发出请求，
+要求它们提供凭据就等于让"公有 runner 上无 secrets 的阻塞回归"无法运行；
+`allow-live-on-miss` 不豁免，因为它 miss 时会走 live。
+
 ### 9.11 Golden bundle（`tests/fixtures/golden_bundle/`）
 
 一次真实后端的录制结果，供离线 strict replay 回归使用（§9.2）。
@@ -4220,4 +4236,15 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   边界校验与三步刷新流程，以及入库清单与"自动 scanner + 人工逐文件审阅"双闸。
 - Change reason: 单一固定目录的 bundle 无法原子刷新（`os.rename` 覆盖非空目录会失败，
   先删再录会在失败时丢掉已审阅资产）；而未受约束的 `CURRENT` 可以把 replay 指向仓外任意路径。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 生产 profile 可重放自己的录制
+
+- Change summary: 新增 §9.10.1。生产 profile 对 `--replay` 从"一律拒绝"改为
+  "按 bundle 的逐调用 provenance 判定"（全部为被允许后端才放行；`unknown` /
+  读不出 / 为空一律拒绝）；`_preflight` 的凭据检查对 `strict` / `prompt-only` 两个
+  离线 replay 模式豁免。
+- Change reason: 原口径与验收判据 A5/A6（"无网络、无 key 的机器上跑通 strict replay，
+  且进 CI 主 job"）直接矛盾——按原样执行，用录制时的同一个生产 profile 重放会被拒绝，
+  且预检会先因缺凭据退出。bundle 已经带有 replay 不改写的 provenance，判据因此是可回答的。
 - Change time: 2026-08-11

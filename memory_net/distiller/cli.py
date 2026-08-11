@@ -42,6 +42,7 @@ from memory_net.distiller.llm.recording import (
     RecordingProvider,
     ReplayProvider,
     ScanningProvider,
+    recorded_backends,
 )
 from memory_net.distiller.orchestrator import DistillOrchestrator
 from memory_net.distiller.output_scanner import (
@@ -173,6 +174,12 @@ def main(argv: list[str] | None = None) -> int:
                 provider=provider_name,
                 fallback=fallback_name,
                 replay=bool(args.replay),
+                # The bundle's own per-call provenance, so a production
+                # profile can replay a recording of itself while still
+                # refusing one that came from the mock.
+                replay_backends=(
+                    recorded_backends(args.replay) if args.replay else None
+                ),
             )
         except ProfileError as exc:
             raise SystemExit(f"invalid profile {profile.path}: {exc}") from exc
@@ -536,6 +543,10 @@ def _wrap_record(
         scanning = ScanningProvider(provider, context=context)
         return scanning if scanning.scanner is not None else provider
     return RecordingProvider(provider, recorder=recorder, context=context)
+
+
+_OFFLINE_REPLAY_MODES = frozenset({"strict", "prompt-only"})
+"""Replay modes that provably make no request, whatever the provider is named."""
 
 
 def _replay_mode(args: argparse.Namespace) -> str:
@@ -1005,6 +1016,13 @@ def _preflight(args: argparse.Namespace) -> None:
     the same reason: resolving that requires the profile.
     """
     if getattr(args, "provider", None) != "deepseek":
+        return
+    if _replay_mode(args) in _OFFLINE_REPLAY_MODES:
+        # A replay that cannot fall through to the live lane never constructs
+        # the backend, so demanding its credentials would make the offline
+        # regression -- the one that has to stay green on a public runner with
+        # no secrets -- impossible to run at all. `allow-live-on-miss` is
+        # excluded precisely because it can go live on a miss.
         return
     missing = [name for name in (API_KEY_ENV, BASE_URL_ENV) if not os.environ.get(name)]
     if missing:
