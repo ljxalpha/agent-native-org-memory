@@ -39,6 +39,11 @@ NOT_VERIFIED = (
 #: reported rather than silently treated as a pass.
 PlatformProbe = Callable[[str, str], list[str]]
 
+_TOKEN_NO_PROBE = (
+    f"[NOTE] {PLATFORM_TOKEN_ENV} is set but this build carries no platform "
+    "probe; the platform side was still NOT empirically verified"
+)
+
 
 def main() -> int:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
@@ -82,6 +87,12 @@ def validate(
         code = _check_branch_protection(root, review_gate, environ, probe)
         if code:
             return code
+        return 0
+    # Protection is claimed by configuration alone, with no review gate to fall
+    # back on. That is exactly the case where a bare exit 0 reads as "the
+    # platform enforces this", so the limitation is stated here too.
+    print("[OK] platform_write_protection is declared in config/distill.yaml")
+    print(NOT_VERIFIED if not environ.get(PLATFORM_TOKEN_ENV) else _TOKEN_NO_PROBE)
     return 0
 
 
@@ -123,10 +134,7 @@ def _check_branch_protection(
         print(NOT_VERIFIED)
         return 0
     if probe is None:
-        print(
-            f"[NOTE] {PLATFORM_TOKEN_ENV} is set but this build carries no "
-            "platform probe; the platform side was still NOT empirically verified"
-        )
+        print(_TOKEN_NO_PROBE)
         return 0
     findings = probe(target, token)
     for finding in findings:

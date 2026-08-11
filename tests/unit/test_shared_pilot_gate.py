@@ -131,6 +131,42 @@ def test_a_probe_finding_fails_the_gate(tmp_path: Path) -> None:
     assert code == 7
 
 
+def test_a_platform_only_configuration_also_says_it_did_not_verify(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No review gate, protection claimed by config alone: still not evidence."""
+    root = _repo(
+        tmp_path,
+        distill=(
+            "review_gate:\n  enabled: false\n"
+            "platform_write_protection:\n  required: true\n"
+        ),
+    )
+
+    code = validate(root, environ={})
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "platform-side protection NOT empirically verified" in out
+
+
+def test_a_platform_only_configuration_with_a_token_says_the_same(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(
+        tmp_path,
+        distill=(
+            "review_gate:\n  enabled: false\n"
+            "platform_write_protection:\n  required: true\n"
+        ),
+    )
+
+    code = validate(root, environ={PLATFORM_TOKEN_ENV: "t"}, probe=None)
+
+    assert code == 0
+    assert "NOT empirically verified" in capsys.readouterr().out
+
+
 def test_the_shipped_configuration_is_coherent() -> None:
     """The repository's own config must satisfy the check it ships."""
     assert validate(Path("."), environ={}) == 0
