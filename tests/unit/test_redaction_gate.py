@@ -256,3 +256,24 @@ def _stub_repo_io(
         orchestrator._write_failure_outputs = (  # type: ignore[method-assign]
             lambda **kwargs: None
         )
+
+
+def test_a_leaking_parse_failure_detail_aborts_the_run(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """``parse_error_details`` is published in metrics.json and is the one piece
+    of model output that reaches an artifact without being parsed first: the
+    parser quotes the candidate key names it found."""
+    unparseable = 'prelude {"summary-' + HOME_PATH + '": 1} tail'
+    pipeline = _pipeline(tmp_path, _ScriptedProvider([unparseable]), scanner)
+    pipeline.fallback_provider = _ScriptedProvider([unparseable])
+
+    with pytest.raises(DistillationAborted) as excinfo:
+        pipeline.run(_records(1), run_id=RUN_ID)
+
+    output = excinfo.value.output
+    assert output.redaction_failures
+    assert output.redaction_rule_counts is not None
+    assert "abs_home_path" in output.redaction_rule_counts
+    assert output.parse_error_details == []
+    assert HOME_PATH not in str(excinfo.value)

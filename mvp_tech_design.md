@@ -1439,6 +1439,11 @@ pipeline 捕获后**不吞异常**，而是把 `redaction_failures` 与 `redacti
 orchestrator 捕获它 → 取出 output → 走 failure 路径。
 计数与阻断因此走同一条通路，不存在"异常吃掉了计数"的窗口。
 
+**`parse_error_details` 同样要过扫描**：解析失败时写进 `metrics.json` 的这段描述里
+带有解析器引用的**模型可控片段**（候选键名、失败位置），而它是唯一一段
+"没被解析过就进产物"的模型输出——解析成功的载荷走 `_scan_parsed`，解析失败的只剩这条。
+命中即与产物命中同样处理：整 run 失败，且该条 detail **不写入**。
+
 orchestrator 侧 `_distill_gate_error()` 新增 `redaction_failures > 0` 分支，
 语义强于 parse/citation 两者：**阻止全部发布**（不写 team、不写 manifest、不写产物）
 + 触发 `recorder.abort()`（不留任何 bundle）+ 写 failure 版 `.health.json` 与 `metrics.json`

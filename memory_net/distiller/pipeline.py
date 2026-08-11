@@ -240,9 +240,19 @@ class DistillationPipeline:
                 try:
                     parsed = parse_json_response(fallback_response.text)
                 except (json.JSONDecodeError, ValueError) as second_exc:
-                    parse_error_details.append(
-                        _parse_failure_detail(first_exc, second_exc)
-                    )
+                    detail = _parse_failure_detail(first_exc, second_exc)
+                    try:
+                        # The parser quotes model-controlled fragments (a
+                        # candidate key name, the position of the failure), and
+                        # this string is published in metrics.json. It is the
+                        # one piece of model output that reaches an artifact
+                        # without having been parsed first, so it is scanned
+                        # like any other.
+                        self._scan_parse_detail(detail)
+                    except RedactionViolation as exc:
+                        redaction_hits.extend(exc.hits)
+                        break
+                    parse_error_details.append(detail)
                     parse_failures += 1
                     skipped_clusters += 1
                     continue
@@ -334,6 +344,12 @@ class DistillationPipeline:
                 + ", ".join(sorted(rule_counts)),
             )
         return output
+
+    def _scan_parse_detail(self, detail: str) -> None:
+        """Scan a parse-failure description before it can reach metrics."""
+        scanner = self.context.scanner if self.context is not None else None
+        if isinstance(scanner, OutputScanner):
+            scanner.check(detail, field_kind=PROSE, field_path="parse_error_details")
 
     def _scan_parsed(self, parsed: dict[str, Any]) -> None:
         """Scan one cluster's parsed products (§5.5.13).
