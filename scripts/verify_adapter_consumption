@@ -4,11 +4,16 @@
     verify_adapter_consumption --adapter config/adapters/hermes.yaml \
         --runtime-root <agent source tree> [--model M --provider P] [--dry-run]
 
-Two runs inside the sandbox, identical but for one thing: the first has the team
-hint installed and an ``INDEX.md`` carrying a fresh sentinel, the second has
-neither. The sentinel is sixteen random characters that live in exactly one
-file. If it comes back in the first answer and not the second, the agent read
-that file.
+Two runs inside the sandbox, identical but for one thing: the injected hint.
+Both have the same ``INDEX.md`` carrying the same fresh sentinel; only the
+first has the reference to it installed in ``AGENTS.md``. The sentinel is
+sixteen random characters that live in exactly one file. If it comes back in
+the first answer and not the second, the hint is what took the agent there.
+
+"Identical" has to include the agent's own state, which a run mutates -- its
+database, caches and logs all live under the sandbox home. So the home is
+restored from a pristine copy before each run; without that, the control is
+the second half of a sequence rather than a comparison.
 
 Python rather than shell, and not only for the usual reason. This has to mint a
 sentinel, take a before/after set difference over the session directory, and
@@ -29,7 +34,7 @@ import secrets
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
@@ -203,26 +208,68 @@ def prepare(
     return index_text, instructions.read_text(encoding="utf-8")
 
 
-def assert_turn_cap(root: Path) -> None:
-    """Refuse to start unless the sandbox config actually carries the cap.
+REQUIRED_TOOLSET = ["file"]
+"""The exact toolset this check runs with.
 
-    The cap is the only thing bounding this check's cost, and it lives in a
-    file written by a *previous* command (``agent_sandbox up --max-turns``).
-    Assuming it is there is how a run costs ninety calls instead of three: the
-    agent's own default is 90, and its config file outranks the environment
-    variable that looks like the limit.
+Checked as well as the turn cap, because a wider one is a second way to blow
+the budget rather than a nicety: a delegation tool starts child agents whose
+iteration budgets are their own and much larger.
+"""
+
+_REMEDY = (
+    "sandbox is not configured for this check; re-run "
+    f"`agent_sandbox up --toolset file --max-turns {MAX_ITERATIONS}`"
+)
+
+
+def assert_turn_cap(root: Path) -> None:
+    """Refuse to start unless the sandbox config carries the cap and the toolset.
+
+    Both live in a file written by a *previous* command
+    (``agent_sandbox up``). Assuming they are there is how a run costs ninety
+    calls instead of three: the agent's own default is 90, and its config file
+    outranks the environment variable that looks like the limit.
+
+    Nothing parsed out of that file reaches the error message. It is a config
+    an operator may have edited, this runs next to credential material, and a
+    diagnostic that echoes file contents is a way for the next value someone
+    puts there to end up in a terminal and a CI log.
     """
     config = root / "home" / ".hermes" / "config.yaml"
     if not config.is_file():
-        raise SystemExit(f"no sandbox config at {config}; run `agent_sandbox up` first")
-    loaded = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
-    found = (loaded.get("agent") or {}).get("max_turns")
-    if found != MAX_ITERATIONS:
-        raise SystemExit(
-            f"sandbox config declares agent.max_turns={found!r}, expected "
-            f"{MAX_ITERATIONS}; re-run `agent_sandbox up --max-turns "
-            f"{MAX_ITERATIONS}`"
-        )
+        raise SystemExit(_REMEDY)
+    try:
+        loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        # Not chained: PyYAML's diagnostics quote the offending source line.
+        raise SystemExit(_REMEDY) from None
+    if not isinstance(loaded, Mapping):
+        raise SystemExit(_REMEDY)
+    agent = loaded.get("agent")
+    turns = agent.get("max_turns") if isinstance(agent, Mapping) else None
+    if not isinstance(turns, int) or isinstance(turns, bool) or turns != MAX_ITERATIONS:
+        raise SystemExit(_REMEDY)
+    toolsets = loaded.get("platform_toolsets")
+    offered = toolsets.get("cli") if isinstance(toolsets, Mapping) else None
+    if offered != REQUIRED_TOOLSET:
+        raise SystemExit(_REMEDY)
+
+
+def snapshot_home(root: Path, destination: Path) -> Path:
+    """Copy the freshly-created sandbox home aside, before anything runs."""
+    shutil.copytree(root / "home", destination)
+    return destination
+
+
+def restore_home(root: Path, pristine: Path) -> None:
+    """Put the agent's state back to the snapshot, so the next run starts level.
+
+    A run leaves a database, caches, logs and an auth record behind. Without
+    this the control is not a comparison but the second half of a sequence, and
+    any difference could be the order rather than the hint.
+    """
+    shutil.rmtree(root / "home")
+    shutil.copytree(pristine, root / "home")
 
 
 def session_files(root: Path) -> list[str]:
@@ -319,6 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = f"verify-{new_sentinel()[:8]}"
 
     assert_turn_cap(args.root)
+    pristine = snapshot_home(args.root, args.root / "pristine-home")
 
     sentinel = new_sentinel()
     index_text, instructions = prepare(
@@ -328,7 +376,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     positive = run_once(command, ledger=ledger, run_id=run_id)
     after = session_files(args.root)
 
-    # Same tree, same index, same sentinel -- only the hint is gone.
+    # Same tree, same index, same sentinel, same agent state -- only the hint
+    # is gone.
+    restore_home(args.root, pristine)
     prepare(args.root, adapter_path=args.adapter, sentinel=sentinel, inject_hint=False)
     control = run_once(command, ledger=ledger, run_id=run_id)
 
