@@ -3280,6 +3280,30 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 任一缺失即失败。把这条放在 builder 里而不是留给运行期，是因为运行期发现缺失时
 一次 live 录制已经开始付费了。
 
+### 9.11 Golden bundle（`tests/fixtures/golden_bundle/`）
+
+一次真实后端的录制结果，供离线 strict replay 回归使用（§9.2）。
+
+**目录是版本化的**：bundle 落在 `v<NNN>/`，另有一个受审阅的一行指针文件 `CURRENT`
+（内容就是 `v001`）。刷新流程是三个独立步骤：录到**新的** `v<NNN+1>/`
+（事务提交用的 `os.rename` 目标必然不存在，原子性成立）→ 审阅通过后单独把 `CURRENT`
+指向新版本 → 再单独删除旧目录。让 `os.rename` 直接覆盖一个已存在的非空 golden 目录是不行的：
+`os.rename` 在目标为非空目录时失败，而"先删旧目录"会在失败时丢掉已审阅的资产。
+回归测试从 `CURRENT` 解析版本目录，不硬编码版本号。
+
+**`CURRENT` 的格式与边界写死**：内容必须是**单行**、匹配 `^v[0-9]{3,}$`
+（无空行、无注释、无路径分隔符）。读取方校验正则 → 拼路径 → `resolve()` 后必须仍位于
+`tests/fixtures/golden_bundle/` 之下，否则报错。否则一个 `CURRENT` 就能把 replay
+指向 bundle 根之外的任意路径。
+
+**入库清单（4 + N）**：`calls.jsonl` / `cluster_assignment.json` / `snapshot.json` /
+`record_metrics.json`，外加每次调用一个的 `requests/<NNNN>-<prompt_hash>.json`。
+
+**入库前的两道闸**：录制期 scanner 在 recorder 层前置且 bundle 是事务性的
+（命中即整体失败、磁盘上不留任何 bundle），再叠加**逐文件人工审阅**。
+输入必须是 §9.10 的合成 fixture 记录——bundle 里存的是完整 prompt 与完整模型响应，
+拿真实个人记忆去录，等于把它提交进一个公开仓库。
+
 ## 10. Sandbox 与权限兼容
 
 实现者必须遵守：
@@ -4188,4 +4212,12 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   `team/<category>/<title-slug>-<evidence_hash>.md` 的 slug 段整体熵实测 4.14–4.35，
   高于阈值——规则会因**模型给产物起的标题**而拒绝整个 run（演练中 manifest 扫描命中 6 次）。
   另外只改代码不改 YAML 会让同一个 `version` 对应两种判定，故补一个显式的规则修订键。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 golden bundle
+
+- Change summary: 新增 §9.11，定义 golden bundle 的版本化目录与 `CURRENT` 指针的格式、
+  边界校验与三步刷新流程，以及入库清单与"自动 scanner + 人工逐文件审阅"双闸。
+- Change reason: 单一固定目录的 bundle 无法原子刷新（`os.rename` 覆盖非空目录会失败，
+  先删再录会在失败时丢掉已审阅资产）；而未受约束的 `CURRENT` 可以把 replay 指向仓外任意路径。
 - Change time: 2026-08-11

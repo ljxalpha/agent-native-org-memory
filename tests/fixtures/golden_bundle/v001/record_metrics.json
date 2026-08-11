@@ -1,0 +1,19 @@
+{
+  "calls": 3,
+  "output_scanner_mode": "enforce",
+  "output_scanner_ruleset_version": "outscan-3475b7a4184b",
+  "provider_backends": [
+    "deepseek"
+  ],
+  "replay_hits": 0,
+  "replay_live_calls": 3,
+  "replay_misses": 0,
+  "replay_mode": "live",
+  "run_id": "20260811T081730Z-394522ec",
+  "usage_source": "reported",
+  "usage_source_counts": {
+    "estimated": 0,
+    "reported": 3,
+    "unknown": 0
+  }
+}

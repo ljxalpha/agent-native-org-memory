@@ -1,0 +1,30 @@
+{
+  "clusters": [
+    {
+      "cluster_id": 0,
+      "memory_ids": [
+        "golden-auth-retry-001",
+        "golden-auth-retry-002"
+      ],
+      "size": 2
+    },
+    {
+      "cluster_id": 1,
+      "memory_ids": [
+        "golden-deploy-window-001",
+        "golden-deploy-window-002"
+      ],
+      "size": 2
+    },
+    {
+      "cluster_id": 2,
+      "memory_ids": [
+        "golden-search-index-001",
+        "golden-search-index-002"
+      ],
+      "size": 2
+    }
+  ],
+  "master_snapshot_sha": "85a2cc07eec5c92a9296004e1893eb5d508ca70f",
+  "run_id": "20260811T081730Z-394522ec"
+}

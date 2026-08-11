@@ -1,0 +1,9 @@
+{
+  "leaf_refs": {
+    "origin/leaf/alice-claude-01": "13f8821e0ffcea4cd5ff96a0cd7062b9d8857c7c",
+    "origin/leaf/bob-claude-01": "e6314c11c44d80a0a64cf77d978972454c445bb0",
+    "origin/leaf/carol-claude-01": "b9cdfb4e98a5c316265348035853985c1fc9ac90"
+  },
+  "master_snapshot_sha": "85a2cc07eec5c92a9296004e1893eb5d508ca70f",
+  "run_id": "20260811T081730Z-394522ec"
+}
