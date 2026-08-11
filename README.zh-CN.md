@@ -352,7 +352,7 @@ profile、prompt 模板、scanner 规则文件，全都用 `git show` 从快照 
 | Adapter：`opencode` | **experimental，路径未取得依据** | 文件顶部写明 `EXPERIMENTAL / UNVERIFIED: template only`：其路径是约定，而非实测到的布局。 |
 | 真实 agent 消费注入 hint | **一对未重复的配对实验** | 针对 `hermes`：带 hint 的实验组返回了新鲜哨兵，而在其余条件完全相同的对照组中没有返回。这是**一次**、固定顺序的观测，而模型本身是采样的——它不构成成功率，这也正是该 adapter 保持 experimental 的原因。**fixture 与工具链本身不构成消费证据。** |
 | 三叶子稳定性 | **加速档合成 soak** | CI 对三个相互隔离的合成叶子跑 5 轮，逐叶子做健康断言。24 小时档是同一个脚本加 `--duration-seconds 86400`，属 operator 事项——**加速档不等于已完成 24 小时验证**。 |
-| 审核 / 发布关卡 | 分支 + artifact + CI 闸 | run 推送 `release/RUN_ID`，把只含摘要与指针的 `review_request.json` 写进 release commit，CI 的 `merge-gate` 再从分支重新校验。**平台侧分支保护未经实证**；没有 token 时校验脚本会明确打印“未实证”并以 0 退出。 |
+| 审核 / 发布关卡 | 分支 + artifact + CI 闸 | run 推送 `release/RUN_ID`，把只含摘要与指针的 `review_request.json` 写进 release commit，CI 的 `merge-gate` 再从分支重新校验——schema、citation、证据规则，以及（在 `release/*` head 上）该 review request 是否存在。**平台侧分支保护未经实证**；没有 token 时校验脚本会明确打印“未实证”并以 0 退出。 |
 | CI 中的生产回归 | 两档 | Tier A——离线 golden bundle 严格回放 + 桩契约测试——**每个 PR 阻塞**。Tier B——对真实端点的 live smoke——仅 `workflow_dispatch` 手动触发，缺凭据即 skip。 |
 | 非编码 agent、组织级根、实时看板 | **路线图** | 尚未交付。见 [VISION.md](VISION.md)。 |
 
