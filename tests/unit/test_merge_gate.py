@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from memory_net.distiller.merge_gate import main, validate_release_tree
 
 PRODUCT = """---
@@ -163,3 +165,22 @@ def test_the_entry_point_reports_its_verdict_through_the_exit_code(
 
     (root / "manifest.json").unlink()
     assert main([str(root)]) == 1
+
+
+def test_the_ci_job_only_runs_for_a_release_branch_targeting_master() -> None:
+    """The condition is the whole design: it skips, it does not fail."""
+    workflow = yaml.safe_load(
+        Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"]["merge-gate"]
+    condition = " ".join(job["if"].split())
+
+    assert "github.event_name == 'pull_request'" in condition
+    assert "github.base_ref == 'master'" in condition
+    assert "startsWith(github.head_ref, 'release/')" in condition
+    # Read-only, and no secret is passed to any step: a fork pull request, which
+    # never sees a secret, must be able to run this to completion.
+    assert job["permissions"] == {"contents": "read"}
+    steps = json.dumps(job["steps"])
+    assert "secrets." not in steps
+    assert "memory_net.distiller.merge_gate" in steps

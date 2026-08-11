@@ -5,6 +5,31 @@ on:
   pull_request:
 
 jobs:
+  # Blocks a release branch on its way into master, and re-derives its verdict
+  # from the branch contents rather than from the run that produced them
+  # (M2-004). Deliberately skipped -- not failed -- on every other pull request:
+  # a job that failed on an ordinary PR would say the change is bad when all it
+  # means is that this gate does not apply to it.
+  merge-gate:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.base_ref == 'master' &&
+      startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-latest
+    # No secret is declared and none is needed: the gate reads a checkout and
+    # makes no request, which is what keeps it green on a fork pull request.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: python -m pip install -e '.[dev]'
+      - name: Re-validate the release branch (schema, citations, evidence rules)
+        run: python -m memory_net.distiller.merge_gate .
+
   test:
     runs-on: ubuntu-latest
     steps:

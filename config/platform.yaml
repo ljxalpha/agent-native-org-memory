@@ -6,3 +6,15 @@ review_gate:
 paths:
   allow_home: true
   allow_agent_root: true
+branch_protection:
+  # What the platform is expected to enforce on the shared memory repository.
+  # This file states the *expectation*; the platform is the only place it can
+  # actually hold, so scripts/validate_shared_pilot_gate.py checks that this
+  # expectation is self-consistent and says plainly when it has not been able
+  # to verify the platform side (M2-004).
+  protected_branch: master
+  # Role names, never accounts: this file is public, and a list of real handles
+  # would put people's identities in it. The platform maps the role to whoever
+  # holds it.
+  master_writers_only:
+    - distiller-ci
