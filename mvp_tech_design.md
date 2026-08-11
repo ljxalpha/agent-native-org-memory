@@ -1190,6 +1190,9 @@ metrics 的字节不再与旧版逐字相同；`snapshot.json` 则仍然在无 p
 | `EmbeddingPolicy.probe()` | **解析出 profile 之后、任何叶子分支读取与任何 LLM 调用之前** | embedding 后端能否真的加载 | 后端名写在 profile 里，而 profile 来自冻结快照，快照要 fetch 之后才有 |
 
 写死的判据：**LLM 调用与叶子读取一定在 probe 之后**；master fetch 一定在 preflight 之后。
+判据说的是"读取"而不是"联网触达"：master 快照冻结走 `git fetch --all --prune`，
+若 master 仓配了叶子 remote，这一步会连到它们——但它只更新引用，不读取任何叶子内容，
+也不产生任何费用。真正要挡的是"用一个加载不了的 embedding 后端去跑完整条昂贵链路"。
 `_preflight` 按 `--provider` 而非解析后的 provider 名判断，理由同上：解析要 profile。
 
 ## 6. 叶子节点（Leaf Node）
