@@ -1,5 +1,7 @@
 import builtins
 import json
+import os
+import subprocess
 from argparse import Namespace
 from contextlib import nullcontext
 from pathlib import Path
@@ -11,6 +13,7 @@ import pytest
 import memory_net.leaf.cli as leaf_cli
 import memory_net.leaf.daemon as daemon_module
 from memory_net.leaf.daemon import run_foreground
+from memory_net.shared.config import canonical_generation_hash
 
 
 def test_run_foreground_once_executes_all_tasks_in_order(
@@ -203,8 +206,9 @@ def test_daemon_config_sync_uses_frozen_snapshot_without_master_switch(
         _generations_root: Path,
         *,
         adapter_name: str,
+        source_master_sha: str | None = None,
     ) -> Path:
-        calls.append(("materialize", f"{adapter_name}:{snapshot}"))
+        calls.append(("materialize", f"{adapter_name}:{snapshot}:{source_master_sha}"))
         return generation
 
     monkeypatch.setattr(
@@ -226,7 +230,7 @@ def test_daemon_config_sync_uses_frozen_snapshot_without_master_switch(
 
     assert calls == [
         ("bootstrap", "snap-1"),
-        ("materialize", "claude-code:snap-1"),
+        ("materialize", "claude-code:snap-1:snap-1"),
         ("leaf", "alice"),
     ]
     assert (tmp_path / "config-current").resolve() == generation
@@ -414,3 +418,77 @@ def test_status_reports_a_missing_health_file_without_a_traceback(
 ) -> None:
     assert leaf_cli.main(["status", "--health", str(tmp_path / "absent.json")]) == 1
     assert "cannot read health file" in capsys.readouterr().err
+
+
+def test_config_sync_records_the_snapshot_sha_as_generation_provenance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Config sync repoints ``config-current``; provenance must survive it.
+
+    This drives the real ``materialize_generation()`` over a real git snapshot
+    rather than a stub, so it fails if the snapshot sha stops being threaded
+    through to the marker.
+    """
+    repo = tmp_path / "repo"
+    (repo / "config" / "adapters").mkdir(parents=True)
+    (repo / "bootstrap_state.json").write_text("{}", encoding="utf-8")
+    (repo / "config" / "subscribe.yaml").write_text("a: 1\n", encoding="utf-8")
+    (repo / "config" / "adapters" / "claude-code.yaml").write_text(
+        "name: claude-code\nteam_target: ${AGENT_ROOT}/memory/team\n",
+        encoding="utf-8",
+    )
+    snapshot_sha = _init_repo_with_one_commit(repo)
+    args = Namespace(
+        repo=repo,
+        adapter=Path("claude-code.yaml"),
+        agent_root=tmp_path / "agent",
+        node_id="alice",
+        state_dir=tmp_path / "state",
+        config_revision="local",
+    )
+
+    monkeypatch.setattr(leaf_cli, "_repo_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(leaf_cli, "_origin_master_snapshot", lambda _repo: snapshot_sha)
+    monkeypatch.setattr(
+        leaf_cli,
+        "_validate_bootstrap_state_from_git_snapshot",
+        lambda _repo, _snapshot: None,
+    )
+    monkeypatch.setattr(leaf_cli, "_prepare_leaf_branch", lambda _repo, _node: None)
+
+    _report, _subscribe, config_task, _health = leaf_cli._daemon_tasks(args)
+    assert config_task is not None
+    config_task()
+
+    active = (tmp_path / "config-current").resolve()
+    assert (active / "config_source_master_sha").read_text(
+        encoding="utf-8"
+    ) == snapshot_sha
+    assert canonical_generation_hash(active) == active.name
+
+
+def _init_repo_with_one_commit(repo: Path) -> str:
+    """Commit the working tree and return the resulting commit sha."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "memory-net",
+        "GIT_AUTHOR_EMAIL": "memory-net@example.invalid",
+        "GIT_COMMITTER_NAME": "memory-net",
+        "GIT_COMMITTER_EMAIL": "memory-net@example.invalid",
+    }
+
+    def git(*argv: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *argv],
+            check=True,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        return result.stdout.strip()
+
+    git("init", "-q", "-b", "master")
+    git("add", "-A")
+    git("commit", "-qm", "seed")
+    return git("rev-parse", "HEAD")

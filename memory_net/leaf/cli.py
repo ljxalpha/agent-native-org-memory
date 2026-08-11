@@ -440,6 +440,7 @@ def _daemon_tasks(
                     snapshot_sha,
                     args.state_dir.parent / "config.generations",
                     adapter_name=_adapter_config_name(args),
+                    source_master_sha=snapshot_sha,
                 )
             _replace_config_current(
                 args.state_dir.parent / "config-current", generation
@@ -880,7 +881,15 @@ def _materialize_generation_from_git_snapshot(
     generations_root: Path,
     *,
     adapter_name: str,
+    source_master_sha: str | None = None,
 ) -> Path:
+    """Materialize the config generation frozen in one master snapshot.
+
+    :param source_master_sha: recorded as the generation's provenance marker.
+        Config sync replaces ``config-current``, so without it every sync would
+        drop the marker the installer wrote and the operational identity of the
+        leaf would lose ``config_source_master_sha`` from that point on.
+    """
     generations_root.mkdir(parents=True, exist_ok=True)
     source_root = (
         generations_root / f".snapshot-{short_hash(snapshot_sha, 8)}-{uuid.uuid4().hex}"
@@ -905,6 +914,7 @@ def _materialize_generation_from_git_snapshot(
             source_root,
             generations_root,
             adapter_name=adapter_name,
+            source_master_sha=source_master_sha,
         )
     finally:
         shutil.rmtree(source_root, ignore_errors=True)
