@@ -1327,6 +1327,13 @@ stage-2（落盘前）：response = provider.generate(request)
 带命中的 `enforce` 判定书递到 `record()` 一律拒写。
 `context` 为 `None` 时行为与接线前逐字相同（此时 recorder 收到的是显式的"未扫描"判定书）。
 
+**"无规则集 + 录制"在 CLI 侧一律拒绝启动**：`_output_scanner()` 只在
+"profile 未声明 `output_scanner` 块**且**快照里没有默认规则文件"时返回 `None`，
+而这恰好是唯一一条能让 `RecordingProvider` 带着未扫描判定书落盘的可达路径——
+prompt 与响应正文会原样进 `calls.jsonl` / `requests/`。因此该分支在
+`--record` / `--record-dir` 存在时改为报错退出，而不是打一行日志继续跑。
+（不录制的 run 不受影响：它不落任何模型正文，"这个仓库没有规则可执行"仍是合法状态。）
+
 #### 5.5.11 事务性 bundle：staging / commit / abort
 
 bundle 的写入过去不是事务性的：`BundleRecorder.record()` 逐调用 append + fsync，

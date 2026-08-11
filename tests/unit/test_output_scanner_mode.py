@@ -263,3 +263,26 @@ def test_no_block_and_no_rule_file_leaves_the_run_unscanned(
         cli_module._output_scanner(_args(), {}, repo_path=tmp_path, snapshot_sha=None)
         is None
     )
+
+
+@pytest.mark.parametrize("flag", ["record", "record_dir"])
+def test_no_rule_file_refuses_to_record(
+    flag: str, monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The one path that would persist unscanned prompts and responses.
+
+    A run with no scanner is tolerable only because it writes no model text;
+    ``--record``/``--record-dir`` is exactly the case where it does, so the
+    combination stops the run instead of logging a line and continuing."""
+    monkeypatch.delenv(MODE_ENV_VAR, raising=False)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module._output_scanner(
+            _args(**{flag: tmp_path / "bundle"}),
+            {},
+            repo_path=tmp_path,
+            snapshot_sha=None,
+        )
+
+    assert excinfo.value.code != 0
+    assert "no output scanner rules" in str(excinfo.value)

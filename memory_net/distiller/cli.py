@@ -411,6 +411,15 @@ def _output_scanner(
         required=declared,
     )
     if text is None:
+        if args.record or args.record_dir:
+            # The only reachable way for prompts and responses to be written to
+            # disk unscanned: without a ruleset the recorder receives an
+            # explicit "not scanned" verdict and records the call anyway. A run
+            # with no scanner is tolerable only while it persists no model text.
+            raise SystemExit(
+                f"no output scanner rules at {settings.patterns_path}: recording "
+                "would write prompts and responses that nothing has scanned"
+            )
         LOGGER.info(
             "no output scanner rules at %s; running without one",
             settings.patterns_path,
