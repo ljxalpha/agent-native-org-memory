@@ -234,8 +234,10 @@ for path in runs[: max(0, len(runs) - keep)]:
     print(path.relative_to(repo).as_posix())
 PY
 )"
+  # The emptiness guard is the loop condition, not `xargs -r`: that flag is a GNU
+  # extension and this harness has to run on macOS too.
   [[ -n "$stale" ]] || return 0
-  echo "$stale" | xargs -r git -C "$DISTILL_WORK" rm -rq --
+  echo "$stale" | xargs git -C "$DISTILL_WORK" rm -rq --
   git -C "$DISTILL_WORK" commit -qm "prune distill run history"
   git -C "$DISTILL_WORK" push --quiet origin master
 }
