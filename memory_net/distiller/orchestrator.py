@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 import uuid
@@ -198,9 +199,7 @@ class DistillOrchestrator:
             # Explicit, and in a finally: a reservation that never reached a
             # terminal state means an attempt's cost was silently dropped from
             # the run's ceiling. __del__ would be too late and too uncertain.
-            budget = self.context.budget if self.context is not None else None
-            if budget is not None:
-                budget.assert_all_settled()
+            self._assert_budget_settled()
         return OrchestratorResult(
             run_id=run_id,
             input_records=len(records),
@@ -211,6 +210,23 @@ class DistillOrchestrator:
                 else self.repo_path / "manifest.json"
             ),
         )
+
+    def _assert_budget_settled(self) -> None:
+        """Fail a *succeeding* run that leaked a budget reservation.
+
+        Skipped while another exception is propagating. Raising out of a
+        ``finally`` replaces the exception in flight, so on an already-failing
+        run this would report a leaked reservation in place of the actual cause
+        -- and change the exception's *type*, which callers match on
+        (``DistillGateError`` is handled quite differently from a
+        ``RuntimeError``). A run that is failing anyway is already loud; a run
+        that reports success while an attempt's cost never landed on the ceiling
+        is the silent case worth catching.
+        """
+        budget = self.context.budget if self.context is not None else None
+        if budget is None or sys.exc_info()[0] is not None:
+            return
+        budget.assert_all_settled()
 
     def _write_dry_run_outputs(
         self,

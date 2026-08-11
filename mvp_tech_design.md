@@ -889,7 +889,12 @@ wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直�
   与"累计"混淆，第二次调用传 2 就变成 1+2=3。
 - 一个 `Reservation` 只能终结一次，重复终结抛错：否则一次失败重试可以把额度退两遍。
 - 真实成本**超过**预扣时不回滚已发生的调用（钱已经花了），只记账，并让下一次 `reserve` 触顶。
-- `assert_all_settled()` 由 orchestrator 在 `finally` 里**显式调用**断言无残留预扣。
+- `assert_all_settled()` 由 orchestrator 在 `finally` 里**显式调用**断言无残留预扣，
+  但**只在没有其它异常正在传播时才检查**（`sys.exc_info()[0] is None`）。
+  从 `finally` 里抛异常会**顶替掉**正在传播的那一个：run 已经因为真实原因失败时，
+  这会把"预扣残留"报上去代替真正的成因，还会改变异常**类型**——
+  而调用方是按类型分流的（`DistillGateError` 与 `RuntimeError` 处理方式完全不同）。
+  已经在失败的 run 本来就够响；要抓的是"报成功、却有一次尝试的成本没落到上限上"这种**静默**情形。
   **不依赖 `__del__`**：析构时机不确定，不是可靠的检测点。
 - `snapshot() -> dict` 供 metrics，键集合稳定。
 
@@ -957,7 +962,15 @@ profile 没写 `budget_usd`（即 `RunBudget` 为 `None`）时不包，保持注
 
 **禁止任何模块自读时钟或自造 run id**（`runctx.py` 这个唯一的默认工厂除外）。
 由结构性负向测试用 AST 扫描 `memory_net/distiller/` 全部模块守住：
-出现 `datetime.now` / `datetime.utcnow` / `AOMT_FROZEN*` 环境变量读取即失败。
+出现任一**环境时钟或环境 id 源**、或 `AOMT_FROZEN*` 环境变量读取即失败。
+禁用清单必须覆盖**全部同类 API 而不只是最常见的那个**——只禁
+`datetime.datetime.now` 会把 `datetime.date.today` / `datetime.datetime.today` /
+`datetime.datetime.fromtimestamp` / `time.time` / `time.time_ns` /
+`time.gmtime` / `time.localtime` / `time.ctime` / `uuid.uuid1` / `uuid.uuid6` /
+`uuid.uuid7` / `os.urandom` 全部留成敞开的门，下一个伸手去拿的人就把这道闸绕过去了。
+每一条禁用项都必须有一条会真的打红的负向自检。
+**`time.monotonic` 明确不在禁用之列**：它量的是时长、没有纪元、无法命名一个 run，
+也不进任何产物；禁掉它只会把调用方逼回这道闸本来要挡住的墙上时钟。
 理由不是风格，而是可复现性：只要有一个模块自己读时钟，"注入固定 identity 后
 两次 run 逐字节一致"就不再成立，而这种偏差在运行期几乎不可能被发现。
 同理**禁止用环境变量做冻结开关**——冻结只通过注入实现，否则等于给防篡改设计开一个后门。
@@ -1928,6 +1941,12 @@ collect_ops_identity(
 - `started_at` 由调用方注入，采集器不自读时钟，保证健康快照可回放。
 
 `config_source_master_sha` 缺失时不写该键，因此扩展前物化的旧配置代次继续可用（向后兼容）。
+
+该键的存活取决于**每一条**物化代次的路径都记录 provenance。`config_sync_task` 会把
+`config-current` 重新指向新代次，因此它必须把冻结快照的 sha 透传给
+`materialize_generation(source_master_sha=…)`；否则装机时写下的 marker 会在第一次
+配置同步后消失，严格档 `status` 从此恒为失败。该链路由一条驱动**真实**
+`materialize_generation()` 的守护侧回归固定，而不是靠桩断言参数。
 
 #### 8.7.3 上报 / 守护侧接线
 

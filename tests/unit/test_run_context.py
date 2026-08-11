@@ -25,18 +25,6 @@ from memory_net.distiller.runctx import (
 
 DISTILLER_DIR = Path(__file__).resolve().parents[2] / "memory_net" / "distiller"
 
-# runctx.py owns the one sanctioned clock/id factory; cli.py is the single
-# assembly point allowed to construct a RunIdentity for a run.
-CLOCK_EXEMPT_MODULES = {"runctx.py", "cli.py"}
-
-# Named (module, function) exemptions for uuid4. Named rather than blanket, so a
-# new module cannot quietly acquire an id source of its own.
-UUID_EXEMPTIONS = {
-    # Names a temp directory alongside os.getpid() for concurrency safety. The
-    # value never reaches a product, manifest or metrics file.
-    ("orchestrator.py", "_write_team_products"),
-}
-
 
 def _record() -> dict[str, str]:
     return {
@@ -212,8 +200,23 @@ def test_without_a_context_the_legacy_cost_gate_still_applies(tmp_path: Path) ->
 # Structural tripwire
 # --------------------------------------------------------------------------
 
-BANNED_CLOCK = {"datetime.datetime.now", "datetime.datetime.utcnow"}
-BANNED_IDGEN = {"uuid.uuid4"}
+# Every ambient source, not just the idiomatic one. Banning only
+# ``datetime.datetime.now`` leaves ``datetime.date.today``, ``time.time`` and
+# the other uuid constructors as open doors, and the next module to reach for
+# one would reintroduce the hole the tripwire exists to close.
+BANNED_CLOCK = {
+    "datetime.datetime.now",
+    "datetime.datetime.utcnow",
+    "datetime.datetime.today",
+    "datetime.datetime.fromtimestamp",
+    "datetime.date.today",
+    "time.time",
+    "time.time_ns",
+    "time.localtime",
+    "time.gmtime",
+    "time.ctime",
+}
+BANNED_IDGEN = {"uuid.uuid1", "uuid.uuid4", "uuid.uuid6", "uuid.uuid7", "os.urandom"}
 
 # Exempt by *named function*, not by whole module: exempting a whole file lets
 # any later function in it acquire an ambient clock for free.
@@ -316,6 +319,15 @@ def test_no_distiller_module_carries_ambient_run_state() -> None:
         "import uuid\nx = uuid.uuid4()\n",
         "from uuid import uuid4 as fresh\nx = fresh()\n",
         "import os\nx = os.environ.get('AOMT_FROZEN_RUN_ID')\n",
+        # The alternate APIs a naive ban list leaves wide open.
+        "import time\nx = time.time()\n",
+        "import time\nx = time.time_ns()\n",
+        "import time\nx = time.gmtime()\n",
+        "from datetime import date\nx = date.today()\n",
+        "from datetime import datetime\nx = datetime.today()\n",
+        "from datetime import datetime\nx = datetime.fromtimestamp(0)\n",
+        "import uuid\nx = uuid.uuid1()\n",
+        "import os\nx = os.urandom(8)\n",
     ],
 )
 def test_the_tripwire_actually_fires(tmp_path: Path, source: str) -> None:
@@ -330,6 +342,18 @@ def test_the_tripwire_does_not_fire_on_clean_code(tmp_path: Path) -> None:
     (tmp_path / "clean.py").write_text(
         "from memory_net.distiller.runctx import RunIdentity\n"
         "def f(identity: RunIdentity) -> str:\n    return identity.now()\n",
+        encoding="utf-8",
+    )
+
+    assert scan_for_ambient_run_state(tmp_path) == []
+
+
+def test_a_monotonic_clock_is_not_ambient_run_state(tmp_path: Path) -> None:
+    """time.monotonic measures durations. It has no epoch, cannot name a run and
+    never reaches an artifact, so banning it would only push callers back onto
+    the wall clock this tripwire exists to keep out."""
+    (tmp_path / "timing.py").write_text(
+        "import time\ndef f() -> float:\n    return time.monotonic()\n",
         encoding="utf-8",
     )
 
@@ -353,10 +377,54 @@ def test_orchestrator_accepts_a_context_and_defaults_to_none() -> None:
     assert parameter.default is None
 
 
-def test_orchestrator_reports_an_unsettled_reservation(tmp_path: Path) -> None:
-    """A leaked reservation means an attempt's cost never landed on the ceiling."""
-    budget = RunBudget(1.0, 10.0, max_usd=None)
+def _orchestrator_with(budget: RunBudget | None, tmp_path: Path) -> Any:
+    """A real orchestrator, constructed but never run.
+
+    Only the budget guard is under test here, and construction touches no git
+    state, so a real instance is cheaper *and* stronger than a stand-in.
+    """
+    from memory_net.distiller.orchestrator import DistillOrchestrator
+
+    return DistillOrchestrator(
+        repo_path=tmp_path,
+        pipeline=_pipeline(tmp_path),
+        context=RunContext(budget=budget),
+    )
+
+
+def _leaked(budget: RunBudget) -> RunBudget:
     budget.reserve(input_tokens_upper=1, output_tokens_upper=1, timeout_s_upper=1.0)
+    return budget
+
+
+def test_orchestrator_reports_an_unsettled_reservation(tmp_path: Path) -> None:
+    """A run that reports success while an attempt's cost never landed on the
+    ceiling is the silent failure worth catching."""
+    orchestrator = _orchestrator_with(
+        _leaked(RunBudget(1.0, 10.0, max_usd=None)), tmp_path
+    )
 
     with pytest.raises(RuntimeError, match="unsettled"):
-        budget.assert_all_settled()
+        orchestrator._assert_budget_settled()
+
+
+def test_a_leaked_reservation_does_not_replace_the_run_s_real_error(
+    tmp_path: Path,
+) -> None:
+    """The guard runs in a finally, and raising there *replaces* the exception
+    in flight -- substituting a leaked-reservation report for the actual cause
+    and changing the exception type callers match on."""
+    orchestrator = _orchestrator_with(
+        _leaked(RunBudget(1.0, 10.0, max_usd=None)), tmp_path
+    )
+
+    # The real exception machinery, not a flag: sys.exc_info() is what the
+    # guard consults, and only a genuine in-flight exception sets it.
+    try:
+        raise ValueError("the run's real failure")
+    except ValueError:
+        orchestrator._assert_budget_settled()  # must not raise
+
+
+def test_the_guard_is_inert_when_no_budget_was_injected(tmp_path: Path) -> None:
+    _orchestrator_with(None, tmp_path)._assert_budget_settled()
