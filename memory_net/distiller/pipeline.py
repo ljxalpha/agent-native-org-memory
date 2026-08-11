@@ -749,6 +749,15 @@ class AmbiguousProductsPayload(ValueError):
     """
 
 
+MAX_DECODE_FAILURES = 64
+"""How many opening braces may fail to decode before the scan gives up.
+
+Set far above anything a real response produces -- a preamble mentioning braces
+a few dozen times still fits -- and far below the point where the rescan cost of
+adversarial nesting matters.
+"""
+
+
 def _raw_decode_object(text: str) -> dict[str, Any]:
     """Find the response payload inside text that is not purely JSON.
 
@@ -764,10 +773,24 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     matches: list[dict[str, Any]] = []
     index = 0
+    failures = 0
     while index < len(text):
         if text[index] != "{":
             index += 1
             continue
+        if failures >= MAX_DECODE_FAILURES:
+            # A successful decode skips its own length; a failed one cannot,
+            # because nothing in the error says where the next object begins.
+            # Deeply nested truncated input ("{"x":{"x":...) therefore rescans
+            # the remainder at every brace. Refusing is fail-closed and costs
+            # nothing real: a response needing this many attempts to locate its
+            # payload is not one to trust. Counts only, never content -- this
+            # message is published in metrics.
+            raise ValueError(
+                "distiller response has more than "
+                f"{MAX_DECODE_FAILURES} undecodable object candidates; "
+                "refusing to keep scanning"
+            )
         try:
             # Decoded in place rather than from ``text[index:]``: slicing at
             # every brace copies a suffix each time, so a brace-dense response
@@ -776,6 +799,7 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
         except json.JSONDecodeError as exc:
             if first_error is None:
                 first_error = exc
+            failures += 1
             index += 1
             continue
         # Skip past what was just decoded, so only *sibling* objects are

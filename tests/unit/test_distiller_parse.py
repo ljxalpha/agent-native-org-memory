@@ -123,3 +123,24 @@ def test_a_truncated_trailing_object_does_not_hide_the_payload() -> None:
     text = f'{json.dumps(PAYLOAD)}\n{{"note": "cut off here'
 
     assert parse_json_response(text) == PAYLOAD
+
+
+def test_a_deeply_nested_truncated_response_is_refused_quickly() -> None:
+    """A failed decode cannot skip ahead -- nothing says where the next object
+    starts -- so every brace would otherwise rescan the whole remainder. The
+    input below is the shape that costs the most: thousands of opening braces
+    and nothing that ever decodes."""
+    text = '{"x":' * 5000
+
+    with pytest.raises(ValueError, match="undecodable"):
+        parse_json_response(text)
+
+
+def test_the_attempt_bound_does_not_reject_an_ordinary_preamble() -> None:
+    """The bound has to sit above anything a real response does, or it becomes
+    a parse failure generator of its own."""
+    preamble = "thinking { about } the { records } ... " * 5
+
+    payload = parse_json_response(preamble + '{"products": []}')
+
+    assert payload == {"products": []}
