@@ -1855,6 +1855,18 @@ collect_ops_identity(
 
 `config_source_master_sha` 缺失时不写该键，因此扩展前物化的旧配置代次继续可用（向后兼容）。
 
+#### 8.7.3 上报 / 守护侧接线
+
+`report()` 与 `daemon.run_foreground()` 都接受可选的 `ops_identity: dict[str, str] | None`
+并透传到各自的 `build_health()` 调用点（含 scanner block 与 daemon 的 degraded 两条降级路径
+——**降级时的健康快照同样要能定位到是哪台机器、哪个安装**）。
+
+`split_ops_identity()` 负责把采集结果拆成两部分：§ 8.7.1 的七个 schema 字段作为
+`build_health()` 的具名参数，`build_id_source` 这类审计注记走 `extra`（它是诊断信息，
+不进 health schema 的校验面）。
+
+`ops_identity` 为 `None` 时不写任何相关键，`.health.json` 与扩展前逐字节一致。
+
 ### 8.8 `platform.yaml`（平台元信息，兼容替换）
 
 ```yaml

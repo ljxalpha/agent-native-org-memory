@@ -730,3 +730,128 @@ def _git(cwd: Path, *args: str) -> str:
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+OPS_IDENTITY = {
+    "adapter": "claude-code",
+    "install_id": "inst-0001",
+    "code_version": "0.1.0",
+    "host": "leaf-host-01",
+    "build_id": "0123456789abcdef0123456789abcdef01234567",
+    "config_source_master_sha": "b" * 40,
+    "started_at": "2026-04-20T09:00:00Z",
+    "build_id_source": "package_ref",
+}
+
+
+def test_report_health_is_unchanged_without_ops_identity(tmp_path: Path) -> None:
+    """Regression: not passing ops_identity keeps the payload key-for-key."""
+    adapter, agent_root = _adapter(tmp_path)
+    (agent_root / "memory" / "shared" / "note.md").write_text("hi", encoding="utf-8")
+    leaf_repo = tmp_path / "leaf"
+    leaf_repo.mkdir()
+
+    report(repo_path=leaf_repo, node_id="alice", adapter=adapter)
+
+    health = json.loads((leaf_repo / ".health.json").read_text(encoding="utf-8"))
+    for field in OPS_IDENTITY:
+        assert field not in health
+    validate_health(health)
+
+
+def test_report_health_carries_ops_identity(tmp_path: Path) -> None:
+    adapter, agent_root = _adapter(tmp_path)
+    (agent_root / "memory" / "shared" / "note.md").write_text("hi", encoding="utf-8")
+    leaf_repo = tmp_path / "leaf"
+    leaf_repo.mkdir()
+
+    report(
+        repo_path=leaf_repo,
+        node_id="alice",
+        adapter=adapter,
+        ops_identity=dict(OPS_IDENTITY),
+    )
+
+    health = json.loads((leaf_repo / ".health.json").read_text(encoding="utf-8"))
+    for field, value in OPS_IDENTITY.items():
+        assert health[field] == value
+    assert health["memory_count"] == 1
+    validate_health(health, require_ops_identity=True)
+
+
+def test_scanner_blocked_health_carries_ops_identity(tmp_path: Path) -> None:
+    """The degraded path must stay attributable to a machine and install."""
+    adapter, agent_root = _adapter(tmp_path)
+    (agent_root / "memory" / "shared" / "note.md").write_text(
+        "api_key=abcdefghijklmnopqrstuvwxyz123456",
+        encoding="utf-8",
+    )
+    leaf_repo = tmp_path / "leaf"
+    leaf_repo.mkdir()
+
+    with pytest.raises(RedactionBlockedError, match="external scanner blocked"):
+        report(
+            repo_path=leaf_repo,
+            node_id="alice",
+            adapter=adapter,
+            redactor=null_redactor(),
+            scanner_config={"builtin": {"enabled": True, "mode": "block"}},
+            ops_identity=dict(OPS_IDENTITY),
+        )
+
+    health = json.loads((leaf_repo / ".health.json").read_text(encoding="utf-8"))
+    assert health["status"] == "degraded"
+    for field, value in OPS_IDENTITY.items():
+        assert health[field] == value
+    validate_health(health, require_ops_identity=True)
+
+
+def test_daemon_health_is_unchanged_without_ops_identity(tmp_path: Path) -> None:
+    from memory_net.leaf import daemon
+
+    state_dir = tmp_path / "state"
+    daemon.run_foreground(
+        node_id="alice", state_dir=state_dir, health_task=None, once=True
+    )
+
+    health = json.loads((state_dir / "last_health.json").read_text(encoding="utf-8"))
+    for field in OPS_IDENTITY:
+        assert field not in health
+
+
+def test_daemon_health_carries_ops_identity(tmp_path: Path) -> None:
+    from memory_net.leaf import daemon
+
+    state_dir = tmp_path / "state"
+    daemon.run_foreground(
+        node_id="alice",
+        state_dir=state_dir,
+        once=True,
+        ops_identity=dict(OPS_IDENTITY),
+    )
+
+    health = json.loads((state_dir / "last_health.json").read_text(encoding="utf-8"))
+    for field, value in OPS_IDENTITY.items():
+        assert health[field] == value
+
+
+def test_daemon_degraded_health_carries_ops_identity(tmp_path: Path) -> None:
+    from memory_net.leaf import daemon
+
+    def boom() -> None:
+        raise RuntimeError("task exploded")
+
+    state_dir = tmp_path / "state"
+    daemon.run_foreground(
+        node_id="alice",
+        state_dir=state_dir,
+        report_task=boom,
+        once=True,
+        ops_identity=dict(OPS_IDENTITY),
+    )
+
+    health = json.loads((state_dir / "last_health.json").read_text(encoding="utf-8"))
+    assert health["status"] == "degraded"
+    assert any("task exploded" in item for item in health["recent_errors"])
+    for field, value in OPS_IDENTITY.items():
+        assert health[field] == value

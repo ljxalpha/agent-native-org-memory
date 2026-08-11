@@ -19,6 +19,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 import memory_net
+from memory_net.leaf.health import OPS_IDENTITY_FIELDS
 
 #: A ``package_ref`` is only usable as a build id when it pins an exact commit,
 #: which ``scripts/install_leaf.sh`` enforces for every ``git+*`` ref.
@@ -69,6 +70,31 @@ def collect_ops_identity(
     if master_sha is not None:
         identity["config_source_master_sha"] = master_sha
     return identity
+
+
+def split_ops_identity(
+    ops_identity: dict[str, str] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split collected identity into ``build_health()`` kwargs and ``extra``.
+
+    The seven schema fields of § 8.7.1 become named ``build_health()``
+    arguments; everything else (currently ``build_id_source``) is a diagnostic
+    annotation that rides along in ``extra`` rather than entering the validated
+    health schema.
+
+    :returns: ``(kwargs, extra)``, both empty when ``ops_identity`` is ``None``.
+    """
+    if not ops_identity:
+        return {}, {}
+    kwargs: dict[str, Any] = {
+        key: value for key, value in ops_identity.items() if key in OPS_IDENTITY_FIELDS
+    }
+    extra: dict[str, Any] = {
+        key: value
+        for key, value in ops_identity.items()
+        if key not in OPS_IDENTITY_FIELDS
+    }
+    return kwargs, extra
 
 
 def _require(field: str, value: str) -> str:

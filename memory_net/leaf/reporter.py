@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from memory_net.leaf.health import build_health, utc_now, write_health
+from memory_net.leaf.identity import split_ops_identity
 from memory_net.leaf.scanner import (
     ScannerAuditResult,
     scanner_audit,
@@ -49,7 +50,16 @@ def report(
     scanner_config: dict[str, Any] | None = None,
     state_dir: Path | None = None,
     dry_run: bool = False,
+    ops_identity: dict[str, str] | None = None,
 ) -> ReportResult:
+    """Report shared agent memories into the leaf repo.
+
+    :param ops_identity: optional operational identity from
+        :func:`memory_net.leaf.identity.collect_ops_identity`, stamped onto every
+        ``.health.json`` this call writes (including the scanner-block degraded
+        path). ``None`` leaves the health payload byte-identical to before this
+        parameter existed.
+    """
     repo_path.mkdir(parents=True, exist_ok=True)
     lock_path = repo_path / ".reporter.lock"
     with lock_path.open("a", encoding="utf-8") as lock_file:
@@ -65,6 +75,7 @@ def report(
                 scanner_config=scanner_config,
                 state_dir=state_dir,
                 dry_run=dry_run,
+                ops_identity=ops_identity,
             )
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -81,8 +92,10 @@ def _report_unlocked(
     scanner_config: dict[str, Any] | None = None,
     state_dir: Path | None = None,
     dry_run: bool = False,
+    ops_identity: dict[str, str] | None = None,
 ) -> ReportResult:
     redactor = redactor or null_redactor()
+    identity_kwargs, identity_extra = split_ops_identity(ops_identity)
     manifest = _load_manifest(repo_path, node_id)
     previous_entries: dict[str, Any] = dict(manifest.get("entries") or {})
     tombstones = dict(manifest.get("tombstones") or {})
@@ -128,6 +141,7 @@ def _report_unlocked(
                     reported_at=now,
                     scanner_result=scanner_result,
                     memory_count=len(previous_entries),
+                    ops_identity=ops_identity,
                 )
             raise RedactionBlockedError(
                 f"external scanner blocked {len(scanner_result.findings)} findings"
@@ -262,8 +276,9 @@ def _report_unlocked(
                 last_report_at=now,
                 redaction_pattern_version=redactor.version,
                 recent_errors=recent_errors,
-                extra={"memory_count": len(next_entries)},
+                extra={"memory_count": len(next_entries)} | identity_extra,
                 redaction_incidents={"scanner_hits": scanner_result.hit_counts},
+                **identity_kwargs,
             ),
         )
         active_paths = {
@@ -293,7 +308,9 @@ def _write_scanner_block_health(
     reported_at: str,
     scanner_result: ScannerAuditResult,
     memory_count: int,
+    ops_identity: dict[str, str] | None = None,
 ) -> None:
+    identity_kwargs, identity_extra = split_ops_identity(ops_identity)
     write_health(
         repo_path / ".health.json",
         build_health(
@@ -305,11 +322,12 @@ def _write_scanner_block_health(
             recent_errors=[
                 f"external scanner blocked {len(scanner_result.findings)} findings"
             ],
-            extra={"memory_count": memory_count},
+            extra={"memory_count": memory_count} | identity_extra,
             redaction_incidents={
                 "blocked_reports": 1,
                 "scanner_hits": scanner_result.hit_counts,
             },
+            **identity_kwargs,
         ),
     )
 

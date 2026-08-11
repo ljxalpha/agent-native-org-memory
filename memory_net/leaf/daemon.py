@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from memory_net.leaf.health import build_health, write_health
+from memory_net.leaf.identity import split_ops_identity
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +26,14 @@ def run_foreground(
     health_task: Callable[[], object] | None = None,
     interval_seconds: int = 300,
     once: bool = False,
+    ops_identity: dict[str, str] | None = None,
 ) -> None:
+    """Run the leaf daemon loop in the foreground.
+
+    :param ops_identity: optional operational identity stamped onto the health
+        snapshots this daemon writes, including the degraded snapshots produced
+        when a task raises. ``None`` keeps the previous payload byte for byte.
+    """
     state_dir.mkdir(parents=True, exist_ok=True)
     stop_marker = state_dir / "stop-requested"
     if stop_marker.exists():
@@ -41,6 +49,7 @@ def run_foreground(
             health_task=health_task,
             interval_seconds=interval_seconds,
             once=once,
+            ops_identity=ops_identity,
         )
 
 
@@ -55,7 +64,9 @@ def _run_foreground_locked(
     health_task: Callable[[], object] | None,
     interval_seconds: int,
     once: bool,
+    ops_identity: dict[str, str] | None = None,
 ) -> None:
+    identity_kwargs, identity_extra = split_ops_identity(ops_identity)
 
     def default_health_task() -> None:
         health_path = state_dir / "last_health.json"
@@ -67,6 +78,8 @@ def _run_foreground_locked(
                 status="degraded" if recent_errors else "healthy",
                 recent_errors=recent_errors,
                 published=False,
+                extra=identity_extra or None,
+                **identity_kwargs,
             ),
         )
 
@@ -78,7 +91,16 @@ def _run_foreground_locked(
         ("health", active_health_task),
     ]
     safe_tasks = [
-        (name, _safe(name, task, state_dir=state_dir, node_id=node_id))
+        (
+            name,
+            _safe(
+                name,
+                task,
+                state_dir=state_dir,
+                node_id=node_id,
+                ops_identity=ops_identity,
+            ),
+        )
         for name, task in tasks
         if task is not None
     ]
@@ -110,7 +132,13 @@ def _run_foreground_locked(
         )
         scheduler.add_job(task, "interval", seconds=seconds, id=name)
     scheduler.start()
-    _safe("health", active_health_task, state_dir=state_dir, node_id=node_id)()
+    _safe(
+        "health",
+        active_health_task,
+        state_dir=state_dir,
+        node_id=node_id,
+        ops_identity=ops_identity,
+    )()
     if once:
         for name, task in safe_tasks:
             if name != "health":
@@ -136,6 +164,7 @@ def _safe(
     *,
     state_dir: Path,
     node_id: str,
+    ops_identity: dict[str, str] | None = None,
 ) -> Callable[[], object]:
     def wrapped() -> object | None:
         try:
@@ -147,6 +176,7 @@ def _safe(
                 node_id=node_id,
                 task_name=task_name,
                 error=str(exc) or exc.__class__.__name__,
+                ops_identity=ops_identity,
             )
             return None
 
@@ -159,14 +189,25 @@ def _append_recent_error(
     node_id: str,
     task_name: str,
     error: str,
+    ops_identity: dict[str, str] | None = None,
 ) -> None:
+    identity_kwargs, identity_extra = split_ops_identity(ops_identity)
+
+    def degraded() -> dict[str, Any]:
+        return build_health(
+            node_id=node_id,
+            status="degraded",
+            extra=identity_extra or None,
+            **identity_kwargs,
+        )
+
     if path.exists():
         try:
             health: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            health = build_health(node_id=node_id, status="degraded")
+            health = degraded()
     else:
-        health = build_health(node_id=node_id, status="degraded")
+        health = degraded()
     health["status"] = "degraded"
     errors = list(health.get("recent_errors") or [])
     errors.append(f"{task_name}: {error}")
