@@ -41,6 +41,11 @@ class CredentialError(RuntimeError):
 
     Carries key names and paths only. A message quoting the value it failed on
     would put the credential in whatever log caught the traceback.
+
+    A quoted path is the *unexpanded* one -- ``~/.hermes/.env``, not the home
+    directory it resolves to. The value is not a credential either way, but an
+    expanded default names the machine's real user, and these messages end up
+    in CI logs and bug reports.
     """
 
 
@@ -92,11 +97,17 @@ def resolve(
     missing = [key for key in allowlist if key not in resolved]
     if not missing:
         return resolved
-    path = (env_file or DEFAULT_ENV_FILE).expanduser()
+    # Two forms of the same location, on purpose. The expanded one is what the
+    # filesystem is asked about; the *unexpanded* one is what a message quotes,
+    # so the default never prints the operator's real home directory into a
+    # terminal, a CI log or a bug report. An explicit --env-file is echoed as
+    # the caller typed it, which discloses nothing they did not already supply.
+    given = env_file or DEFAULT_ENV_FILE
+    path = given.expanduser()
     if not path.is_file():
         raise CredentialError(
             f"missing credentials {', '.join(missing)}: not in the environment, "
-            f"and no credential file at {path}"
+            f"and no credential file at {given}"
         )
     # Read-only, always. This file is never written, moved or copied.
     from_file = parse_env_file(path.read_text(encoding="utf-8"), allowlist=missing)
@@ -105,7 +116,7 @@ def resolve(
     if still_missing:
         raise CredentialError(
             f"missing credentials {', '.join(still_missing)}: not in the "
-            f"environment and not in {path}"
+            f"environment and not in {given}"
         )
     return resolved
 

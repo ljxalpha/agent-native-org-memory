@@ -135,6 +135,36 @@ def test_a_missing_file_is_an_error_not_an_empty_environment(
         resolve(env_file=tmp_path / "absent.env", environ={})
 
 
+def test_the_default_path_is_reported_unexpanded(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The default location prints as `~/.hermes/.env`, never as the home it
+    resolves to.
+
+    The path is not a credential, but these messages reach CI logs and bug
+    reports, and an expanded default names the machine's real user.
+    """
+    # Deliberately not shaped like `/home/<name>`: this file is public, and a
+    # realistic-looking home path here would itself be the thing being guarded
+    # against. `expanduser` reads $HOME whatever shape it has.
+    monkeypatch.setenv("HOME", "/nonexistent-root/a-real-person")
+
+    with pytest.raises(CredentialError) as excinfo:
+        resolve(environ={})
+
+    message = str(excinfo.value)
+    assert "~/.hermes/.env" in message
+    assert "a-real-person" not in message
+
+
+def test_an_explicit_path_is_echoed_as_the_caller_gave_it(tmp_path: Path) -> None:
+    """Echoing back `--env-file` discloses nothing the caller did not supply."""
+    absent = tmp_path / "absent.env"
+
+    with pytest.raises(CredentialError) as excinfo:
+        resolve(env_file=absent, environ={})
+
+    assert str(absent) in str(excinfo.value)
+
+
 def test_a_file_missing_one_key_names_that_key(tmp_path: Path) -> None:
     path = _env_file(tmp_path, f"DEEPSEEK_API_KEY={SECRET}\n")
 
