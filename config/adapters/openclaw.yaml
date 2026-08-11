@@ -9,8 +9,10 @@
 #     living one level ABOVE the managed root `${AGENT_ROOT}/memory/shared`; native daily
 #     notes `${AGENT_ROOT}/memory/YYYY-MM-DD.md` are siblings of that managed root.
 #     Neither is reachable by a glob relative to the managed root.
-#   · Secret-bearing siblings (`.env`, `credentials/`, `logs/`, `agents/`) sit at those same
-#     levels and are additionally denied by `exclude` as defense in depth.
+#   · Secret-bearing siblings (`.env`, `credentials/`, `logs/`, `agents/`) sit at those
+#     same levels, i.e. also out of glob range. `exclude` below repeats them as defense
+#     in depth against a misplaced copy *inside* the managed root — see the note there
+#     for which of those rules can actually fire and which are declarative only.
 # What the evidence does NOT cover: whether openclaw actually consumes an injected hint
 # block (no real agent run was made). Hence support_status stays `experimental` and
 # loading requires MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1.
@@ -24,21 +26,21 @@ roots:
     - alias: openclaw-shared
       base_dir: "${AGENT_ROOT}/memory/shared"
       include: ["**/*.md"]
-      # .git/.cache and hidden paths are covered by DEFAULT_EXCLUDES; the rest mirror the
-      # real openclaw neighbourhood so a misplaced copy inside the managed root is denied.
+      # `**/` means "zero or more segments" on both the include and the exclude side,
+      # so one spelling covers the managed root itself as well as any depth below it.
+      #
+      # Only the three directory rules can actually fire: a file reaches `exclude`
+      # only after passing `include` and `file_pattern: "*.md"`, and hidden paths are
+      # skipped earlier still. `**/*.sqlite*` and `.env` are therefore DECLARATIVE —
+      # they never execute today and are kept so that widening `file_pattern` later
+      # cannot silently start collecting the native store or the secrets file.
       exclude:
-        - ".git/**"
         - "**/.git/**"
-        - ".cache/**"
         - "**/.cache/**"
-        - "*.sqlite*"
         - "**/*.sqlite*"
         - ".env"
-        - "credentials/**"
         - "**/credentials/**"
-        - "agents/**"
         - "**/agents/**"
-        - "logs/**"
         - "**/logs/**"
 team_target: "${AGENT_ROOT}/memory/team"
 file_pattern: "*.md"

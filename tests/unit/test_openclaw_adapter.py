@@ -57,6 +57,11 @@ def _load(agent_root: Path) -> FileSystemMdAdapter:
     return FileSystemMdAdapter.from_yaml(ADAPTER_YAML, agent_root=agent_root)
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """True when ``path`` lies inside ``root`` after resolution."""
+    return root.resolve() in path.resolve().parents
+
+
 @pytest.fixture(autouse=True)
 def _opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
@@ -94,12 +99,56 @@ def test_list_shared_only_reads_the_managed_root(tmp_path: Path) -> None:
     assert "daily note" not in collected
 
 
-def test_native_store_and_secret_siblings_are_unreachable(tmp_path: Path) -> None:
-    """The sqlite store and ``.env``/``credentials/`` are denied twice over.
+@pytest.mark.parametrize("depth", ["top-level", "nested"])
+def test_secret_bearing_directories_are_excluded_at_every_depth(
+    depth: str,
+    tmp_path: Path,
+) -> None:
+    """A misplaced copy of ``credentials/``/``logs/``/``agents/`` is dropped.
 
-    Assertion 1: they live outside the managed root, so the configured glob never
-    even enumerates them. Assertion 2: were a copy to appear *inside* the managed
-    root, the ``exclude`` list still drops it.
+    This is the part of the neighbourhood that ``exclude`` genuinely decides: the
+    files are markdown, non-hidden, and thus survive every earlier filter. Both
+    depths are covered because a ``**/`` exclude used to miss the managed root
+    itself, which is exactly where a careless copy lands.
+
+    Deliberately NOT asserted here: that ``exclude`` is what stops the sqlite
+    store or ``.env``. It is not — see the layered test below.
+    """
+    agent_root = _materialize_install(tmp_path / "openclaw")
+    shared = agent_root / "memory" / "shared"
+    parent = shared if depth == "top-level" else shared / "topic"
+    parent.mkdir(parents=True)
+    (parent / "keep.md").write_text("Team-facing note.\n", encoding="utf-8")
+    for directory in ("credentials", "logs", "agents"):
+        (parent / directory).mkdir()
+        (parent / directory / "leak.md").write_text("leaked?\n", encoding="utf-8")
+
+    records = list(_load(agent_root).list_shared())
+
+    expected = "keep.md" if depth == "top-level" else "topic/keep.md"
+    assert [r.source_locator for r in records] == [f"openclaw-shared:{expected}"]
+    assert all("leaked?" not in r.content for r in records)
+
+
+def test_native_store_and_dotenv_are_denied_before_exclude_is_consulted(
+    tmp_path: Path,
+) -> None:
+    """The sqlite store and ``.env`` are stopped, but not by ``exclude``.
+
+    Naming the actual mechanism matters: believing ``exclude`` is what guards
+    them would make it safe-looking to widen ``file_pattern`` later, which is
+    precisely when the real guards fall away. The layers, in the order the
+    collector applies them:
+
+      1. position — both live *outside* ``${AGENT_ROOT}/memory/shared``, so the
+         configured glob never enumerates them at all;
+      2. ``file_pattern: "*.md"`` — a stray ``main.sqlite`` copied *into* the
+         managed root is rejected on its name, before ``exclude`` is reached;
+      3. the hidden-path skip — a stray ``.env`` is rejected as a dotfile, also
+         before ``exclude`` is reached.
+
+    ``exclude`` still lists both, as declared defence for a future config that
+    widens ``file_pattern``; that intent is asserted separately from behaviour.
     """
     agent_root = _materialize_install(tmp_path / "openclaw")
     shared = agent_root / "memory" / "shared"
@@ -109,34 +158,37 @@ def test_native_store_and_secret_siblings_are_unreachable(tmp_path: Path) -> Non
     adapter = _load(agent_root)
     shared_root = next(r for r in adapter.roots if r.scope == "shared")
 
-    # --- assertion 1: out of glob range by position -------------------------
+    # --- layer 1: outside the managed root, hence outside glob range --------
     native_store = agent_root.parent / "memory" / "main.sqlite"
     dotenv = agent_root.parent / ".env"
     assert native_store.is_file() and dotenv.is_file()
-    reachable = {p.resolve() for p in shared_root.base_dir.rglob("*")}
-    assert native_store.resolve() not in reachable
-    assert dotenv.resolve() not in reachable
-    assert (agent_root.parent / "credentials").resolve() not in reachable
+    assert not _is_within(native_store, shared_root.base_dir)
+    assert not _is_within(dotenv, shared_root.base_dir)
+    assert not _is_within(agent_root.parent / "credentials", shared_root.base_dir)
 
-    # --- assertion 2: excluded even when misplaced inside the managed root ---
+    # --- layers 2 and 3: stray copies inside the managed root ---------------
     (shared / "main.sqlite").write_text("", encoding="utf-8")
     (shared / ".env").write_text("TOKEN=sample\n", encoding="utf-8")
-    for directory in ("credentials", "logs", "agents"):
-        (shared / directory).mkdir()
-        (shared / directory / "leak.md").write_text("leaked?\n", encoding="utf-8")
 
     records = list(adapter.list_shared())
 
     assert [r.source_locator for r in records] == ["openclaw-shared:keep.md"]
-    assert all("leaked?" not in r.content for r in records)
-    excludes = set(shared_root.exclude)
-    assert {
-        "**/*.sqlite*",
-        ".env",
-        "credentials/**",
-        "agents/**",
-        "logs/**",
-    } <= excludes
+    assert adapter.file_pattern == "*.md"  # layer 2
+    assert (shared / ".env").name.startswith(".")  # layer 3
+    # Declared-only intent, kept honest by living apart from the behaviour above.
+    assert {"**/*.sqlite*", ".env"} <= set(shared_root.exclude)
+
+
+def test_fixture_dotenv_placeholder_stays_empty() -> None:
+    """``_dotenv`` must never carry content.
+
+    It exists to pin the real file name ``.env`` as a layout fact, but the neutral
+    name is exactly what makes it invisible to a secret-hygiene gate that matches
+    on the file name. An emptiness check is the only guard left, so it is spelled
+    out rather than left to reviewer attention.
+    """
+    assert (FIXTURE_ROOT / "_dotenv").stat().st_size == 0
+    assert (FIXTURE_ROOT / "memory" / "main.sqlite").stat().st_size == 0
 
 
 def test_managed_root_boundary_rejects_dotdot_and_symlink_escapes(

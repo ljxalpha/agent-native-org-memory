@@ -601,7 +601,12 @@ team_hint_injection:
 
 - agent 工作根是 `<openclaw home>/workspace/`，因此 `AGENT_ROOT` 指向该目录；
 - 该根下的 `AGENTS.md` 是每会话被消费的指令文件（其正文自述读取顺序 `SOUL.md → USER.md → memory/YYYY-MM-DD.md → MEMORY.md`），故作为 hint 目标；
-- 原生记忆库是 sqlite sidecar `<openclaw home>/memory/main.sqlite`，位于受管根 `${AGENT_ROOT}/memory/shared` 的**父目录层级**；原生日更笔记 `${AGENT_ROOT}/memory/YYYY-MM-DD.md` 则是受管根的**兄弟**。两者都不在受管根的相对 glob 射程内；`.env` / `credentials/` / `logs/` / `agents/` 同理，并额外由 `exclude` 二次拒绝。
+- 原生记忆库是 sqlite sidecar `<openclaw home>/memory/main.sqlite`，位于受管根 `${AGENT_ROOT}/memory/shared` 的**父目录层级**；原生日更笔记 `${AGENT_ROOT}/memory/YYYY-MM-DD.md` 则是受管根的**兄弟**。两者都不在受管根的相对 glob 射程内；`.env` / `credentials/` / `logs/` / `agents/` 同理。
+
+关于「错放进受管根内的副本」这一层纵深防御，必须按实际生效的机制描述，不得笼统说成「由 `exclude` 二次拒绝」：
+`credentials/` / `logs/` / `agents/` 下的 `.md` 确实由 `exclude` 拒绝（`**/` 前缀在顶层与嵌套两处都生效，见 § 5.1）；
+而 `main.sqlite` 与 `.env` 走不到 `exclude` —— 前者被 `file_pattern: "*.md"` 按文件名先行拒绝，后者被隐藏路径跳过先行拒绝。
+`exclude` 里保留这两条属**声明式**条目，作用是将来放宽 `file_pattern` 时不会悄悄开始收集原生库与密钥文件。
 
 脱敏布局快照存放在 `tests/fixtures/adapters/openclaw/`（内容全部为中性样例；真实 `.env` 因仓库禁止跟踪该文件名而以 `_dotenv` 占位，测试物化临时目录时改回原名），
 读路径回归由 `tests/unit/test_openclaw_adapter.py` 锁定。**该依据不含"hint 被真实消费"的证据**（未做真实 agent 运行），故 `support_status` 保持 `experimental`。
