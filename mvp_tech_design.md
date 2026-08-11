@@ -4374,3 +4374,14 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   （原生库是 git checkout、sqlite 索引是原生库的兄弟而非其内容、两个空点目录）
   与构造树不同；空目录与 `.git` 又都是 git 无法按原名跟踪的，需要固定的命名与物化约定。
 - Change time: 2026-08-11
+
+## Change Record - 2026-08-11 运维文档收尾
+
+- Change summary: `docs/runbook.md` 补生产路径、凭据三条规则与取值优先级、`AOMT_*` 变量表、
+  适配器消费验证流程；`docs/tuning_loop.md` 补 golden bundle 刷新流程与"自动 scanner +
+  人工逐文件审阅"双闸；`docs/skills/hermes_distiller.md` 写明 `hermes_tool` 是 experimental
+  集成入口、生产后端是 `--provider deepseek`、且它不能作为跨后端比对基准。
+- Change reason: 上述内容此前散落在各子任务的实现里没有运维面。其中两条必须写进文档而非只留在代码：
+  凭据取值"进程环境优先"是 operator 注入独立低额度 key 的唯一通道，
+  录制目录含完整 prompt 因而只有 `record_metrics.json` 可外发。
+- Change time: 2026-08-11

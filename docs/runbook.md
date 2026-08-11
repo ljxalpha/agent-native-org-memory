@@ -192,6 +192,120 @@ hold. It is **not** evidence about real agents consuming memory, daemon
 residency and restart, cron triggering, real embeddings or real LLM calls. A CI
 run of `--cycles 5` is in particular **not** a 24h stability result.
 
+## Running the Production Path
+
+The production backend is DeepSeek through the OpenAI-compatible provider. It
+needs two credentials, and they reach the process through `aomt-with-env`:
+
+```sh
+scripts/aomt-with-env -- memory-net-distiller run \
+  --repo <checkout> \
+  --config config/distill.deepseek.yaml \
+  --provider deepseek
+```
+
+`config/distill.deepseek.yaml` declares `profile_class: production`, which
+refuses `mock` and `hermes_tool` as effective providers. That refusal is the
+point of the profile: a production run that silently fell back to a template
+renderer would produce products indistinguishable from real ones at a glance.
+
+Add `--record-dir <path>` to capture the run as a replayable bundle. The
+recording directory holds **complete prompts**, so it is a private artifact:
+never attach it to an issue, never upload it from CI. Only `record_metrics.json`
+is safe to publish, and it is the only file the live-smoke workflow uploads.
+
+To re-run without spending anything, replay a bundle:
+
+```sh
+memory-net-distiller run --repo <checkout> \
+  --config config/distill.deepseek.yaml \
+  --replay tests/fixtures/golden_bundle/v001 --replay-mode strict
+```
+
+A production profile accepts this even with no credentials present, because the
+decision is made on the bundle's own per-call provenance rather than on the
+configured provider name: `strict` and `prompt-only` are offline modes, and a
+bundle recorded against `mock` or an unreadable bundle is still refused.
+
+## Credential Rules
+
+Three rules, and the tooling enforces all three rather than asking you to:
+
+1. **Read-only.** Nothing in this repository writes to `~/.hermes/.env`, and no
+   tool has a mode that edits it.
+2. **Injected, never persisted.** Values travel in the `env` argument of
+   `execve` and nowhere else. They are not written to a temp file, not passed on
+   a command line, and not echoed. `env -i KEY=VALUE` and bwrap's `--setenv KEY
+   VALUE` both put the value into argv, which any process on the machine reads
+   through `/proc`; neither is used, and a test asserts neither string appears
+   in the sources.
+3. **Allowlisted.** The credential file is a personal store with dozens of
+   unrelated keys. `aomt-with-env` reads exactly `DEEPSEEK_API_KEY` and
+   `DEEPSEEK_BASE_URL` and drops the rest while parsing.
+
+Resolution order, for both `aomt-with-env` and `agent_sandbox`:
+
+**process environment → credential file (`~/.hermes/.env` by default) → error.**
+
+The process environment winning is not incidental. It is the channel an operator
+uses to inject a separate, rate-limited key for one run, and a shared file that
+silently overrode it would send that run to the production account.
+
+Inspecting without exposing:
+
+```sh
+scripts/aomt-with-env --check        # prints <set> or <missing>, never a value
+scripts/aomt-with-env --print-keys   # prints names only
+```
+
+There is deliberately no `env` subcommand and no eval-able output mode in either
+tool: both would put a credential on a terminal and into a shell history.
+
+## AOMT_* Environment Variables
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `AOMT_DISTILL_PROFILE` | `memory_net/distiller/cli.py` | Overrides the run's profile class. Cannot widen a production profile into one that accepts `mock`. |
+| `AOMT_OUTPUT_SCANNER_MODE` | `memory_net/distiller/output_scanner.py` | `enforce` or `observe`. `observe` records hits without failing the run; production runs use `enforce`. |
+| `AOMT_ATTEMPT_CEILING` | `memory_net/distiller/llm/ledger.py` | May only **lower** the hard ceiling. A larger value is ignored, so the guard cannot be raised by an environment. |
+| `AOMT_ATTEMPT_LEDGER` | `memory_net/distiller/llm/ledger.py` | Path to the attempt ledger. Point it at a scratch file when rehearsing with a fake transport, so rehearsals do not consume the real budget. |
+| `AOMT_SANDBOX_ROOT` | `scripts/agent_sandbox` | Default sandbox root. Refused if it resolves inside a real agent state directory or inside this repository -- `clean` is `rm -rf` on it. |
+| `AOMT_AGENT_RUNTIME_ROOT` | `scripts/agent_sandbox` | The agent's source tree, bound read-only at its own path. Required unless `--runtime-root` is given. |
+
+The ledger is an append-only record of *attempts*, not of successes: a request
+that failed still consumed rate budget, and a guard that counted only successes
+would let a failing loop run forever. Read the current count before and after any
+run that can reach a network.
+
+## Verifying That an Agent Consumes the Team Hint
+
+Writing the hint is something this project does; reading it is something the
+agent does, and only the second one is worth verifying. The check runs the same
+prompt twice, with the hint installed and without:
+
+```sh
+scripts/verify_adapter_consumption \
+  --adapter config/adapters/hermes.yaml \
+  --runtime-root <agent source tree> \
+  --root <sandbox root> \
+  --dry-run                       # prints the argv, runs nothing, costs nothing
+```
+
+Drop `--dry-run` to run it for real. **This spends model quota** -- two runs,
+one positive and one control -- so check the ledger first and inject a separate
+rate-limited key through the process environment.
+
+The verdict is a JSON object naming what it rests on. `evidence_basis` is
+`sentinel` when the agent's answer carried a token that exists only in the
+injected index and the control run's answer did not, and `sentinel+trace` when a
+session trace also happened to be written and agreed. A successful oneshot
+usually writes no trace at all, so the `sentinel` basis is the normal passing
+case and the verdict says so explicitly rather than leaving its absence to be
+misread as a clean check.
+
+Nothing about a passing check makes an adapter `stable`. That status is a claim
+about a supported integration, and it needs the evidence filed alongside it.
+
 ## Agent Sandbox Mount Manifest
 
 `scripts/agent_sandbox` runs an agent under test inside a bubblewrap namespace.
