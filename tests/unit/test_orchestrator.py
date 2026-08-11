@@ -558,7 +558,11 @@ def test_orchestrator_failure_after_the_bundle_keeps_run_provenance(
     bundle = tmp_path / "record_runs" / "bundle"
 
     def failing_publish(
-        self: DistillOrchestrator, *, snapshot_sha: str, run_id: str
+        self: DistillOrchestrator,
+        *,
+        snapshot_sha: str,
+        run_id: str,
+        output: Any = None,
     ) -> None:
         raise RuntimeError("publish boom")
 

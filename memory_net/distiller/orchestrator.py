@@ -34,6 +34,7 @@ from memory_net.distiller.pipeline import (
     cited_memory_ids,
 )
 from memory_net.distiller.provenance import RunProvenance
+from memory_net.distiller.publisher import build_review_request
 from memory_net.distiller.runctx import RunContext, RunIdentity
 from memory_net.shared.git_io import GitError, GitRepo
 from memory_net.shared.models import TeamProduct
@@ -97,6 +98,7 @@ class DistillOrchestrator:
         record_bundle_dir: Path | None = None,
         replay_mode: str = "live",
         resume_from: str | None = None,
+        codeowners_path: str = ".github/CODEOWNERS",
         context: RunContext | None = None,
     ) -> None:
         self.repo_path = repo_path
@@ -113,6 +115,9 @@ class DistillOrchestrator:
         # resume reuses that run's *inputs* and finished products; it never
         # reuses its staging or its bundle (§7.2 DISTILL-001).
         self.resume_from = resume_from
+        # A path, never the file's contents: CODEOWNERS names real people, and
+        # a run artifact is not the place for a list of accounts.
+        self.codeowners_path = codeowners_path
         # The single injection carrier (§5.5.3). None keeps the pre-injection
         # behaviour: a freshly generated run id and the wall clock.
         self.context = context
@@ -252,7 +257,9 @@ class DistillOrchestrator:
                     duration_seconds=time.monotonic() - started,
                 )
                 if not self.no_push:
-                    self._publish_outputs(snapshot_sha=snapshot_sha, run_id=run_id)
+                    self._publish_outputs(
+                        snapshot_sha=snapshot_sha, run_id=run_id, output=output
+                    )
         except DistillGateError:
             raise
         except Exception as exc:
@@ -783,9 +790,21 @@ class DistillOrchestrator:
         metrics.write(self.repo_path / "distill_runs" / run_id / "metrics.json")
         metrics.write(self.repo_path / "distill_runs" / "latest" / "metrics.json")
 
-    def _publish_outputs(self, *, snapshot_sha: str, run_id: str) -> None:
+    def _publish_outputs(
+        self,
+        *,
+        snapshot_sha: str,
+        run_id: str,
+        output: DistillationOutput | None = None,
+    ) -> None:
         self._ensure_master_unchanged(snapshot_sha, run_id)
         self._enforce_master_path_whitelist(snapshot_sha)
+        # Before the add, and therefore inside the release commit: written after
+        # the push it would be in neither the commit nor the pull request, which
+        # is precisely where a reviewer looks for it.
+        self._write_review_request(
+            run_id=run_id, snapshot_sha=snapshot_sha, output=output
+        )
         self.repo.run(
             "add",
             "team",
@@ -837,6 +856,44 @@ class DistillOrchestrator:
                     "master push failed after snapshot drift"
                 ) from exc
             raise RuntimeError("transient master push failed") from exc
+
+    def _write_review_request(
+        self,
+        *,
+        run_id: str,
+        snapshot_sha: str,
+        output: DistillationOutput | None,
+    ) -> None:
+        """State what is up for review, when there is a review gate at all.
+
+        Nothing is written when the gate is off: the run pushes straight to
+        master, so there is no pull request for this to describe, and an empty
+        request file would suggest one exists.
+        """
+        if self._publish_branch(run_id) == "master":
+            return
+        # The configured closed set, so a category nobody declared cannot reach
+        # the request -- and through it the pull request -- unnoticed.
+        configured = set(getattr(self.pipeline, "categories", []) or [])
+        products = list(output.products) if output is not None else []
+        payload = build_review_request(
+            run_id=run_id,
+            head=self._publish_branch(run_id),
+            base="master",
+            codeowners_path=self.codeowners_path,
+            master_snapshot_sha=snapshot_sha,
+            products_count=len(products),
+            categories=sorted({product.category for product in products}),
+            allowed_categories=configured or None,
+        )
+        # Summary and pointers only. The products themselves are on the branch;
+        # copying any of their text here would put team knowledge in a file with
+        # different retention than the branch it describes.
+        self._scan_then_write(
+            self.repo_path / "distill_runs" / run_id / "review_request.json",
+            payload,
+            field_path="review_request",
+        )
 
     def _publish_branch(self, run_id: str) -> str:
         if not self.publish_branch_template:
