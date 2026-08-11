@@ -1054,6 +1054,41 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 - **默认** `config/distill.yaml` 缺失 → 回落到工作区文件、再回落到空配置，
   与今天完全一致（非 git 仓与全新仓都要能跑）。
 
+#### 5.5.6 profile 校验与溯源（`memory_net/distiller/profile.py`）
+
+**`profile_class` 是这份 profile 对自己的定级**，取值域 `production` / `development`；
+缺省（不写该键）视为 development，**保持今天的行为**——出厂 `config/distill.yaml` 没有这个键。
+
+`profile_class: production` 时，下列键**必须全部显式存在**，缺一即拒绝启动
+（`SystemExit`，不是警告）：
+
+| 必填键 | 为什么它不能有默认值 |
+|---|---|
+| `llm.provider` | 默认会悄悄回落 `mock`，跑出一份看起来正常、实际没接触过模型的产物 |
+| `llm.model` | 默认会替生产环境挑一个模型档位，含价格档位 |
+| `llm.pricing.input_per_mtok_usd` / `llm.pricing.output_per_mtok_usd` | 默认是 Anthropic 量纲；用它换算 DeepSeek 会把成本高估一到两个数量级，预算闸提前误停 |
+| `llm.budget_usd` | 没有它就没有成本上界，这是生产环境唯一不能省的那个 |
+| `clustering.embedding_backend` | 默认是 3 维廉价向量，与 DBSCAN 参数量纲不匹配，聚类结果无意义而指标看着正常 |
+| `output_scanner.schema_version` / `output_scanner.mode` | 没有它就没有输出侧泄漏闸 |
+
+另有三条**取值**约束：
+
+1. `llm.provider` 不得为 `mock` / `hermes_tool`——前者是假的，后者的通道丢 role 边界
+   且无结构化输出约束（§3.0 / §5.3.2），都不能承担把不可信记录喂给模型的生产职责。
+2. `output_scanner.mode` 在 production 下**唯一合法值是 `enforce`**；写 `observe` 直接拒绝启动，
+   **不静默改回 `enforce`**——静默纠正会让人以为 `observe` 生效了。
+3. `output_scanner.mode` 的取值域是 `enforce` / `observe`，与叶子侧
+   `leaf/scanner.py` 的 `audit` / `warn` / `block` **不共用取值域**。写叶子侧的词一律拒绝，
+   哪怕在非 production profile 下：两套词汇混用早晚会让人把叶子侧的 `audit`
+   误当成输出侧的 `observe`。
+
+**溯源 `ProfileProvenance(profile_path, blob_sha256, master_snapshot_sha)`**
+由 CLI 构造并填进 `RunContext.profile`，orchestrator 写
+`distill_runs/<run_id>/snapshot.json` 与 `metrics.json` 时直接取用。
+`blob_sha256` 是**profile 原始字节**的 sha256（不是解析后的 YAML），
+因为要回答的问题是"这次 run 到底读了哪几个字节"，而解析会丢掉注释、键序与格式。
+`context.profile` 为 `None` 时**不写这三个键**，与今天完全一致。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
