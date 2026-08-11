@@ -1,0 +1,3 @@
+# Sample agent settings. Not memory, and never reported.
+platform_toolsets:
+  cli: []

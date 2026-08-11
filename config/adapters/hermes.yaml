@@ -1,11 +1,20 @@
 name: hermes
+# experimental until a real agent run shows the injected hint is followed.
+# The layout below is calibrated against a hermes 0.18 install, whose redacted
+# snapshot is tests/fixtures/adapters/hermes/ -- but a calibrated *read* path is
+# not evidence of a consumed hint, and only the second one lifts this flag.
 support_status: experimental
 roots:
   shared:
+    # The memory-net convention directory, never the agent's own store. The
+    # native store is ~/.hermes/memories/, and it stays out of scope by
+    # construction: it is not under the managed root at all.
     - alias: hermes-shared
       base_dir: "${AGENT_ROOT}/memory/shared"
       include: ["**/*.md"]
-      # 真实 ~/.hermes/memories 下 *.md 旁并存 *.lock；显式排除以贴合该布局
+      # `**/*.lock` is here because of where the lock files are: a real install
+      # keeps MEMORY.md.lock as a *sibling* of MEMORY.md, so a lock can appear
+      # inside the managed root the moment an agent writes there.
       exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**", "**/*.lock"]
 team_target: "${AGENT_ROOT}/memory/team"
 file_pattern: "*.md"
@@ -14,5 +23,10 @@ team_hint_injection:
   mode: install_once
   target: "${AGENT_ROOT}/AGENTS.md"
   install_once_default: "${AGENT_ROOT}/AGENTS.md"
+  # Stated rather than defaulted, matching claude-code.yaml. The replacement is
+  # idempotent either way; writing them down means the marker a reader greps for
+  # is in the file that defines it.
+  anchor_start: "<!-- memory-net-hint:start -->"
+  anchor_end: "<!-- memory-net-hint:end -->"
   content_template: |
     @memory/team/INDEX.md

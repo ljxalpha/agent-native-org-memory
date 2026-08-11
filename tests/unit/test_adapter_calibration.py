@@ -25,6 +25,7 @@ The load-bearing invariants encoded here (do not "fix" these — they are by des
 from pathlib import Path
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 from memory_net.shared.adapters import FileSystemMdAdapter
 
@@ -180,3 +181,118 @@ def test_shipped_adapters_use_convention_shared_root_and_no_list_personal(
                 f"expected the convention dir {expected}"
             )
         assert not hasattr(adapter, "list_personal"), agent
+
+
+# -- fixture-driven: the shape of a real install, not a hand-built tree ------
+#
+# The tests above build a tmp tree that happens to look right. These ones
+# materialize a redacted snapshot of an actual install, so the thing under test
+# is whether the shipped YAML holds up against the *layout that exists* -- with
+# its native store, its sibling lock files and its instruction file all present.
+
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "adapters"
+
+
+def _materialize(fixture: Path, destination: Path) -> Path:
+    """Copy a redacted install snapshot; return it as AGENT_ROOT."""
+    for source in sorted(fixture.rglob("*")):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(fixture)
+        if relative == Path("README.md"):
+            continue  # fixture documentation, not part of the install
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    return destination
+
+
+def test_hermes_fixture_reports_nothing_from_the_native_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole install is present, and only the managed root is collected.
+
+    ``memories/MEMORY.md`` and ``memories/USER.md`` are the agent's own notes
+    and ``AGENTS.md`` is its instruction file. All three are markdown, all three
+    sit inside AGENT_ROOT, and none of them may be reported.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "hermes", tmp_path / "hermes")
+    shared = agent_root / "memory" / "shared" / "auth"
+    shared.mkdir(parents=True)
+    (shared / "retry.md").write_text("Use bounded backoff.\n", encoding="utf-8")
+
+    records = list(_load("hermes", agent_root).list_shared())
+
+    assert [r.source_locator for r in records] == ["hermes-shared:auth/retry.md"]
+
+
+def test_hermes_fixture_excludes_a_lock_beside_a_managed_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why the exclude is ``**/*.lock`` and not a directory.
+
+    The fixture shows the real placement: ``MEMORY.md.lock`` is a *sibling* of
+    ``MEMORY.md``. So the moment an agent writes inside the managed root, a lock
+    appears next to a note there too.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "hermes", tmp_path / "hermes")
+    assert (agent_root / "memories" / "MEMORY.md.lock").is_file()
+    shared = agent_root / "memory" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "note.md").write_text("kept\n", encoding="utf-8")
+    (shared / "note.md.lock").write_text("holder\n", encoding="utf-8")
+    (shared / "nested").mkdir()
+    (shared / "nested" / "deep.md.lock").write_text("holder\n", encoding="utf-8")
+
+    records = list(_load("hermes", agent_root).list_shared())
+
+    assert [r.source_locator for r in records] == ["hermes-shared:note.md"]
+
+
+def test_hermes_fixture_hint_injection_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injected twice into the real instruction file, unchanged the second time.
+
+    Run repeatedly by every subscribe, so a non-idempotent injection grows the
+    file the agent reads on every session until it displaces the instructions.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "hermes", tmp_path / "hermes")
+    adapter = _load("hermes", agent_root)
+    target = agent_root / "AGENTS.md"
+    original = target.read_text(encoding="utf-8")
+
+    assert adapter.inject_team_hint(adapter.hint_config) is True
+    once = target.read_text(encoding="utf-8")
+    assert adapter.inject_team_hint(adapter.hint_config) is False
+    twice = target.read_text(encoding="utf-8")
+
+    assert once == twice
+    assert once.startswith(original.rstrip("\n"))
+    assert "@memory/team/INDEX.md" in once
+    assert once.count("<!-- memory-net-hint:start -->") == 1
+
+
+def test_the_hermes_fixture_carries_no_real_content(tmp_path: Path) -> None:
+    """A redacted snapshot, checked as one: the shape is the asset, and the
+    content must stay neutral sample text."""
+    for path in sorted((FIXTURES / "hermes").rglob("*")):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "/home/" not in text
+        assert "/Users/" not in text
+        assert "@" not in text.replace("@memory/team/INDEX.md", "")
+
+
+def test_hermes_stays_experimental_until_a_real_run_says_otherwise() -> None:
+    """A calibrated read path is not evidence of a consumed hint."""
+    config = yaml.safe_load((ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8"))
+
+    assert config["support_status"] == "experimental"
