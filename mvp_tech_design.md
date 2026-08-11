@@ -1398,6 +1398,35 @@ MVP-core 当前脚本合同：
 后者不是锦上添花：它是这条回归允许在真实机器上跑的前提。
 CI 以阻塞步骤运行该 harness。
 
+#### 6.6.2 安装期探针（`memory_net.leaf.install_probe`）
+
+安装脚本此前只检查远端文件**是否存在**（`git show … >/dev/null`），
+而"存在"不等于"兼容"也不等于"可解析"。同时脚本里最贵、最难撤销的几步
+（clone、orphan 分支 push、cron、daemon）都排在任何环境检查之前，
+于是"python 太老 / state 装在网络盘 / 远端 schema 坏了"这类问题都要等到
+半装完之后才暴露，且暴露点离成因很远。探针把结论前移，**fail-closed**。
+
+两个阶段，各自有阶段名，失败即非零退出并把 `[<STAGE>] <原因>` 打到 stderr：
+
+| 阶段 | 检查 | 位置 |
+|---|---|---|
+| `PREFLIGHT` | python ≥ `requires-python` 下界、git 版本下界、`$MEMORY_NET_HOME` 为本机 FS、可写、剩余空间下界 | pip install 之后、`git clone` 之前 |
+| `SCHEMA_PROBE` | 远端 `bootstrap_state.json` 走 `validate_bootstrap_state()`（含 `compatible_code_range` / `compatible_build_api_range`）、`manifest.json` 走 `validate_master_manifest()`（含 `compatible_leaf_range`）、`team/` 下**一条代表性产物**的 frontmatter 走 `validate_team_product_frontmatter()` | fetch 之后、建/切叶子分支之前 |
+
+两处放置都是有意的：
+
+- `PREFLIGHT` 不放在脚本最顶端，因为探针随包发布，且真正要考核的解释器是
+  **venv 里那个**——它才是将来跑 daemon 的那个。建 venv 是廉价且本地的，
+  clone / push / cron / daemon 才是贵且难撤销的，探针挡在后者之前。
+- 产物只抽**一条**：schema 层面的破损是全局性的，一条即可发现；
+  全量校验会让安装耗时随团队记忆规模增长。
+
+本机 FS 判定与运行期共用 `memory_net/shared/util/filesystem.py` 的同一份实现——
+安装期放行、运行期拒绝，比不检查更糟。
+
+`preflight_probe()` 的 python / git 版本与剩余空间**全部可注入**，
+因此每条失败分支都由真实运行的负向用例覆盖，而不是只写在注释里。
+
 生产级 one-command hardening 仍作为后续任务跟踪：平台/依赖探针、
 `build_info` / approved build ID 校验、安装失败阶段状态、远端 manifest
 兼容校验、代表性 schema probe、同机 dirty recovery 留证、generation quarantine、

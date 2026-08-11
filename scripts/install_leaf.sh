@@ -83,6 +83,13 @@ python3 -m venv "$MN_HOME/venv"
 PYTHON="$MN_HOME/venv/bin/python"
 "$PYTHON" -m pip install --upgrade pip >/dev/null
 "$PYTHON" -m pip install "$PACKAGE_REF" >/dev/null
+
+# PREFLIGHT. Placed here rather than at the very top because the probe ships
+# with the package, and because the interpreter that matters is the venv's --
+# it is the one that will run the daemon. Everything still to come (clone,
+# orphan-branch push, cron, daemon) is either expensive or hard to undo, so an
+# environment that cannot support the install is refused before any of it.
+"$PYTHON" -m memory_net.leaf.install_probe preflight --home "$MN_HOME"
 INSTALL_ID_FILE="$MN_HOME/state/install_id"
 if [[ -f "$INSTALL_ID_FILE" ]]; then
   INSTALL_ID="$(cat "$INSTALL_ID_FILE")"
@@ -118,6 +125,26 @@ git fetch origin
 git show origin/master:bootstrap_state.json >/dev/null
 git show origin/master:manifest.json >/dev/null
 ADAPTER_YAML="$(git show "origin/master:config/adapters/$AGENT.yaml")"
+
+# SCHEMA_PROBE: existence is not compatibility. Validate the remote's schemas --
+# including one representative team product -- before adopting them, so an
+# incompatible or corrupted master is refused here instead of surfacing during
+# the first sync, far from its cause.
+PROBE_DIR="$(mktemp -d "$MN_HOME/.probe.XXXXXX")"
+git show origin/master:bootstrap_state.json > "$PROBE_DIR/bootstrap_state.json"
+git show origin/master:manifest.json > "$PROBE_DIR/manifest.json"
+PROBE_ARGS=(
+  --bootstrap-state "$PROBE_DIR/bootstrap_state.json"
+  --manifest "$PROBE_DIR/manifest.json"
+)
+SAMPLE_PRODUCT="$(git ls-tree -r --name-only origin/master -- team \
+  | grep -E '\.md$' | head -n 1 || true)"
+if [[ -n "$SAMPLE_PRODUCT" ]]; then
+  git show "origin/master:$SAMPLE_PRODUCT" > "$PROBE_DIR/product.md"
+  PROBE_ARGS+=(--team-product "$PROBE_DIR/product.md")
+fi
+"$PYTHON" -m memory_net.leaf.install_probe schema "${PROBE_ARGS[@]}"
+rm -rf "$PROBE_DIR"
 if grep -Eq '^support_status:[[:space:]]*experimental[[:space:]]*$' <<<"$ADAPTER_YAML"; then
   if [[ "${MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER:-}" != "1" ]]; then
     echo "[ABORT] adapter '$AGENT' is experimental; set MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER=1 to opt in" >&2
