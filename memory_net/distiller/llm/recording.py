@@ -176,6 +176,40 @@ class BundleRecorder:
             )
 
 
+UNKNOWN_BACKEND = "unknown"
+"""The provenance label a recording carries when it named no backend."""
+
+
+def recorded_backends(path: Path) -> set[str]:
+    """Which backends produced the calls in a recorded bundle.
+
+    Read from ``calls.jsonl`` rather than from ``record_metrics.json``: the
+    per-call provenance is the source of truth (§9.2), and the metrics file is
+    derived from it -- a bundle assembled by hand could carry an agreeable
+    summary over calls that say something else.
+
+    An unreadable or empty bundle yields ``{"unknown"}`` rather than an empty
+    set, so a caller deciding whether the recording is trustworthy cannot read
+    "nothing objectionable in here" out of "nothing readable in here".
+    """
+    calls = path / "calls.jsonl" if path.is_dir() else path
+    try:
+        lines = calls.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {UNKNOWN_BACKEND}
+    backends: set[str] = set()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            response = record["response"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return {UNKNOWN_BACKEND}
+        backends.add(_provenance_str(response.get("provider_backend")))
+    return backends or {UNKNOWN_BACKEND}
+
+
 class RecordingProvider(LLMProvider):
     """Records a call, and scans in two stages around it (§5.5.10).
 

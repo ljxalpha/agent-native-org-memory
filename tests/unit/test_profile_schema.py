@@ -8,10 +8,13 @@ pin one refusal per required key, because a check that covers six of seven
 looks identical to one that covers all seven.
 """
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from memory_net.distiller.llm.recording import recorded_backends
 from memory_net.distiller.profile import (
     DEVELOPMENT,
     PRODUCTION,
@@ -282,3 +285,84 @@ def test_provenance_dict_keys_are_pinned() -> None:
         "profile_blob_sha256": provenance.blob_sha256,
         "profile_path": "config/profiles/production.yaml",
     }
+
+
+_bundle_seq = 0
+
+
+def _bundle(tmp_path: Path, *backends: str) -> Path:
+    global _bundle_seq
+    _bundle_seq += 1
+    bundle = tmp_path / f"bundle{_bundle_seq}"
+    bundle.mkdir()
+    (bundle / "calls.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "prompt_hash": "h",
+                    "request": {"system_prompt": "s", "user_prompt": "u"},
+                    "response": {"text": "{}", "provider_backend": backend},
+                }
+            )
+            + "\n"
+            for backend in backends
+        ),
+        encoding="utf-8",
+    )
+    return bundle
+
+
+def test_recorded_backends_reads_every_call_not_a_summary(tmp_path: Path) -> None:
+    assert recorded_backends(_bundle(tmp_path, "deepseek", "deepseek")) == {"deepseek"}
+    assert recorded_backends(_bundle(tmp_path, "deepseek", "mock")) == {
+        "deepseek",
+        "mock",
+    }
+
+
+def test_recorded_backends_reports_unknown_rather_than_nothing(
+    tmp_path: Path,
+) -> None:
+    """ "Nothing readable in here" must not be legible as "nothing bad in here"."""
+    assert recorded_backends(tmp_path / "absent") == {"unknown"}
+    assert recorded_backends(_bundle(tmp_path)) == {"unknown"}
+
+    torn = _bundle(tmp_path, "deepseek")
+    (torn / "calls.jsonl").write_text("{not json\n", encoding="utf-8")
+    assert recorded_backends(torn) == {"unknown"}
+
+    # A bundle predating the provenance contract: the key is simply absent.
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "calls.jsonl").write_text(
+        json.dumps({"request": {}, "response": {"text": "{}"}}) + "\n",
+        encoding="utf-8",
+    )
+    assert recorded_backends(old) == {"unknown"}
+
+
+def test_production_may_replay_a_recording_of_a_production_run() -> None:
+    """Otherwise the offline regression cannot run under the profile that
+    recorded it, and the only way to re-test a real model's output is to pay
+    for it again."""
+    validate_effective_provider(
+        PRODUCTION,
+        provider="deepseek",
+        fallback="none",
+        replay=True,
+        replay_backends={"deepseek"},
+    )
+
+
+@pytest.mark.parametrize(
+    "backends", [{"mock"}, {"hermes_tool"}, {"deepseek", "mock"}, {"unknown"}, set()]
+)
+def test_production_refuses_a_replay_it_cannot_vouch_for(backends: set[str]) -> None:
+    with pytest.raises(ProfileError, match="cannot replay"):
+        validate_effective_provider(
+            PRODUCTION,
+            provider="deepseek",
+            fallback="none",
+            replay=True,
+            replay_backends=backends,
+        )

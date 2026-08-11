@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +43,15 @@ FORBIDDEN_PRODUCTION_PROVIDERS = ("mock", "hermes_tool")
 CLI that takes a single text prompt, so the system/user role boundary does not
 survive the wire and there is no service-level structured-output constraint --
 neither property is optional when the input is untrusted leaf records.
+"""
+
+UNTRUSTED_REPLAY_BACKENDS = frozenset(FORBIDDEN_PRODUCTION_PROVIDERS) | {"unknown"}
+"""Backends a production profile will not accept a *recording* from.
+
+``"unknown"`` is in here because it is what a call carries when it named no
+backend at all, a bundle written before provenance existed included. A
+recording that cannot say where it came from is not evidence that it came from
+somewhere acceptable.
 """
 
 REQUIRED_PRODUCTION_KEYS = (
@@ -229,7 +239,12 @@ def _lookup(config: dict[str, Any], dotted: str) -> Any:
 
 
 def validate_effective_provider(
-    declared_class: str, *, provider: str, fallback: str, replay: bool = False
+    declared_class: str,
+    *,
+    provider: str,
+    fallback: str,
+    replay: bool = False,
+    replay_backends: Collection[str] | None = None,
 ) -> None:
     """Check the provider a run will *actually* use, not the one it declared.
 
@@ -242,14 +257,25 @@ def validate_effective_provider(
     ``replay`` is a third override in disguise: it replaces both providers with
     a bundle reader after the names have been checked, and a bundle recorded
     against the mock replays as the mock.
+
+    ``replay_backends`` is how a replay proves it is not that: the per-call
+    provenance the bundle carries (§9.2), which replay preserves rather than
+    rewriting. A bundle whose every call names a permitted backend is the
+    recording of a real production run, and refusing it would make the offline
+    regression -- the thing that keeps a real model's behaviour under test
+    without paying for it again -- impossible to run under the profile it was
+    recorded with. Anything else, an unreadable bundle included, is refused.
     """
     if declared_class != PRODUCTION:
         return
     if replay:
-        raise ProfileError(
-            "production run cannot replay a recorded bundle; the recording may "
-            "have come from any backend, including the mock"
-        )
+        offending = sorted(set(replay_backends or ()) & UNTRUSTED_REPLAY_BACKENDS)
+        if offending or not replay_backends:
+            raise ProfileError(
+                "production run cannot replay this bundle; its recorded "
+                "backends are "
+                + (", ".join(sorted(replay_backends or ())) or "unreadable")
+            )
     for role, name in (("llm.provider", provider), ("fallback provider", fallback)):
         if name in FORBIDDEN_PRODUCTION_PROVIDERS:
             raise ProfileError(
