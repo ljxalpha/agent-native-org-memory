@@ -21,6 +21,36 @@ from memory_net.leaf.install_state import (
 TIMESTAMP = "2026-04-20T09-00-00Z"
 
 
+def test_the_stage_order_is_pinned() -> None:
+    """Iterating INSTALL_STAGES cannot notice a stage going missing.
+
+    The order is the semantics -- inconsistencies() compares positions -- so it
+    is spelled out here rather than derived from the value under test.
+    """
+    assert INSTALL_STAGES == (
+        "PREFLIGHT",
+        "VENV_READY",
+        "REPO_READY",
+        "SCHEMA_PROBE",
+        "BRANCH_READY",
+        "GENERATION_READY",
+        "HINTS_INSTALLED",
+        "POST_VERIFY",
+        "DAEMON_STARTED",
+    )
+
+
+def test_the_install_script_records_only_known_stages_in_order() -> None:
+    """A stage the script records must exist, and in the declared order."""
+    script = Path("scripts/install_leaf.sh").read_text(encoding="utf-8")
+    recorded = re.findall(r"record_stage ([A-Z_]+)", script)
+
+    assert recorded, script
+    assert set(recorded) <= set(INSTALL_STAGES), recorded
+    positions = [INSTALL_STAGES.index(stage) for stage in recorded]
+    assert positions == sorted(positions), recorded
+
+
 def test_every_stage_round_trips(tmp_path: Path) -> None:
     for stage in INSTALL_STAGES:
         write_state(tmp_path, stage)
@@ -61,6 +91,67 @@ def test_a_failure_record_carries_nothing_but_the_stage_and_code(
         re.IGNORECASE,
     )
     assert not forbidden.search(raw), raw
+
+
+def test_a_failure_record_refuses_extra_fields(tmp_path: Path) -> None:
+    """The privacy contract is worthless if any caller can bypass it."""
+    with pytest.raises(InstallStageError, match="only its stage"):
+        write_state(
+            tmp_path,
+            failed_status("REPO_READY"),
+            exit_code=1,
+            stderr="fatal: could not read from remote repository",
+        )
+
+
+def test_a_success_record_may_still_carry_context(tmp_path: Path) -> None:
+    write_state(tmp_path, "REPO_READY", generation="abc")
+
+    state = read_state(tmp_path)
+    assert state is not None and state.payload["generation"] == "abc"
+
+
+def test_artifacts_without_readable_state_are_an_inconsistency(tmp_path: Path) -> None:
+    """The most abrupt failures record nothing; they still leave a repo."""
+    _home(tmp_path, venv=True, repo=True, generation=False)
+    (tmp_path / "state" / "install_state.json").write_text("{oops", encoding="utf-8")
+
+    reasons = inconsistencies(tmp_path, read_state(tmp_path / "state"))
+
+    assert "install artifacts exist but no readable state does" in reasons
+
+
+def test_a_fresh_home_is_not_an_inconsistency(tmp_path: Path) -> None:
+    (tmp_path / "state").mkdir()
+
+    assert inconsistencies(tmp_path, read_state(tmp_path / "state")) == []
+
+
+def test_a_freshly_built_venv_alone_is_not_an_inconsistency(tmp_path: Path) -> None:
+    """The venv exists before recovery runs, on every clean first install.
+
+    Counting it would fire the recovery notice every time, which trains
+    operators to ignore it.
+    """
+    (tmp_path / "state").mkdir()
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").write_text("", encoding="utf-8")
+
+    assert inconsistencies(tmp_path, read_state(tmp_path / "state")) == []
+
+
+def test_same_second_recoveries_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    """Evidence that silently replaces evidence is worse than none."""
+    _home(tmp_path, venv=True, repo=True, generation=True)
+
+    first = record_dirty_recovery(tmp_path, reasons=["a"], timestamp=TIMESTAMP)
+    second = record_dirty_recovery(tmp_path, reasons=["b"], timestamp=TIMESTAMP)
+
+    assert first != second
+    assert json.loads((first / "inventory.json").read_text(encoding="utf-8"))["reasons"]
+    assert json.loads((second / "inventory.json").read_text(encoding="utf-8"))[
+        "reasons"
+    ] == ["b"]
 
 
 @pytest.mark.parametrize("status", ["ALMOST_READY", "FAILED:ALMOST_READY", ""])

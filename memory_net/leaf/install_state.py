@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ INSTALL_STAGES: tuple[str, ...] = (
     "PREFLIGHT",
     "VENV_READY",
     "REPO_READY",
+    "SCHEMA_PROBE",
     "BRANCH_READY",
     "GENERATION_READY",
     "HINTS_INSTALLED",
@@ -90,11 +92,18 @@ def write_state(
     :param exit_code: recorded for a failure. Deliberately the *only* detail
         beyond the stage -- see the module docstring.
     :raises InstallStageError: for an unknown stage, so a typo in the install
-        script cannot silently record a state nothing can interpret.
+        script cannot silently record a state nothing can interpret, or for
+        extra fields on a failure -- the privacy contract above is worth
+        nothing if any caller can attach command output to a failure record.
     """
     stage = status.removeprefix(FAILED_PREFIX)
     if stage not in INSTALL_STAGES:
         raise InstallStageError(f"unknown install stage: {stage}")
+    if fields and status.startswith(FAILED_PREFIX):
+        raise InstallStageError(
+            "a failure record carries only its stage and exit code; "
+            f"refusing extra fields: {sorted(fields)}"
+        )
     payload: dict[str, Any] = {"status": status, **fields}
     if exit_code is not None:
         payload["exit_code"] = exit_code
@@ -131,6 +140,12 @@ def inconsistencies(memory_net_home: Path, state: InstallState | None) -> list[s
     reasons: list[str] = []
     if state is not None and state.failed:
         reasons.append(f"previous install failed at stage {state.stage}")
+    elif state is None and _has_artifacts(memory_net_home):
+        # A run that died before it could record anything, or whose state file
+        # was corrupted, still leaves a venv or a repo behind. Without this the
+        # most abrupt failures -- the ones most in need of evidence -- would be
+        # the only ones that produce none.
+        reasons.append("install artifacts exist but no readable state does")
 
     reached = INSTALL_STAGES.index(state.stage) if state is not None else -1
     if (
@@ -152,6 +167,24 @@ def inconsistencies(memory_net_home: Path, state: InstallState | None) -> list[s
     return reasons
 
 
+def _has_artifacts(memory_net_home: Path) -> bool:
+    """True when a *previous* run got past the point recovery is checked at.
+
+    The venv is deliberately not in this list. It is built before the recovery
+    check runs, so counting it would make every clean first install look like a
+    dirty one -- and a recovery notice that fires on every install teaches
+    operators to ignore recovery notices.
+    """
+    return any(
+        path.exists() or path.is_symlink()
+        for path in (
+            memory_net_home / "repo",
+            memory_net_home / "local.yaml",
+            memory_net_home / "config-current",
+        )
+    )
+
+
 def record_dirty_recovery(
     memory_net_home: Path,
     *,
@@ -166,8 +199,13 @@ def record_dirty_recovery(
 
     :returns: the directory holding ``inventory.json``.
     """
-    destination = memory_net_home / "state" / "dirty_recovery" / timestamp
-    destination.mkdir(parents=True, exist_ok=True)
+    # Unique per call: the timestamp has second precision, and evidence that
+    # silently overwrites earlier evidence is worse than none, because it looks
+    # complete.
+    root = memory_net_home / "state" / "dirty_recovery"
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / f"{timestamp}-{uuid.uuid4().hex[:8]}"
+    destination.mkdir()
     inventory = {
         "at": timestamp,
         "reasons": reasons,

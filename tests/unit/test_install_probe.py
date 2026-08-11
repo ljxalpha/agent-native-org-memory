@@ -113,6 +113,19 @@ def test_preflight_rejects_a_non_local_filesystem(
     assert "MEMORY_NET_HOME nfs" in failure.reason
 
 
+def test_the_write_probe_never_touches_an_existing_file(tmp_path: Path) -> None:
+    """A fixed probe name would truncate whatever already had it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    existing = home / ".write-probe"
+    existing.write_text("precious", encoding="utf-8")
+
+    assert preflight_probe(home, free_bytes=MINIMUM_FREE_BYTES) is None
+
+    assert existing.read_text(encoding="utf-8") == "precious"
+    assert [path.name for path in home.glob(".write-probe.*")] == []
+
+
 def test_preflight_rejects_a_full_disk(tmp_path: Path) -> None:
     failure = preflight_probe(tmp_path / "home", free_bytes=1024)
 
@@ -135,6 +148,13 @@ def test_schema_probe_accepts_a_healthy_remote() -> None:
     ("raw", "expected"),
     [
         ("{not json", "not parseable"),
+        # Valid YAML, invalid JSON: the runtime reads these files with a JSON
+        # parser, so a YAML-tolerant probe would pass a remote it cannot read.
+        (
+            "schema_version: 1\ncompatible_code_range: '>=0.1.0,<0.2.0'\n",
+            "not parseable",
+        ),
+        ("# a comment\n{}", "not parseable"),
         ("[1, 2]", "not a mapping"),
         ('{"schema_version": 2}', "unsupported bootstrap schema_version"),
     ],
@@ -290,6 +310,11 @@ def test_a_remote_without_an_allowlist_admits_every_build() -> None:
     [
         (GIT_REF, SAMPLE_SHA),
         ("/local/path/to/aomt", None),
+        # A local path may also end in @<40 hex>; the installer only enforces
+        # the sha rule for git+ refs, so a mutable directory named after an
+        # approved commit must not satisfy the allowlist.
+        (f"/tmp/pkg@{SAMPLE_SHA}", None),
+        (f"./checkout@{SAMPLE_SHA}", None),
         (f"git+ssh://git@example.invalid/org/aomt.git@{SAMPLE_SHA[:39]}", None),
         (None, None),
     ],

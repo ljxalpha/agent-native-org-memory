@@ -20,12 +20,11 @@ import json
 import shutil
 import subprocess
 import sys
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import yaml  # type: ignore[import-untyped]
 
 import memory_net
 from memory_net.leaf.identity import build_id_from_package_ref
@@ -208,12 +207,15 @@ def write_build_info(
 def _parse_json_mapping(raw: str, label: str) -> dict[str, Any]:
     """Parse JSON, reporting a syntax error as a schema failure.
 
-    ``yaml.safe_load`` accepts JSON and gives a message that names the position,
-    which is what an operator staring at a corrupted remote needs.
+    Strictly JSON, matching how the runtime reads these files. A YAML parser
+    would accept a superset -- unquoted keys, comments, bare scalars -- so a
+    remote the runtime cannot read would sail through the probe and fail later
+    during a sync, which is the exact class of failure the probe exists to
+    prevent.
     """
     try:
-        document = yaml.safe_load(raw)
-    except yaml.YAMLError as exc:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
         raise SchemaError(f"{label} is not parseable: {exc}") from exc
     if not isinstance(document, dict):
         raise SchemaError(f"{label} is not a mapping")
@@ -223,11 +225,17 @@ def _parse_json_mapping(raw: str, label: str) -> dict[str, Any]:
 def _probe_build_id(package_ref: str | None) -> str | None:
     """Resolve a package ref to a build id, or ``None`` when it pins no commit.
 
-    Passing the fallback (the code version) would be worse than passing nothing:
-    ``approved_build_ids`` is a commit allowlist, and a version string would
-    either never match or match by accident.
+    Two refusals, both deliberate:
+
+    * A ref that pins no commit yields ``None`` rather than the code-version
+      fallback. ``approved_build_ids`` is a commit allowlist; a version string
+      in it either never matches or matches by accident.
+    * Only a ``git+`` ref can yield a build id at all. A local path may also end
+      in ``@<40 hex>`` -- the installer only enforces the sha rule for ``git+``
+      refs -- so accepting one would let a mutable directory named after an
+      approved commit satisfy the allowlist.
     """
-    if package_ref is None:
+    if package_ref is None or not package_ref.startswith("git+"):
         return None
     build_id, source = build_id_from_package_ref(package_ref)
     return build_id if source == "package_ref" else None
@@ -256,14 +264,24 @@ def _git_version() -> tuple[int, ...] | None:
 
 
 def _writable_refusal(memory_net_home: Path) -> str | None:
-    """Confirm the install can actually create files under its home."""
+    """Confirm the install can actually create files under its home.
+
+    The probe file gets a unique name and is created exclusively, so it can
+    never truncate something that was already there, follow a planted symlink,
+    or collide with a concurrent probe. Cleanup runs in ``finally`` so a failure
+    after creation still leaves nothing behind.
+    """
+    probe: Path | None = None
     try:
         memory_net_home.mkdir(parents=True, exist_ok=True)
-        probe = memory_net_home / ".write-probe"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
+        probe = memory_net_home / f".write-probe.{uuid.uuid4().hex}"
+        with probe.open("x", encoding="utf-8"):
+            pass
     except OSError as exc:
         return f"MEMORY_NET_HOME is not writable: {memory_net_home}: {exc}"
+    finally:
+        if probe is not None:
+            probe.unlink(missing_ok=True)
     return None
 
 

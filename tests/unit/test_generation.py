@@ -339,3 +339,38 @@ def test_a_failed_marker_refresh_leaves_the_previous_sha_intact(
     assert (generation / "config_source_master_sha").read_text(
         encoding="utf-8"
     ) == "a" * 40
+
+
+def test_the_nested_and_flattened_source_shapes_hash_identically(
+    tmp_path: Path,
+) -> None:
+    """Two export shapes must agree, or installs and syncs fork the cache.
+
+    The installer exports ``bootstrap_state.json`` + ``config/`` + ``prompts/``
+    and hands that tree to the materializer, which is also the shape the daemon's
+    config sync builds. The generations already on disk were written by an older
+    installer that flattened ``config/`` to the root first. If those two hashed
+    differently, upgrading would orphan every installed generation and the same
+    config would live under two names.
+    """
+    nested = tmp_path / "nested"
+    (nested / "config" / "adapters").mkdir(parents=True)
+    (nested / "prompts").mkdir()
+    (nested / "bootstrap_state.json").write_text("{}", encoding="utf-8")
+    (nested / "config" / "subscribe.yaml").write_text("a: 1\n", encoding="utf-8")
+    (nested / "config" / "adapters" / "claude-code.yaml").write_text(
+        "name: claude-code\n", encoding="utf-8"
+    )
+    (nested / "prompts" / "distill.md").write_text("prompt\n", encoding="utf-8")
+
+    flattened = tmp_path / "flattened"
+    (flattened / "adapters").mkdir(parents=True)
+    (flattened / "prompts").mkdir()
+    (flattened / "bootstrap_state.json").write_text("{}", encoding="utf-8")
+    (flattened / "subscribe.yaml").write_text("a: 1\n", encoding="utf-8")
+    (flattened / "adapters" / "claude-code.yaml").write_text(
+        "name: claude-code\n", encoding="utf-8"
+    )
+    (flattened / "prompts" / "distill.md").write_text("prompt\n", encoding="utf-8")
+
+    assert canonical_generation_hash(nested) == canonical_generation_hash(flattened)
