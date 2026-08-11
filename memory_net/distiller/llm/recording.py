@@ -7,7 +7,22 @@ from pathlib import Path
 from typing import Any
 
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
+from memory_net.distiller.output_scanner import (
+    PROSE,
+    OutputScanner,
+    RedactionViolation,
+    ScanVerdict,
+)
+from memory_net.distiller.runctx import RunContext
 from memory_net.shared.util.hashing import short_hash
+
+UNSCANNED = ScanVerdict(hits=(), ruleset_version="", mode="none")
+"""The verdict for a run that has no scanner configured at all.
+
+Stated rather than omitted: ``BundleRecorder.record`` demands a verdict, and
+"there was no scanner" has to be something a caller can say out loud instead of
+a missing argument that reads the same as a forgotten scan.
+"""
 
 
 class BundleRecorder:
@@ -30,7 +45,18 @@ class BundleRecorder:
         self.requests_dir = requests_dir
         self._sequence = 0
 
-    def record(self, request: LLMRequest, response: LLMResponse) -> None:
+    def record(
+        self, request: LLMRequest, response: LLMResponse, *, scanned: ScanVerdict
+    ) -> None:
+        """Append one call, given evidence that it was scanned first (§5.5.10).
+
+        ``scanned`` is required so this write point asks for the evidence rather
+        than trusting that some caller upstream remembered to scan. A verdict
+        that carries hits under ``enforce`` is refused outright: a caller that
+        scanned, was told no, and wrote anyway is the bypass this guards.
+        """
+        if scanned.hits and scanned.mode == "enforce":
+            raise RedactionViolation(scanned.hits)
         record = _record_item(request, response)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
@@ -56,6 +82,14 @@ class BundleRecorder:
 
 
 class RecordingProvider(LLMProvider):
+    """Records a call, and scans in two stages around it (§5.5.10).
+
+    The stages are not symmetric on purpose. The request is scanned *before the
+    inner provider is called at all*: once a prompt has gone out, refusing to
+    write it down protects nothing. The response can only be scanned after the
+    call, so there the guarantee is narrower -- it never reaches disk.
+    """
+
     def __init__(
         self,
         provider: LLMProvider,
@@ -63,6 +97,7 @@ class RecordingProvider(LLMProvider):
         *,
         requests_dir: Path | None = None,
         recorder: BundleRecorder | None = None,
+        context: RunContext | None = None,
     ) -> None:
         self.provider = provider
         if recorder is None:
@@ -71,10 +106,56 @@ class RecordingProvider(LLMProvider):
             recorder = BundleRecorder(path, requests_dir=requests_dir)
         # Shared so a run's primary and fallback providers record to one bundle.
         self.recorder = recorder
+        # The run's scanner is read off the context, never constructed here: the
+        # recorder, the pipeline and the orchestrator must share one instance,
+        # which is also the run's hit counter.
+        self.context = context
+
+    @property
+    def scanner(self) -> OutputScanner | None:
+        scanner = self.context.scanner if self.context is not None else None
+        return scanner if isinstance(scanner, OutputScanner) else None
 
     def generate(self, request: LLMRequest) -> LLMResponse:
+        scanner = self.scanner
+        if scanner is None:
+            # Pre-injection behaviour, field for field. The verdict is explicit
+            # rather than absent so the write point's contract stays "show me
+            # what the scan said", with "there was no scanner" a statable answer.
+            response = self.provider.generate(request)
+            self.recorder.record(request, response, scanned=UNSCANNED)
+            return response
+        # Stage 1, before anything leaves this process.
+        scanner.check(
+            request.system_prompt, field_kind=PROSE, field_path="request.system_prompt"
+        )
+        scanner.check(
+            request.user_prompt, field_kind=PROSE, field_path="request.user_prompt"
+        )
+        scanner.check(
+            dict(request.metadata or {}),
+            field_kind=PROSE,
+            field_path="request.metadata",
+        )
         response = self.provider.generate(request)
-        self.recorder.record(request, response)
+        # Stage 2, before anything reaches disk.
+        text_verdict = scanner.check(
+            response.text, field_kind=PROSE, field_path="response.text"
+        )
+        meta_verdict = scanner.check(
+            dict(response.raw_meta or {}),
+            field_kind=PROSE,
+            field_path="response.raw_meta",
+        )
+        self.recorder.record(
+            request,
+            response,
+            scanned=ScanVerdict(
+                hits=text_verdict.hits + meta_verdict.hits,
+                ruleset_version=scanner.ruleset.version,
+                mode=scanner.mode,
+            ),
+        )
         return response
 
 

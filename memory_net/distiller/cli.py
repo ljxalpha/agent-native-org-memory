@@ -60,6 +60,7 @@ from memory_net.distiller.profile import (
 )
 from memory_net.distiller.runctx import (
     RunBudget,
+    RunContext,
     RunContextBuilder,
     RunIdentity,
 )
@@ -210,7 +211,12 @@ def main(argv: list[str] | None = None) -> int:
             .freeze()
         )
         provider, fallback_provider = _build_providers(
-            args, provider_name, fallback_name, distill_config, budget=context.budget
+            args,
+            provider_name,
+            fallback_name,
+            distill_config,
+            budget=context.budget,
+            context=context,
         )
         pipeline = DistillationPipeline(
             context=context,
@@ -280,6 +286,7 @@ def _build_providers(
     config: dict[str, Any],
     *,
     budget: RunBudget | None = None,
+    context: RunContext | None = None,
 ) -> tuple[LLMProvider, LLMProvider | None]:
     """Build the (primary, fallback) providers, sharing record/replay state.
 
@@ -313,7 +320,7 @@ def _build_providers(
         return replay, replay.sharing_cursor(fallback_provider=fallback_live)
     recorder = _record_recorder(args)
     primary = _wrap_record(
-        _base_provider(provider_name, args.model, budget=budget), recorder
+        _base_provider(provider_name, args.model, budget=budget), recorder, context
     )
     if fallback_name == "none":
         return primary, None
@@ -321,6 +328,7 @@ def _build_providers(
     fallback = _wrap_record(
         _base_provider(fallback_name, args.model or fallback_model, budget=budget),
         recorder,
+        context,
     )
     return primary, fallback
 
@@ -450,10 +458,19 @@ def _record_recorder(args: argparse.Namespace) -> BundleRecorder | None:
     return None
 
 
-def _wrap_record(provider: LLMProvider, recorder: BundleRecorder | None) -> LLMProvider:
+def _wrap_record(
+    provider: LLMProvider,
+    recorder: BundleRecorder | None,
+    context: RunContext | None = None,
+) -> LLMProvider:
+    """Wrap a lane so its calls are scanned and recorded (§5.5.10).
+
+    The context is what carries the run's scanner; without it the wrapper keeps
+    its pre-injection behaviour and records unscanned.
+    """
     if recorder is None:
         return provider
-    return RecordingProvider(provider, recorder=recorder)
+    return RecordingProvider(provider, recorder=recorder, context=context)
 
 
 def _replay_mode(args: argparse.Namespace) -> str:

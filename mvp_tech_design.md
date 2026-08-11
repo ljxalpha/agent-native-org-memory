@@ -1301,6 +1301,32 @@ scanner 本身就是那个 run 级计数器，三个消费方（recorder / pipel
 因此 `patterns_path` 必须是仓相对路径，绝对路径与 `..` 一律拒绝。
 profile 里完全不声明 `output_scanner` 块时落到 `enforce` + 默认规则文件（fail-closed 默认）。
 
+#### 5.5.10 recorder 侧的两阶段扫描（fail-closed，且早于出站）
+
+`RecordingProvider.generate()` 过去是"先调用、立刻落盘"：
+`response = provider.generate(...)` 之后**立即** `recorder.record(...)`。
+在这个形状下，任何下游扫描都只能是"扫在落盘之后"，而且**完全挡不住**
+含敏感 records 的 prompt 已经被发到外部服务。因此改成两阶段：
+
+```
+stage-1（出站前）：scan(system_prompt / user_prompt / request.metadata)
+                  → 命中即抛，**不发出任何网络请求**
+stage-2（落盘前）：response = provider.generate(request)
+                  → scan(response.text / response.raw_meta)
+                  → 通过才 recorder.record(...)
+```
+
+两阶段共用同一个 run 级计数器（就是 `context.scanner` 本身）。
+`enforce` 下命中即抛 `RedactionViolation`：**不写 `calls.jsonl`、不写
+`requests/<NNNN>-*.json`**，异常向上传播由发布闸转成整 run 失败。
+`observe` 下只累加分布并照常写入——注意 CLI 在 `observe` 下已禁用一切录制（§5.5.9 第 4 条），
+该路径只在直接构造 `RecordingProvider` 的单测里可达，用于证明 mode 语义本身正确。
+
+`BundleRecorder.record()` 增加**必填**参数 `scanned: ScanVerdict`：
+写盘点要求调用方出示"扫过了"的证据，而不是相信上游某处记得扫。
+带命中的 `enforce` 判定书递到 `record()` 一律拒写。
+`context` 为 `None` 时行为与接线前逐字相同（此时 recorder 收到的是显式的"未扫描"判定书）。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
