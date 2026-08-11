@@ -43,6 +43,7 @@ def _tree(tmp_path: Path, *, product: str | None = None, **manifest: Any) -> Pat
     )
     payload: dict[str, Any] = {
         "schema_version": "memory-net/master-manifest/v1",
+        "last_run_id": "distill-run-001",
         "compatible_leaf_range": ">=0.1.0,<0.2.0",
         "products_active": {
             "distill-run-001": {
@@ -166,29 +167,68 @@ def test_a_release_branch_with_no_review_request_is_refused(tmp_path: Path) -> N
     assert any("must carry the review request" in failure for failure in failures)
 
 
-def test_a_release_branch_that_carries_its_request_passes(tmp_path: Path) -> None:
-    root = _tree(tmp_path)
-    request = root / "distill_runs" / "distill-run-001" / "review_request.json"
-    request.parent.mkdir(parents=True)
-    request.write_text(
+def _request(root: Path, *, run_id: str, stated_run_id: str | None = None) -> Path:
+    """A valid request for ``run_id``, optionally claiming to be another run's."""
+    stated = run_id if stated_run_id is None else stated_run_id
+    path = root / "distill_runs" / run_id / "review_request.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(
             {
                 "schema_version": "memory-net/review-request/v1",
-                "run_id": "distill-run-001",
-                "head": "release/distill-run-001",
+                "run_id": stated,
+                "head": f"release/{stated}",
                 "base": "master",
-                "title": "distill run distill-run-001",
+                "title": f"distill run {stated}",
                 "codeowners_path": ".github/CODEOWNERS",
                 "master_snapshot_sha": "a" * 40,
-                "metrics_path": "distill_runs/distill-run-001/metrics.json",
+                "metrics_path": f"distill_runs/{stated}/metrics.json",
                 "products_count": 1,
                 "categories": ["common_knowledge"],
             }
         ),
         encoding="utf-8",
     )
+    return path
+
+
+def test_a_release_branch_that_carries_its_request_passes(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _request(root, run_id="distill-run-001")
 
     assert validate_release_tree(root, require_review_request=True) == []
+
+
+def test_an_older_run_s_request_does_not_stand_in_for_this_release(
+    tmp_path: Path,
+) -> None:
+    """A release branch keeps the whole distill_runs history."""
+    root = _tree(tmp_path)
+    _request(root, run_id="distill-run-000")
+
+    failures = validate_release_tree(root, require_review_request=True)
+
+    assert any("left no review request" in failure for failure in failures)
+
+
+def test_a_request_whose_run_id_disagrees_with_its_directory_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = _tree(tmp_path)
+    _request(root, run_id="distill-run-001", stated_run_id="distill-run-000")
+
+    failures = validate_release_tree(root, require_review_request=True)
+
+    assert any("is not the run that wrote this release" in f for f in failures)
+
+
+def test_a_release_whose_manifest_names_no_run_is_refused(tmp_path: Path) -> None:
+    root = _tree(tmp_path, last_run_id="")
+    _request(root, run_id="distill-run-001")
+
+    failures = validate_release_tree(root, require_review_request=True)
+
+    assert any("last_run_id is missing" in failure for failure in failures)
 
 
 def test_the_entry_point_takes_the_requirement_as_a_flag(tmp_path: Path) -> None:

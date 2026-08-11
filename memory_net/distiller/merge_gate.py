@@ -76,7 +76,13 @@ def validate_release_tree(
         failures.extend(_evidence_failures(relative, frontmatter, rules))
     if manifest is not None:
         failures.extend(_manifest_failures(manifest, products))
-    failures.extend(_review_request_failures(root, required=require_review_request))
+    failures.extend(
+        _review_request_failures(
+            root,
+            required=require_review_request,
+            last_run_id=str((manifest or {}).get("last_run_id") or ""),
+        )
+    )
     return failures
 
 
@@ -173,23 +179,21 @@ def _manifest_failures(
     return failures
 
 
-def _review_request_failures(root: Path, *, required: bool) -> list[str]:
-    """Every review request must be within its allowlist -- and exist, on a
-    release branch.
+def _review_request_failures(
+    root: Path, *, required: bool, last_run_id: str = ""
+) -> list[str]:
+    """Every review request must be within its allowlist -- and on a release
+    branch, *this* release's request must be the one that is there.
 
-    A release branch with no request at all is the quiet failure: the products
-    and the manifest can be perfectly well formed while the record of what was
-    put up for review, and against which snapshot, is simply missing.
+    The requirement is bound to ``manifest.json``'s ``last_run_id`` rather than
+    to "some request exists", because a release branch keeps the whole
+    ``distill_runs`` history: a run that wrote no request of its own would
+    otherwise pass on the strength of an older, still perfectly valid one.
     """
     failures: list[str] = []
     found = sorted((root / "distill_runs").glob("*/review_request.json"))
-    if required and not found:
-        return [
-            (
-                "distill_runs/*/review_request.json: a release branch must "
-                "carry the review request its run wrote"
-            )
-        ]
+    if required:
+        failures.extend(_missing_request_failures(root, found, last_run_id))
     for path in found:
         relative = path.relative_to(root).as_posix()
         try:
@@ -202,6 +206,46 @@ def _review_request_failures(root: Path, *, required: bool) -> list[str]:
         except ReviewRequestError as exc:
             failures.append(f"{relative}: {exc}")
     return failures
+
+
+def _missing_request_failures(
+    root: Path, found: list[Path], last_run_id: str
+) -> list[str]:
+    """The request of the run this branch publishes, or the reason there is none."""
+    if not found:
+        return [
+            (
+                "distill_runs/*/review_request.json: a release branch must "
+                "carry the review request its run wrote"
+            )
+        ]
+    if not last_run_id:
+        return [
+            (
+                "manifest.json: last_run_id is missing, so no review request "
+                "can be bound to this release"
+            )
+        ]
+    path = root / "distill_runs" / last_run_id / "review_request.json"
+    if path not in found:
+        return [
+            (
+                f"distill_runs/{last_run_id}/review_request.json: this release "
+                f"was written by run {last_run_id}, which left no review request"
+            )
+        ]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []  # reported by the per-file validation below
+    if str(payload.get("run_id") or "") != last_run_id:
+        return [
+            (
+                f"distill_runs/{last_run_id}/review_request.json: run_id "
+                f"{payload.get('run_id')!r} is not the run that wrote this release"
+            )
+        ]
+    return []
 
 
 def _evidence_rules(profile: Path) -> dict[str, dict[str, int]]:
