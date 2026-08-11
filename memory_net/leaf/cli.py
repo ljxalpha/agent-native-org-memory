@@ -7,7 +7,6 @@ import logging
 import os
 import platform
 import shutil
-import subprocess
 import sys
 import tarfile
 import uuid
@@ -49,6 +48,7 @@ from memory_net.shared.schema import (
     validate_bootstrap_state,
     validate_health,
 )
+from memory_net.shared.util.filesystem import local_filesystem_refusal
 from memory_net.shared.util.hashing import short_hash
 from memory_net.shared.util.paths import expand_path
 
@@ -58,10 +58,6 @@ HEALTH_COMMIT_INTERVAL_SECONDS = 6 * 60 * 60
 #: the same ``started_at``, and so no code path reads the clock twice.
 _PROCESS_STARTED_AT = utc_now()
 LOGGER = logging.getLogger(__name__)
-NON_LOCAL_FILESYSTEM_TYPES = frozenset(
-    {"nfs", "nfs4", "smb", "smb2", "smb3", "smbfs", "cifs", "fuse.sshfs"}
-)
-UNKNOWN_FILESYSTEM_POLICY = "allow"
 
 
 class SubscribeContractDriftError(RuntimeError):
@@ -1316,47 +1312,9 @@ def _git_last_commit_at(repo_path: Path) -> datetime | None:
 
 
 def _assert_local_memory_net_home(state_home: Path) -> None:
-    fs_type = _filesystem_type(state_home)
-    if fs_type is None:
-        if UNKNOWN_FILESYSTEM_POLICY == "deny":
-            raise SystemExit(
-                f"MEMORY_NET_HOME filesystem type is unknown: {state_home}"
-            )
-        return
-    if fs_type is not None and fs_type in NON_LOCAL_FILESYSTEM_TYPES:
-        raise SystemExit(
-            f"MEMORY_NET_HOME must be on a local filesystem; got {fs_type}: {state_home}"
-        )
-
-
-def _filesystem_type(path: Path) -> str | None:
-    target = _nearest_existing_ancestor(path)
-    if not target.exists():
-        return None
-    if sys.platform.startswith("linux"):
-        return _stat_filesystem_type(["stat", "-f", "-c", "%T", str(target)])
-    if sys.platform == "darwin":
-        return _stat_filesystem_type(["stat", "-f", "%T", str(target)])
-    return None
-
-
-def _nearest_existing_ancestor(path: Path) -> Path:
-    target = path
-    while not target.exists() and target != target.parent:
-        target = target.parent
-    return target
-
-
-def _stat_filesystem_type(args: list[str]) -> str | None:
-    result = subprocess.run(
-        args,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip().lower()
-    return None
+    refusal = local_filesystem_refusal(state_home, label="MEMORY_NET_HOME")
+    if refusal is not None:
+        raise SystemExit(refusal)
 
 
 def _read_state_time(path: Path) -> datetime | None:
