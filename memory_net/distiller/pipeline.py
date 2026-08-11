@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from memory_net.distiller.categories import canonical_category
+from memory_net.distiller.clustering.cache import EmbeddingCache
 from memory_net.distiller.clustering.dbscan import cluster_vectors
 from memory_net.distiller.clustering.embedder import FastEmbedder
 from memory_net.distiller.conflict import CONFLICT_MARKER, normalize_conflicts
@@ -204,6 +205,7 @@ class DistillationPipeline:
         singleton_lane_enabled: bool = False,
         singleton_lane_max_records: int | None = None,
         schedule_by_estimated_cost: bool = False,
+        embedding_cache: EmbeddingCache | None = None,
         context: RunContext | None = None,
     ) -> None:
         self.provider = provider
@@ -232,6 +234,9 @@ class DistillationPipeline:
         # strict replay compares calls in recording order, so re-ordering the
         # clusters turns a whole golden bundle into misses (§7.2 DISTILL-001).
         self.schedule_by_estimated_cost = bool(schedule_by_estimated_cost)
+        # None means "no cache", which is the default and is byte-identical to
+        # the behaviour before the cache existed: every vector is recomputed.
+        self.embedding_cache = embedding_cache
         self.singleton_lane_enabled = bool(singleton_lane_enabled)
         self.singleton_lane_max_records = (
             None
@@ -644,7 +649,7 @@ class DistillationPipeline:
         texts = [
             str(record.get("body") or record.get("content") or "") for record in records
         ]
-        vectors = self.embedder.embed(texts).vectors
+        vectors = self._embed(texts)
         labels = cluster_vectors(
             vectors,
             eps=self.dbscan_eps,
@@ -658,6 +663,19 @@ class DistillationPipeline:
         for label, record in zip(labels, records, strict=True):
             grouped.setdefault(label, []).append(record)
         return [grouped[label] for label in sorted(grouped)]
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        """This run's vectors, through the cache when the profile enabled one.
+
+        The cache is keyed by the *policy* that produced the vectors, so a run
+        can never be handed a vector from another backend or model; see
+        ``clustering/cache.py``.
+        """
+        if self.embedding_cache is None:
+            return self.embedder.embed(texts).vectors
+        return self.embedding_cache.resolve(
+            texts, lambda missing: self.embedder.embed(missing).vectors
+        )
 
     def _generate_cluster(
         self,

@@ -15,6 +15,7 @@ import yaml  # type: ignore[import-untyped]
 
 from memory_net import __version__
 from memory_net.distiller.categories import canonical_category
+from memory_net.distiller.clustering.cache import EmbeddingCache
 from memory_net.distiller.clustering.embedder import FastEmbedder
 from memory_net.distiller.clustering.policy import (
     DEFAULT_MODEL_NAME,
@@ -284,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
                 "enabled", False
             ),
             singleton_lane_max_records=_singleton_lane_cap(distill_config),
+            embedding_cache=_embedding_cache(
+                distill_config, repo_path=args.repo, policy=embedding
+            ),
         )
         result = DistillOrchestrator(
             context=context,
@@ -829,6 +833,42 @@ def _dbscan_min_samples(config: dict[str, Any]) -> int:
     if isinstance(clustering, dict) and clustering.get("min_samples") is not None:
         return int(clustering["min_samples"])
     return 2
+
+
+def _embedding_cache(
+    config: dict[str, Any],
+    *,
+    repo_path: Path,
+    policy: EmbeddingPolicy,
+) -> EmbeddingCache | None:
+    """The run's vector cache, or ``None`` unless the profile enabled one.
+
+    The backend and model come off the run's ``EmbeddingPolicy`` rather than
+    being read from the profile a second time: a cache keyed by a different
+    answer than the one the vectors were produced under is exactly the
+    cross-backend reuse the key exists to prevent (§5.5.7).
+
+    The store defaults to ``.memory-net/embedding_cache``: inside the working
+    tree so it survives between runs, but outside every path the publish step
+    stages -- that step names ``team``, ``manifest.json``, ``.health.json`` and
+    ``distill_runs`` explicitly, so nothing here can be committed or pushed.
+    """
+    settings = _clustering_section(config).get("embedding_cache")
+    settings = settings if isinstance(settings, dict) else {}
+    if not settings.get("enabled"):
+        return None
+    root = settings.get("path") or ".memory-net/embedding_cache"
+    try:
+        relative = safe_posix_relative_path(str(root))
+    except ValueError as exc:
+        raise SystemExit(
+            f"clustering.embedding_cache.path must stay inside the repo: {root!r}"
+        ) from exc
+    return EmbeddingCache(
+        repo_path / relative,
+        backend=policy.backend,
+        model_name=policy.model_name,
+    )
 
 
 def _clustering_section(config: dict[str, Any]) -> dict[str, Any]:
