@@ -267,7 +267,7 @@ tool: both would put a credential on a terminal and into a shell history.
 |---|---|---|
 | `AOMT_DISTILL_PROFILE` | `memory_net/distiller/cli.py` | Overrides the run's profile class. Cannot widen a production profile into one that accepts `mock`. |
 | `AOMT_OUTPUT_SCANNER_MODE` | `memory_net/distiller/output_scanner.py` | `enforce` or `observe`. `observe` records hits without failing the run; production runs use `enforce`. |
-| `AOMT_ATTEMPT_CEILING` | `memory_net/distiller/llm/ledger.py` | May only **lower** the hard ceiling. A larger value is ignored, so the guard cannot be raised by an environment. |
+| `AOMT_ATTEMPT_CEILING` | `memory_net/distiller/llm/ledger.py` | May only **lower** the hard ceiling. A larger value is ignored, so the guard cannot be raised by an environment. It governs this project's provider stack only -- an agent under test that calls a model itself is outside it. |
 | `AOMT_ATTEMPT_LEDGER` | `memory_net/distiller/llm/ledger.py` | Path to the attempt ledger. Point it at a scratch file when rehearsing with a fake transport, so rehearsals do not consume the real budget. |
 | `AOMT_SANDBOX_ROOT` | `scripts/agent_sandbox` | Default sandbox root. Refused if it resolves inside a real agent state directory or inside this repository -- `clean` is `rm -rf` on it. |
 | `AOMT_AGENT_RUNTIME_ROOT` | `scripts/agent_sandbox` | The agent's source tree, bound read-only at its own path. Required unless `--runtime-root` is given. |
@@ -292,8 +292,16 @@ scripts/verify_adapter_consumption \
 ```
 
 Drop `--dry-run` to run it for real. **This spends model quota** -- two runs,
-one positive and one control -- so check the ledger first and inject a separate
-rate-limited key through the process environment.
+one positive and one control.
+
+The attempt ledger does **not** cover these runs, and it is worth being precise
+about why: the ledger counts attempts made by *this* project's provider stack,
+and here the agent under test calls the model itself. Nothing in this repository
+sits between it and the endpoint, so `ATTEMPT_CEILING_HARD` cannot stop a loop
+inside the agent. The controls that do apply are external: inject a separate,
+rate-limited key through the process environment rather than the shared file, so
+the blast radius of a misbehaving agent is that key's limit and not the
+production account.
 
 The verdict is a JSON object naming what it rests on. `evidence_basis` is
 `sentinel` when the agent's answer carried a token that exists only in the
