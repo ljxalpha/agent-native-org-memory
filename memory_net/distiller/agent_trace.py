@@ -84,6 +84,20 @@ class ConsumptionEvidence:
     expected_tools: Sequence[str] = ()
     #: The canonical path the index was written to.
     index_path: str = ""
+    inlining_ruled_out: str = ""
+    """Why the framework *cannot* have inlined the file the hint references.
+
+    Empty by default, which is the conservative reading: a sentinel that comes
+    back proves the index's contents reached the model, and if the framework
+    expands the reference while assembling the system prompt then no tool was
+    used and nothing was followed.
+
+    Set only from evidence about the agent under test -- a source-level fact
+    about how it loads its instruction file, or a control run with the tools
+    removed. A reason string rather than a boolean, because the verdict has to
+    record *why* the claim holds; the stronger conclusion is worth exactly as
+    much as the basis stated here.
+    """
 
 
 @dataclass(frozen=True)
@@ -151,11 +165,19 @@ def verify_consumption(evidence: ConsumptionEvidence) -> ConsumptionVerdict:
         # about tool use. Which one an integrator needs depends on what they
         # are asking: "will the agent see the team memory" is answered by the
         # first; "does the agent go and read it" is not.
-        notes.append(
-            "the sentinel shows the index's contents reached the model; on "
-            "this basis alone it does not distinguish an active tool read "
-            "from the framework inlining the referenced file"
-        )
+        if evidence.inlining_ruled_out:
+            basis = "sentinel+no-inlining"
+            notes.append(
+                "the sentinel shows the index's contents reached the model, "
+                "and inlining is ruled out, so a tool read is the only "
+                f"remaining path: {evidence.inlining_ruled_out}"
+            )
+        else:
+            notes.append(
+                "the sentinel shows the index's contents reached the model; on "
+                "this basis alone it does not distinguish an active tool read "
+                "from the framework inlining the referenced file"
+            )
 
     new_sessions = sorted(set(evidence.sessions_after) - set(evidence.sessions_before))
     if evidence.trace_lines and len(new_sessions) != 1:

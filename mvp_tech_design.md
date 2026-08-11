@@ -3493,7 +3493,7 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 - **prompt 不点名路径**：prompt 只说"读你的指令引用的那份团队记忆索引"。
   说出路径会让一次运行靠"被告知答案在哪"而非靠"跟随指令文件的引用"通过。
 
-哨兵基线证明的是**索引内容到达了模型**，它**区分不了**"agent 主动用工具读了那个文件"
+哨兵基线证明的是**索引内容到达了模型**，它本身**区分不了**"agent 主动用工具读了那个文件"
 与"框架把 hint 引用的文件内联进了 system prompt"。这两件事对不同的问题有不同价值：
 问"团队记忆会不会进入 agent 的视野"的，前者就是答案；问"agent 会不会去读"的，前者不回答。
 判定里为此固定留一条 note，绝不让读者把前者当成后者。
@@ -3520,6 +3520,25 @@ trace 只在**恰好存在**时附加检查，此时 `evidence_basis` 从 `senti
 注入的文件生成的文本，值得留存的是判定本身。
 
 `--dry-run` 打印两次运行的 argv 且不写任何东西，argv 合同因此可零成本测试。
+
+**排除内联可以把结论升级为"主动读取"**（`inlining_ruled_out`）。该字段默认空 =
+保守读法；只有拿到关于**被测 agent 本身**的证据才能填，且填的是**理由字符串而不是布尔**——
+更强的结论值多少，完全取决于这里写下的依据。填了之后 `evidence_basis` 升为
+`sentinel+no-inlining`，判定里写明"内联已排除，工具读取是仅剩的路径：<理由>"。
+
+对 hermes v0.18.0 的实测依据：`agent/prompt_builder.py::_load_agents_md` 把 `AGENTS.md`
+**逐字**读进 system prompt（只做扫描与截断），全仓**不存在任何 `@` 引用展开**，
+hermes 也不认识 `memory/team` 这个路径。因此注入的 `@memory/team/INDEX.md` 在 system prompt
+里只是一行字面文本，INDEX.md 的内容从未被内联——哨兵能回来，只可能是工具读取。
+**该依据是版本相关的**，升级 agent 后必须重新确认。
+
+**额度**：agent 自己调模型，本项目的 provider 栈不在中间，`ATTEMPT_CEILING_HARD`
+拦不住 agent 内部的循环。因此约束必须是结构性的：沙箱 config 写死
+`agent.max_turns`（**配置文件优先级高于 `HERMES_MAX_ITERATIONS` 环境变量**，见
+`cli.py` 的 max turns 优先级链；默认 90，即一次调用最多 90 次模型请求），
+并在每次运行**开始前**按上限把 attempt 记进 ledger（`kind="agent_run"`）——
+按上限而非实际次数记账，因为没人能在调用发生前知道实际次数，
+而 ledger 的用途是拦住失控，不是精确计费。
 
 ## 10. Sandbox 与权限兼容
 
@@ -4587,4 +4606,21 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   写在 push 之后既不进提交也不在 PR 上可见；(b) `config/platform.yaml` 此前根本没有
   `branch_protection` 键，探针必须先建该块再校验，且在没有 `AOMT_PLATFORM_TOKEN` 时
   必须明说"未做平台侧实证"，不得让配置自洽冒充平台侧已验证。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 S31b 真实 agent 运行与取证升级
+
+- Change summary: (a) `ConsumptionEvidence` 新增 `inlining_ruled_out`（理由字符串，默认空），
+  填写后 `evidence_basis` 升为 `sentinel+no-inlining`。(b) `agent_sandbox` 新增
+  `up --max-turns`（写进沙箱 config 的 `agent.max_turns`）与 `run --limit KEY=VALUE`
+  （仅允许 `HERMES_MAX_ITERATIONS` / `HERMES_MAX_TOKENS` 两个非密钥限额）。
+  (c) `verify_adapter_consumption` 在每次运行前按上限把 attempt 记入 ledger。
+- Change reason:
+  (a) 哨兵单独只能证明"内容到达模型"；一旦能证明框架不会内联被引用文件，
+  工具读取就是仅剩的路径，结论强度完全不同。做成理由字符串是因为这个升级的可信度
+  等于所写依据的可信度，布尔值会把依据丢掉。
+  (b) 被测 agent 的 turn 上限默认 90，即一次调用最多 90 次模型请求；
+  且**配置文件优先级高于环境变量**，只设 `HERMES_MAX_ITERATIONS` 会被配置悄悄压过。
+  (c) agent 自己调模型，本项目的 provider 栈不在中间，ledger 此前完全看不到这类运行；
+  按上限预先记账是唯一可行的保守口径。
 - Change time: 2026-08-11

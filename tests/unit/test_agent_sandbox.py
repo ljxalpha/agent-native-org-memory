@@ -16,6 +16,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "scripts" / "agent_sandbox"
@@ -407,3 +408,74 @@ def test_up_refuses_a_symlinked_home_before_it_writes(tmp_path: Path) -> None:
         sandbox.do_up(root, toolset="none", environ={"HOME": str(tmp_path / "home")})
 
     assert not (real_home / ".hermes" / "config.yaml").exists()
+
+
+# -- the non-secret limits an operator may set for one run ---------------
+
+
+def test_a_limit_reaches_the_namespace(tmp_path: Path) -> None:
+    env = sandbox.sandbox_env(
+        runtime_root=RUNTIME_ROOT,
+        credentials={},
+        tuning={"HERMES_MAX_ITERATIONS": "2"},
+    )
+
+    assert env["HERMES_MAX_ITERATIONS"] == "2"
+
+
+def test_a_limit_outside_the_allowlist_is_refused() -> None:
+    """`--limit` is on the command line, so a passthrough would become the
+    obvious place to hand the sandbox a credential -- and a credential in argv
+    is readable by every process on the machine."""
+    with pytest.raises(SystemExit, match="not one of the permitted limits"):
+        sandbox.parse_limits(["DEEPSEEK_API_KEY=secret"])
+
+
+def test_a_limit_without_a_value_is_refused() -> None:
+    with pytest.raises(SystemExit, match="expects KEY=VALUE"):
+        sandbox.parse_limits(["HERMES_MAX_ITERATIONS"])
+
+
+def test_limits_cannot_smuggle_a_key_past_the_env_allowlist() -> None:
+    """Two independent gates: the parser's key list, and the second-layer
+    allowlist that decides what may exist inside the namespace at all."""
+    env = sandbox.sandbox_env(
+        runtime_root=RUNTIME_ROOT,
+        credentials={},
+        tuning={"TAVILY_API_KEY": "secret", "HERMES_MAX_ITERATIONS": "2"},
+    )
+
+    assert "TAVILY_API_KEY" not in env
+    assert set(env) <= set(sandbox.SANDBOX_ENV_ALLOWLIST)
+
+
+def test_the_turn_cap_goes_in_the_config_because_the_config_wins() -> None:
+    """The agent resolves its turn limit as CLI argument, then config file,
+    then `HERMES_MAX_ITERATIONS`. A config value silently outranks the
+    environment variable an operator believes is the limit -- the same shape of
+    trap as the toolset argument, so it gets the same answer.
+    """
+    text = sandbox.config_yaml("file", max_turns=2)
+
+    assert "max_turns: 2" in text
+    assert yaml.safe_load(text)["agent"]["max_turns"] == 2
+
+
+def test_the_default_run_declares_no_turn_cap() -> None:
+    """Absent rather than defaulted: writing a number here would claim a limit
+    the caller never asked for, and 90 is the agent's own default."""
+    assert "max_turns" not in sandbox.config_yaml("none")
+
+
+def test_up_writes_the_turn_cap(tmp_path: Path) -> None:
+    root = tmp_path / "sbx"
+
+    sandbox.do_up(
+        root, toolset="file", environ={"HOME": str(tmp_path / "home")}, max_turns=2
+    )
+
+    config = yaml.safe_load(
+        (root / "home" / ".hermes" / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert config["agent"]["max_turns"] == 2
+    assert config["platform_toolsets"]["cli"] == ["file"]

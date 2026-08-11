@@ -323,3 +323,35 @@ def test_the_report_quotes_no_agent_output(capsys: pytest.CaptureFixture[str]) -
     printed = capsys.readouterr().out
     assert SENTINEL not in printed
     assert json.loads(printed)["consumed"] is True
+
+
+def test_ruling_out_inlining_upgrades_the_basis() -> None:
+    """With inlining excluded, a tool read is the only remaining path by which
+    the index's contents could have reached the model."""
+    verdict = verify_consumption(
+        _evidence(inlining_ruled_out="the loader performs no reference expansion")
+    )
+
+    assert verdict.consumed
+    assert verdict.evidence_basis == "sentinel+no-inlining"
+    assert any("only remaining path" in note for note in verdict.notes)
+
+
+def test_the_upgraded_basis_records_why_and_not_merely_that() -> None:
+    """A reason rather than a boolean: the stronger conclusion is worth exactly
+    as much as the basis stated for it, so the basis travels with the verdict.
+    """
+    verdict = verify_consumption(
+        _evidence(inlining_ruled_out="measured: no @-expansion")
+    )
+
+    assert any("measured: no @-expansion" in note for note in verdict.notes)
+
+
+def test_the_conservative_reading_is_the_default() -> None:
+    """Unset means unknown, not ruled out. A caller who has not established the
+    fact gets the weaker claim."""
+    verdict = verify_consumption(_evidence())
+
+    assert verdict.evidence_basis == "sentinel"
+    assert any("does not distinguish" in note for note in verdict.notes)

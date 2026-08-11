@@ -40,9 +40,19 @@ from memory_net.distiller.agent_trace import (
     ConsumptionVerdict,
     verify_consumption,
 )
+from memory_net.distiller.llm.ledger import AttemptLedger
 from memory_net.shared.adapters import FileSystemMdAdapter
 
 SANDBOX = Path(__file__).resolve().parent / "agent_sandbox"
+
+MAX_ITERATIONS = 2
+"""Model calls one agent invocation may make, capped structurally.
+
+An agent in a tool loop decides how many times it calls a model, and nothing
+outside it can know the number before the calls happen. Without a cap the
+budget for this check is a hope. Two is the minimum that can succeed: one call
+to decide on the read, one to answer with what came back.
+"""
 
 FILE_TOOLSET = ("read_file", "search_files", "patch", "write_file")
 """What the ``file`` toolset offers, measured. It includes write tools, which is
@@ -105,6 +115,9 @@ def sandbox_argv(
         str(root),
         "run",
         "--read-only-agentroot",
+        # The only structural bound on this run's cost.
+        "--limit",
+        f"HERMES_MAX_ITERATIONS={MAX_ITERATIONS}",
         "--",
         hermes,
         "-z",
@@ -179,12 +192,31 @@ def trace_lines(root: Path, names: Sequence[str]) -> list[str]:
     return []
 
 
-def run_once(argv: Sequence[str]) -> str:
+def run_once(argv: Sequence[str], *, ledger: AttemptLedger, run_id: str) -> str:
+    """One agent invocation, charged to the project ledger before it starts.
+
+    Charged at the cap rather than at the actual call count, and charged up
+    front. The agent calls the model itself, so nothing here can observe how
+    many requests it makes -- and a ledger that waited to find out would be
+    counting after the money was spent. Over-counting is the safe direction:
+    the ledger exists to stop a runaway, not to bill accurately.
+    """
+    for index in range(MAX_ITERATIONS):
+        attempt = ledger.reserve(
+            kind="agent_run",
+            run_id=run_id,
+            provider="hermes",
+            model=f"iteration-{index + 1}",
+        )
+        ledger.settle(attempt, outcome="ok")
     result = subprocess.run(list(argv), capture_output=True, text=True, check=False)
     if result.returncode != 0:
+        # The tail can carry a masked key on some failure paths, so it is
+        # summarised rather than reproduced.
         raise SystemExit(
-            f"agent run failed ({result.returncode}); stderr tail: "
-            f"{result.stderr[-400:]}"
+            f"agent run failed with status {result.returncode}; "
+            f"{len(result.stderr)} bytes of stderr withheld (it can carry a "
+            f"partially masked credential). Inspect the sandbox directly."
         )
     return result.stdout
 
@@ -199,6 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--provider", default="deepseek")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report", type=Path, default=None)
+    # Only from evidence about the agent under test. See ConsumptionEvidence.
+    parser.add_argument("--inlining-ruled-out", default="", metavar="REASON")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     command = sandbox_argv(
@@ -212,16 +246,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"argv": command, "prompt": PROMPT}, indent=2))
         return 0
 
+    ledger = AttemptLedger()
+    needed = 2 * MAX_ITERATIONS
+    if ledger.remaining() < needed:
+        raise SystemExit(
+            f"refusing to start: {needed} attempts are needed and "
+            f"{ledger.remaining()} remain of {ledger.ceiling}"
+        )
+    run_id = f"verify-{new_sentinel()[:8]}"
+
     sentinel = new_sentinel()
     index_text, instructions = prepare(
         args.root, adapter_path=args.adapter, sentinel=sentinel
     )
     before = session_files(args.root)
-    positive = run_once(command)
+    positive = run_once(command, ledger=ledger, run_id=run_id)
     after = session_files(args.root)
 
     prepare(args.root, adapter_path=args.adapter, sentinel=None)
-    control = run_once(command)
+    control = run_once(command, ledger=ledger, run_id=run_id)
 
     verdict = verify_consumption(
         ConsumptionEvidence(
@@ -237,6 +280,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             residue=state_residue(args.root),
             expected_tools=FILE_TOOLSET,
             index_path="/work/agentroot/memory/team/INDEX.md",
+            inlining_ruled_out=args.inlining_ruled_out,
         )
     )
     _report(verdict, path=args.report)
