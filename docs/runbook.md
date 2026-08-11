@@ -14,6 +14,28 @@
 3. Add or tighten rules in `config/redaction_patterns.yaml` and run `scripts/redaction_benchmark.py`.
 4. Re-report after rules pass benchmark.
 
+## Enabling the Build Allowlist
+
+`bootstrap_state.json` ships **without** an `approved_build_ids` key, and that is
+deliberate. The schema's rule is "once the key exists, every installing build
+must appear in it", so committing it to master fail-closes every leaf already in
+the field at the moment of the push — including the ones you would need working
+in order to roll back.
+
+To turn it on:
+
+1. Collect the build ids currently in use. Each leaf records its own in
+   `<MEMORY_NET_HOME>/state/build_info.json` (`build_id` plus `build_id_source`).
+2. Treat any leaf whose `build_id_source` is `code_version` as **not yet
+   pinnable** — its `--package-ref` did not name a commit, so it has no build id
+   to allowlist. Reinstall it from a 40-character commit ref first.
+3. Add `approved_build_ids` to `bootstrap_state.json` on master containing every
+   collected id **plus** the build you intend to roll out next.
+4. Only then publish the new build. Installs are refused with
+   `[SCHEMA_PROBE] bootstrap_state.json: ...` when the build id is not listed.
+5. To disable the gate again, remove the key entirely. An empty list is not the
+   same thing: it rejects every build.
+
 ## Leaf Health Check
 
 `memory-net-leaf status --health <path>` reads, validates and prints a health

@@ -740,9 +740,29 @@ def _slug(value: str) -> str:
     return slug or "common"
 
 
+class AmbiguousProductsPayload(ValueError):
+    """More than one candidate object in the response carried ``products``.
+
+    Picking one would be a guess about which the model meant, and the wrong
+    guess publishes team knowledge derived from the wrong payload -- silently,
+    since the products validate either way. Refusing is the only honest option.
+    """
+
+
 def _raw_decode_object(text: str) -> dict[str, Any]:
+    """Find the response payload inside text that is not purely JSON.
+
+    Scans *every* decodable object and takes the one carrying ``products``,
+    rather than the first that parses. A reasoning model routinely emits a
+    preamble object before its answer, and taking the first would either raise
+    "must include products[]" against a payload that was never the answer, or
+    -- far worse -- silently accept a leading object that happens to have a
+    ``products`` key.
+    """
     decoder = json.JSONDecoder()
     first_error: json.JSONDecodeError | None = None
+    candidates: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     for index, char in enumerate(text):
         if char != "{":
             continue
@@ -752,8 +772,26 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
             if first_error is None:
                 first_error = exc
             continue
-        if isinstance(value, dict):
-            return value
+        if not isinstance(value, dict):
+            continue
+        candidates.append(value)
+        if "products" in value:
+            matches.append(value)
+    if len(matches) > 1:
+        raise AmbiguousProductsPayload(
+            f"distiller response contains {len(matches)} objects with products[]; "
+            "refusing to guess which one is the answer"
+        )
+    if matches:
+        return matches[0]
+    if candidates:
+        # Key names only, never values: this message is written into
+        # parse_error_details, which lands in metrics that get published.
+        keys = sorted({key for candidate in candidates for key in candidate})
+        raise ValueError(
+            "distiller response has no object with products[]; "
+            f"candidate keys were: {', '.join(keys) or '(none)'}"
+        )
     if first_error is not None:
         raise first_error
     raise json.JSONDecodeError("no JSON object found", text, 0)

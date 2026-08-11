@@ -93,6 +93,19 @@ for field in ("owner_fingerprint", "host"):
     assert owner.get(field), f"{field} is missing from the ownership triple"
 PY
 
+python3 - "$MN_HOME/state/build_info.json" "$ROOT" <<'PY'
+import json
+import sys
+
+build_info = json.loads(open(sys.argv[1], encoding="utf-8").read())
+# A local-path ref pins no commit, so the build id must degrade *visibly*.
+assert build_info["package_ref"] == sys.argv[2], build_info
+assert build_info["build_id_source"] == "code_version", build_info
+assert build_info["build_id"] == build_info["code_version"], build_info
+assert len(build_info["master_sha"]) == 40, build_info
+assert build_info["installed_at"].endswith("Z"), build_info
+PY
+
 python3 - "$MN_HOME/state/install_state.json" <<'PY'
 import json
 import sys

@@ -788,6 +788,20 @@ MVP 提供三种实现（codex 先落 1 份 + 1 份备用即可）：
   触顶即抛 `BudgetExhausted`，**请求根本不发出**。
 - 仅对超时 / 连接中断 / 5xx / 429 重试（指数退避，默认 2 次）。
   **不对 JSON 解析失败重试**——解析发生在 pipeline，重试同一个 prompt 只是重复烧钱。
+
+**响应定位规则（`parse_json_response` / `_raw_decode_object`）**：真实模型的响应不保证是纯 JSON，
+可能带思考前言、代码块围栏或收尾寒暄。因此**扫描全部可解码的顶层对象，取带 `products` 键的那一个**，
+而不是取第一个能解析成功的：推理型模型常先吐一个前言对象，取第一个要么对着一个根本不是答案的
+载荷报 "must include products[]"，要么——更糟——**静默接受**一个恰好带 `products` 键的前置对象，
+其产物照样通过校验并发布。
+
+- 命中**多于一个** → `AmbiguousProductsPayload`。取其一是在猜模型的意图，猜错就发布错载荷派生的团队知识，
+  而两条路径的产物都能通过校验，错误完全不可见。
+- 命中**零个**且有候选 → 报错并列出**候选对象的键名**（`sorted` 去重），
+  **绝不回显任何值**：该消息会进 `parse_error_details` → `metrics.json` → 公开 artifact。
+- 一个可解码对象都没有 → 保持原有的 `JSONDecodeError`。
+- 与 `response_format={"type":"json_object"}`（§5.3.3）是双保险：服务端约束负责让响应本就是 JSON，
+  这条规则负责服务端约束不生效时不猜错。
   **退避必须先于 sleep 预扣，且按 `退避 + timeout` 作为该次尝试的 wall-clock 上界**：
   一次重试的最坏耗时是"等多久 + 请求多久"，只预扣 `timeout` 会让 run 启动一个
   最坏情况恰好超出上限的调用（剩 120.5s、timeout 120s、退避 1s → 实际可跑到 121s）。
@@ -1444,6 +1458,31 @@ CI 以阻塞步骤运行该 harness。
 
 `preflight_probe()` 的 python / git 版本与剩余空间**全部可注入**，
 因此每条失败分支都由真实运行的负向用例覆盖，而不是只写在注释里。
+
+#### 6.6.3 build 兼容白名单与 `build_info.json`
+
+`validate_bootstrap_state(..., build_id=)` 的 `approved_build_ids` 校验、
+以及 `validate_master_manifest(..., build_version=)` 的 `compatible_leaf_range` 校验，
+两项能力早已存在，但安装侧从未调用。`SCHEMA_PROBE` 现在两项都喂。
+
+- **build_id 只由 pin 住 commit 的 ref 产生**：`package_ref` 不是
+  `…@<40 位 sha>` 形态时（本地路径 ref、开发安装），探针传 `None` 而不是传
+  `code_version` 回落值——`approved_build_ids` 是 **commit 白名单**，
+  塞一个版本号进去要么永远不匹配，要么靠巧合匹配，两种都比不传更坏。
+- **`bootstrap_state.json` 刻意不预置 `approved_build_ids` 键**：该键的语义是
+  "一旦存在，build_id 必须在名单内"。直接加会把**所有现存安装**当场 fail-closed。
+  是否启用、何时启用是运营方的决定，流程写在 `docs/runbook.md`。
+  "远端未声明该键 ⇒ 放行"由一条回归固定。
+
+`<MEMORY_NET_HOME>/state/build_info.json` 记录本次安装的既成事实：
+
+```json
+{"package_ref": …, "build_id": …, "build_id_source": "package_ref|code_version",
+ "code_version": …, "installed_at": …, "master_sha": …}
+```
+
+`build_id` 与 `build_id_source` 由 `identity.build_id_from_package_ref()` 推导——
+**与运行期 health 采集用的是同一个函数**。两处各推一遍会让审计线索自相矛盾。
 
 生产级 one-command hardening 仍作为后续任务跟踪：平台/依赖探针、
 `build_info` / approved build ID 校验、安装失败阶段状态、远端 manifest

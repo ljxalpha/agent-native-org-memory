@@ -143,7 +143,9 @@ if [[ -n "$SAMPLE_PRODUCT" ]]; then
   git show "origin/master:$SAMPLE_PRODUCT" > "$PROBE_DIR/product.md"
   PROBE_ARGS+=(--team-product "$PROBE_DIR/product.md")
 fi
-"$PYTHON" -m memory_net.leaf.install_probe schema "${PROBE_ARGS[@]}"
+"$PYTHON" -m memory_net.leaf.install_probe schema \
+  "${PROBE_ARGS[@]}" \
+  --package-ref "$PACKAGE_REF"
 rm -rf "$PROBE_DIR"
 if grep -Eq '^support_status:[[:space:]]*experimental[[:space:]]*$' <<<"$ADAPTER_YAML"; then
   if [[ "${MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER:-}" != "1" ]]; then
@@ -220,6 +222,15 @@ mkdir -p "$TMP_GEN"
 # Snapshot provenance: which master commit this generation was exported from.
 # It is recorded as a marker inside the generation, never as hashed content.
 MASTER_SHA="$(git rev-parse origin/master)"
+# What this install actually installed. local.yaml holds the ref but not the
+# resolved build id nor the degradation that produced it, so without this there
+# is no on-disk answer to "which build is this leaf running" after the script
+# exits.
+"$PYTHON" -m memory_net.leaf.install_probe build-info \
+  --state-dir "$MN_HOME/state" \
+  --package-ref "$PACKAGE_REF" \
+  --master-sha "$MASTER_SHA" \
+  --installed-at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 git --work-tree="$TMP_GEN" checkout origin/master -- bootstrap_state.json config prompts >/dev/null
 cp "$TMP_GEN/bootstrap_state.json" "$TMP_GEN/config/bootstrap_state.json"
 cp -R "$TMP_GEN/prompts" "$TMP_GEN/config/prompts"
