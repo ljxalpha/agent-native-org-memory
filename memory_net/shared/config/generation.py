@@ -149,7 +149,19 @@ def materialize_generation(
     generations_root: Path,
     *,
     adapter_name: str | None = None,
+    source_master_sha: str | None = None,
 ) -> Path:
+    """Materialize a content-addressed config generation.
+
+    :param source_master_sha: provenance of the snapshot the config came from.
+        When given it is recorded in the ``config_source_master_sha`` marker.
+
+    Marker files (``config_revision``, ``subscribe_contract_revision`` and
+    ``config_source_master_sha``) are written **after** the content hash is
+    computed and are never part of :func:`collect_generation_files`. Feeding a
+    marker into the hash would make one unchanged config resolve to a different
+    generation whenever master moved, which would defeat content addressing.
+    """
     revision = canonical_generation_hash(source_root)
     target = generations_root / revision
     if target.exists():
@@ -168,6 +180,7 @@ def materialize_generation(
                     desired_contract,
                     encoding="utf-8",
                 )
+            _write_source_master_sha(target, source_master_sha)
             return target
         _quarantine_corrupted_generation(target, actual=actual)
 
@@ -183,6 +196,7 @@ def materialize_generation(
         subscribe_contract_revision(source_root, adapter_name=adapter_name),
         encoding="utf-8",
     )
+    _write_source_master_sha(tmp, source_master_sha)
     tmp.replace(target)
     actual = canonical_generation_hash(target)
     if actual != revision:
@@ -191,6 +205,20 @@ def materialize_generation(
             f"materialized generation hash mismatch: expected {revision}, got {actual}"
         )
     return target
+
+
+def _write_source_master_sha(generation: Path, source_master_sha: str | None) -> None:
+    """Record snapshot provenance as a marker file, if the caller supplied it.
+
+    Absent provenance leaves no marker at all, so generations materialized by
+    callers that predate this parameter stay byte-identical.
+    """
+    if source_master_sha is None:
+        return
+    (generation / "config_source_master_sha").write_text(
+        source_master_sha,
+        encoding="utf-8",
+    )
 
 
 def _quarantine_corrupted_generation(target: Path, *, actual: str) -> Path:

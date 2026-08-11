@@ -1001,6 +1001,14 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 - `config_sync_task` 只读访问冻结的 `origin/master` 快照，**不切换 HEAD、不 merge `master`**；
 - 它先取 `config_source_master_sha = rev-parse origin/master`，再基于该快照里的 `bootstrap_state.json`、`config/*`、`prompts/*` 按 § 4.1 的 canonical generation layout 计算 `config_revision`；**`config_revision` 是内容哈希，不是 `master` commit SHA**；
 - 同步目标不是直接覆盖 `~/.memory-net/config/`，而是写入 `~/.memory-net/config.generations/<config_revision>/`，并在 generation 目录里额外记录 `config_source_master_sha` 作为 provenance；
+  - 该 provenance 由 `materialize_generation(..., source_master_sha=...)` 写成 marker 文件
+    `<generation>/config_source_master_sha`，与既有的 `config_revision` /
+    `subscribe_contract_revision` 两个 marker 同一形态：**先算内容哈希，再写 marker**；
+    未传 `source_master_sha` 时不写该文件（旧调用方行为不变）。
+  - **marker 绝不进入 `collect_generation_files()` / `canonical_generation_hash()` 的输入。**
+    否则同一份配置在两个不同 master sha 下会算出不同的 `config_revision`，
+    content-addressed 语义（同内容必同目录、可复用、可复核）就被打穿了。
+    该不变量由"同一配置 + 两个不同 master sha ⇒ `config_revision` 相同"的负向测试固定；
 - generation 目录是 **content-addressed 只读缓存**；若 `config.generations/<config_revision>/` 已存在且校验通过，直接复用；若不存在，先写 `.<sha>.tmp/`，校验通过后原子 rename；**已存在但内容不一致视为损坏**：`config_sync` 把该损坏 generation 目录移到 `config.generations/_corrupted/<sha>-<ts>/`（保留证据不立即删除），再按正常流程写新 generation，并在 `state/run.log` 与 `.health.json.recent_errors` 记 error；
 - 本机专属参数固定写 `~/.memory-net/local.yaml`，**不得**写进 `config-current/` 指向的 generation 目录；
 - generation 激活前必须重新校验同一快照里的 `bootstrap_state.json`：`compatible_build_api_range`、`compatible_code_range`、核心 schema 版本任一不满足，都拒绝切换到新 generation，保留旧 generation 不动；

@@ -175,11 +175,14 @@ JSON
 
 TMP_GEN="$(mktemp -d "$MN_HOME/config.generations/.gen.XXXXXX")"
 mkdir -p "$TMP_GEN"
+# Snapshot provenance: which master commit this generation was exported from.
+# It is recorded as a marker inside the generation, never as hashed content.
+MASTER_SHA="$(git rev-parse origin/master)"
 git --work-tree="$TMP_GEN" checkout origin/master -- bootstrap_state.json config prompts >/dev/null
 cp "$TMP_GEN/bootstrap_state.json" "$TMP_GEN/config/bootstrap_state.json"
 cp -R "$TMP_GEN/prompts" "$TMP_GEN/config/prompts"
 GEN_REVISION="$(
-  "$PYTHON" - <<'PY' "$TMP_GEN" "$TMP_GEN/config" "$AGENT"
+  "$PYTHON" - <<'PY' "$TMP_GEN" "$TMP_GEN/config" "$AGENT" "$MASTER_SHA"
 import sys
 from pathlib import Path
 
@@ -191,12 +194,17 @@ from memory_net.shared.config.generation import (
 source_root = Path(sys.argv[1])
 root = Path(sys.argv[2])
 agent = sys.argv[3]
+source_master_sha = sys.argv[4]
 (root / "config_revision").write_text(
     canonical_generation_hash(root),
     encoding="utf-8",
 )
 (root / "subscribe_contract_revision").write_text(
     subscribe_contract_revision(source_root, adapter_name=agent),
+    encoding="utf-8",
+)
+(root / "config_source_master_sha").write_text(
+    source_master_sha,
     encoding="utf-8",
 )
 print(canonical_generation_hash(root))
