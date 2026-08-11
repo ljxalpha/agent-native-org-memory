@@ -66,12 +66,40 @@ class DistillMetrics:
     profile_path: str = ""
     profile_blob_sha256: str = ""
     embedding_test_only: bool = False
+    # Output scanner (§5.5.9). ``None`` means this run had no scanner at all,
+    # and the key is then left out entirely rather than serialized as null: a
+    # run predating the scanner must produce the same key set it always did.
+    # ``redaction_observations`` is a rule x field-kind x count map, never text.
+    output_scanner_mode: str | None = None
+    output_scanner_ruleset_version: str | None = None
+    redaction_observations: dict[str, dict[str, int]] | None = None
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(asdict(self), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(self.as_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
+
+    def as_dict(self) -> dict[str, object]:
+        """The serialized form: keys that do not apply are absent, not null.
+
+        Only the fields listed in ``OPTIONAL_KEYS`` may vanish. Every other key
+        is present on every run, so a consumer can read them unconditionally.
+        """
+        payload: dict[str, object] = asdict(self)
+        for key in OPTIONAL_KEYS:
+            if payload.get(key) is None:
+                payload.pop(key, None)
+        return payload
+
+
+OPTIONAL_KEYS = (
+    "output_scanner_mode",
+    "output_scanner_ruleset_version",
+    "redaction_observations",
+)
+"""Keys written only when they apply. See ``DistillMetrics.as_dict``."""
 
 
 def parse_failure_rate(parse_failures: int, clusters_attempted: int) -> float:

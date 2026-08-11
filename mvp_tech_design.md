@@ -1280,6 +1280,22 @@ output_scanner:
    recorder 会把**含命中原文的完整 prompt/response** 照常写进 bundle。
    标定需要的是分布，而分布已经在 metrics 里（只有规则名与计数），不需要 bundle。
 
+**mode 与命中分布进 metrics**（`metrics.json` 与 bundle 的 `record_metrics.json` 两处取值必须相等）：
+
+| 键 | 何时写 | 内容 |
+|---|---|---|
+| `output_scanner_mode` | scanner 存在时 | `enforce` / `observe`——让读 metrics 的人一眼看到"这一跑有没有闸" |
+| `output_scanner_ruleset_version` | scanner 存在时 | 判定用的规则版本，bundle 回归比对靠它 |
+| `redaction_observations` | 仅 `observe` | **规则名 × 字段类型 × 计数**，绝不含命中原文 |
+
+`context.scanner is None`（仓内没有规则、且 profile 未声明该块）时**这三个键完全不出现**，
+metrics 的键集合与 scanner 存在之前逐字相同。
+
+**计数直接取自 scanner 实例，而不是从 `DistillationOutput` 里转一手**：
+scanner 本身就是那个 run 级计数器，三个消费方（recorder / pipeline / orchestrator）
+共用同一个实例。绕经 `DistillationOutput` 会漏掉 recorder 侧的命中——
+那些命中发生在出站前与落盘前，根本不经过 pipeline 的输出对象。
+
 **patterns 文件走冻结快照**，与 profile 同一条读取路径：从工作树读会让 run 记录的
 `master_snapshot_sha` 看起来干净，而实际生效的规则来自快照之外。
 因此 `patterns_path` 必须是仓相对路径，绝对路径与 `..` 一律拒绝。

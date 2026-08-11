@@ -18,6 +18,7 @@ from memory_net.distiller.metrics import (
     citation_resolution_rate,
     parse_failure_rate,
 )
+from memory_net.distiller.output_scanner import OutputScanner
 from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
 from memory_net.distiller.provenance import RunProvenance
 from memory_net.distiller.runctx import RunContext, RunIdentity
@@ -241,6 +242,32 @@ class DistillOrchestrator:
         policy = getattr(embedder, "policy", None)
         if policy is not None:
             fields["embedding_test_only"] = bool(policy.test_only)
+        fields.update(self._output_scanner_fields())
+        return fields
+
+    def _output_scanner_fields(self) -> dict[str, Any]:
+        """Which gate this run had, and what it saw (§5.5.9).
+
+        Read off the scanner instance rather than off ``DistillationOutput``:
+        the scanner *is* the run-level counter, shared by the recorder, the
+        pipeline and this class. Routing the counts through the pipeline's
+        output would silently drop the recorder's hits, which happen before a
+        request goes out and never pass through that object.
+
+        Nothing at all when the run had no scanner, so the key set stays
+        byte-identical to what it was before the scanner existed.
+        """
+        scanner = self.context.scanner if self.context is not None else None
+        if not isinstance(scanner, OutputScanner):
+            return {}
+        fields: dict[str, Any] = {
+            "output_scanner_mode": scanner.mode,
+            "output_scanner_ruleset_version": scanner.ruleset.version,
+        }
+        if not scanner.enforcing:
+            # Only under observe: enforce turns a hit into a failed run, and the
+            # failure path reports its own counts.
+            fields["redaction_observations"] = scanner.observations_snapshot()
         return fields
 
     def _profile_provenance(self) -> dict[str, str]:
@@ -1052,6 +1079,10 @@ class DistillOrchestrator:
         _write_json(
             root / "record_metrics.json",
             {
+                # Same scanner facts as distill_runs/<run_id>/metrics.json, and
+                # asserted equal: a bundle that does not say which gate and
+                # which rule version produced it cannot be judged later.
+                **self._output_scanner_fields(),
                 "run_id": run_id,
                 "calls": total_calls,
                 "replay_mode": self.replay_mode,
