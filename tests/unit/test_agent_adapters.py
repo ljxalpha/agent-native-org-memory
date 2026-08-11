@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 import pytest
@@ -131,19 +132,40 @@ def test_calibration_allowlist_is_backed_by_tests() -> None:
     banner rule pass for a brand-new adapter is to add its name to
     CALIBRATED_WITHOUT_FIXTURE, and nothing would notice that no calibration
     evidence was ever recorded. Tie each name to a config that exists and to a
-    calibration test that actually names it.
+    calibration test that really loads that adapter.
+
+    The evidence is read out of the calibration module's AST rather than by
+    substring search: a name mentioned in a docstring or a comment is not a
+    calibration, and a check that a grep would satisfy is not a ratchet.
     """
-    calibration = CALIBRATION_MODULE.read_text(encoding="utf-8")
+    loaded = _adapters_loaded_by(CALIBRATION_MODULE)
     for name in sorted(CALIBRATED_WITHOUT_FIXTURE):
         assert (ADAPTERS_DIR / f"{name}.yaml").is_file(), (
             f"{name}: allowlisted but config/adapters/{name}.yaml does not exist; "
             "a stale exemption silently disables the UNVERIFIED banner rule"
         )
-        assert f'"{name}"' in calibration, (
+        assert name in loaded, (
             f"{name}: allowlisted as calibrated-without-fixture, but "
-            f"{CALIBRATION_MODULE.name} never exercises it — either record the "
-            "calibration there or ship a layout fixture"
+            f"{CALIBRATION_MODULE.name} never loads that adapter — either record "
+            "the calibration there or ship a layout fixture"
         )
+
+
+def _adapters_loaded_by(module: Path) -> set[str]:
+    """Adapter names passed as a literal argument to a call in ``module``.
+
+    Covers both spellings the calibration module uses: its ``_load("<name>", ...)``
+    helper and a direct ``from_yaml`` on ``<name>.yaml``.
+    """
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for argument in node.args:
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                names.add(argument.value.removesuffix(".yaml"))
+    return names
 
 
 @pytest.mark.parametrize("depth", ["top-level", "nested"])
@@ -177,4 +199,45 @@ def test_directory_excludes_apply_at_every_depth(
 
     expected = "keep.md" if depth == "top-level" else "auth/keep.md"
     assert [r.source_locator for r in records] == [f"claude-project-shared:{expected}"]
+    assert all("not ready" not in r.content for r in records)
+
+
+@pytest.mark.parametrize("middle", ["", "a/", "a/b/"])
+def test_interior_globstar_in_an_exclude_also_means_zero_or_more(
+    middle: str,
+    tmp_path: Path,
+) -> None:
+    """``**/`` is zero-or-more wherever it sits, not only at the front.
+
+    No shipped config uses an interior ``**/`` today, which is exactly why it has
+    to be pinned: the contract is that an adapter author may write the same
+    globstar in ``include`` and ``exclude`` and get the same meaning. A matcher
+    that only special-cases the leading position keeps a smaller version of the
+    original trap alive for the next config.
+    """
+    config = tmp_path / "adapter.yaml"
+    config.write_text(
+        """
+name: test
+roots:
+  shared:
+    - alias: shared
+      base_dir: "${AGENT_ROOT}/memory/shared"
+      include: ["**/*.md"]
+      exclude: ["foo/**/draft/**"]
+team_target: "${AGENT_ROOT}/memory/team"
+""",
+        encoding="utf-8",
+    )
+    agent_root = tmp_path / "agent"
+    shared = agent_root / "memory" / "shared"
+    parent = shared.joinpath("foo", *[part for part in middle.split("/") if part])
+    (parent / "draft").mkdir(parents=True)
+    (parent / "keep.md").write_text("team-facing note\n", encoding="utf-8")
+    (parent / "draft" / "wip.md").write_text("not ready\n", encoding="utf-8")
+
+    adapter = FileSystemMdAdapter.from_yaml(config, agent_root=agent_root)
+    records = list(adapter.list_shared())
+
+    assert [r.source_locator for r in records] == [f"shared:foo/{middle}keep.md"]
     assert all("not ready" not in r.content for r in records)

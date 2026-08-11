@@ -509,12 +509,15 @@ class MemoryAdapter(ABC):
   会把 `**/` 翻译成必须吃掉一个真实分隔符的形式，因此 `**/draft/**` 匹配 `a/draft/x.md`
   却**匹配不到受管根顶层的** `draft/x.md`。匹配器必须显式补齐这个零段情形，禁止靠在 YAML 里
   同时写 `draft/**` 和 `**/draft/**` 来绕过——双写只是把缺陷藏进配置，下一份 adapter YAML
-  会原样再踩一次。回归测试对每条目录型 exclude 都必须同时覆盖**顶层与嵌套**两个位置。
-- exclude 是**纵深防御，不是第一道闸**。文件在到达 exclude 之前已被两层过滤：`include[]`
-  的 glob，以及 `file_pattern`（默认 `*.md`）对文件名的匹配；隐藏路径（任一路径段以 `.` 开头）
-  也在 exclude 之前被跳过。因此对非 `*.md` 后缀（如 `*.sqlite` / `*.lock`）或隐藏文件（如 `.env`）
-  写 exclude 只有声明价值，运行期不会被执行到——**文档与测试不得把这类条目说成"被 exclude 拒绝"**，
-  否则会造出一条无人验证却被当作有效的防线。
+  会原样再踩一次。零段补齐对 `**/` 出现的**任意位置**都成立（`foo/**/draft/**` 必须命中
+  `foo/draft/x.md`），不能只特判开头——只修开头等于把同一个陷阱留给下一份配置。
+  回归测试对每条目录型 exclude 都必须同时覆盖**顶层与嵌套**两个位置。
+- exclude 是**纵深防御，不是第一道闸**。真正决定收集面的是 `include[]` 的 glob：没被它枚举出来的
+  文件根本走不到后面任何一层。其后依次还有 `file_pattern`（默认 `*.md`）的文件名匹配与隐藏路径
+  （任一路径段以 `.` 开头）跳过，最后才是 exclude。因此在 `include` 为 `**/*.md` 时，对非 `.md`
+  后缀（如 `*.sqlite` / `*.lock`）或隐藏文件（如 `.env`）写 exclude 只有声明价值，运行期不会被执行到
+  ——**文档与测试不得把这类条目说成"被 exclude 拒绝"**，否则会造出一条无人验证却被当作有效的防线；
+  描述时必须点名当下真正生效的那一层。
 - `inject_team_hint` / `remove_team_hint` 是 § 6.4 hint 状态机的唯一合法入口，实现必须幂等（重复调用同 `hint_spec` 返回相同结果），并保证"只动 anchor 块内，不碰 anchor 外的用户内容"。
 - `iter_entries_with_hash` 的粒度默认为**整文件**（MVP 可用）；对 Hermes `MEMORY.md` / Claude Code 单文件多段记忆这类"append-only 笔记"场景，adapter YAML 可声明 `split_by: heading_h2` / `marker: "^---$"` 让 adapter 按二级标题或自定义分隔符切成多个 `MemoryEntry`，每个 entry 独立计算 `revision_hash`，避免一段局部改动翻新整文件。`split_by` 的具体语义与兼容性保证见 § 13.1。
 
@@ -605,8 +608,10 @@ team_hint_injection:
 
 关于「错放进受管根内的副本」这一层纵深防御，必须按实际生效的机制描述，不得笼统说成「由 `exclude` 二次拒绝」：
 `credentials/` / `logs/` / `agents/` 下的 `.md` 确实由 `exclude` 拒绝（`**/` 前缀在顶层与嵌套两处都生效，见 § 5.1）；
-而 `main.sqlite` 与 `.env` 走不到 `exclude` —— 前者被 `file_pattern: "*.md"` 按文件名先行拒绝，后者被隐藏路径跳过先行拒绝。
-`exclude` 里保留这两条属**声明式**条目，作用是将来放宽 `file_pattern` 时不会悄悄开始收集原生库与密钥文件。
+而 `main.sqlite` 与 `.env` 走不到 `exclude` —— 真正生效的那道闸是 `include` 的 `**/*.md`：
+`Path.glob` 根本不会枚举出这两个文件，因此其后的任何过滤器都没有发言权
+（`file_pattern: "*.md"` 与隐藏路径跳过同样会拒绝它们，但今天是冗余层，只有放宽 `include` 后才承重）。
+`exclude` 里保留这两条属**声明式**条目，作用是将来放宽 `include` 时不会悄悄开始收集原生库与密钥文件。
 
 脱敏布局快照存放在 `tests/fixtures/adapters/openclaw/`（内容全部为中性样例；真实 `.env` 因仓库禁止跟踪该文件名而以 `_dotenv` 占位，测试物化临时目录时改回原名），
 读路径回归由 `tests/unit/test_openclaw_adapter.py` 锁定。**该依据不含"hint 被真实消费"的证据**（未做真实 agent 运行），故 `support_status` 保持 `experimental`。

@@ -391,25 +391,36 @@ def _content_hash(content: str) -> str:
 def _exclude_matches(rel: str, pattern: str) -> bool:
     """Match a base_dir-relative posix path against one exclude pattern.
 
-    ``include`` is evaluated by :meth:`pathlib.Path.glob`, where a leading ``**/``
-    means "zero or more path segments". ``fnmatch`` disagrees: it translates
-    ``**/`` into a form that has to consume a real separator, so ``**/draft/**``
-    matches ``a/draft/x.md`` but *not* the top-level ``draft/x.md``. Left as-is
-    the two sides drift, and the drift is unsafe in one direction only — a
-    top-level directory an adapter explicitly excluded would still be collected
-    and handed to the distiller.
+    ``include`` is evaluated by :meth:`pathlib.Path.glob`, where ``**/`` means
+    "zero or more path segments" *wherever it appears*. ``fnmatch`` disagrees: it
+    translates ``**/`` into a form that has to consume a real separator, so
+    ``**/draft/**`` matches ``a/draft/x.md`` but not the top-level ``draft/x.md``,
+    and ``foo/**/draft/**`` matches ``foo/a/draft/x.md`` but not ``foo/draft/x.md``.
+    Left as-is the two sides drift, and the drift is unsafe in one direction only —
+    a directory an adapter explicitly excluded would still be collected and handed
+    to the distiller.
 
-    So the zero-segment case is restored here rather than in each adapter YAML.
-    Spelling both ``draft/**`` and ``**/draft/**`` in a config would paper over
-    the same defect and the next adapter would reintroduce it.
+    So every ``**/`` is expanded into both of its readings and the path is matched
+    against each. Doing it here rather than in each adapter YAML is deliberate:
+    spelling both ``draft/**`` and ``**/draft/**`` in a config would paper over the
+    same defect and the next adapter would reintroduce it.
     """
-    if fnmatch.fnmatch(rel, pattern):
-        return True
-    while pattern.startswith("**/"):
-        pattern = pattern[3:]
-        if fnmatch.fnmatch(rel, pattern):
-            return True
-    return False
+    return any(
+        fnmatch.fnmatch(rel, variant) for variant in _zero_segment_variants(pattern)
+    )
+
+
+def _zero_segment_variants(pattern: str) -> list[str]:
+    """Expand each ``**/`` in ``pattern`` into its present and absent readings."""
+    index = pattern.find("**/")
+    if index == -1:
+        return [pattern]
+    head, tail = pattern[:index], pattern[index + 3 :]
+    variants: list[str] = []
+    for rest in _zero_segment_variants(tail):
+        variants.append(f"{head}**/{rest}")
+        variants.append(f"{head}{rest}")
+    return variants
 
 
 def _is_hidden_path(path: Path) -> bool:
