@@ -24,6 +24,11 @@ jobs:
         run: mypy memory_net
       - name: Run tests
         run: pytest
+      # The offline regression against a recording of a real production run:
+      # blocking on every PR, and free. It needs no credential and makes no
+      # request, so it stays green on a fork PR, which never sees a secret.
+      - name: Golden bundle strict replay (offline, blocking)
+        run: pytest tests/unit/test_golden_replay.py tests/unit/test_provider_equivalence.py -q
       - name: Run local integration
         run: bash tests/integration/local_repo.sh
       - name: Run leaf install integration
@@ -44,9 +49,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: distiller-diagnostics
+          # `**/record_runs/**` is deliberately gone. A bundle holds whole
+          # prompts and whole responses, so uploading one publishes them; the
+          # per-run summary carries what a reader of this artifact needs. That
+          # reduces second-hand exposure and does not replace the write-time
+          # gate, which is the actual defence.
           path: |
             **/.health.json
             **/distill_runs/**/metrics.json
-            **/record_runs/**
+            **/record_metrics.json
             stability_soak_report.json
           if-no-files-found: ignore

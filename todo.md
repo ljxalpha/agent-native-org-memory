@@ -39,7 +39,7 @@
 | M3-001 | [>] | Hermes adapter YAML | roadmap:2026-04-21 | - | 需要当前 Hermes 官方路径依据和 fixture |
 | M3-002 | [x] | OpenClaw adapter YAML | roadmap:2026-04-21 | - | 官方路径依据**已取得**（openclaw 2026.3.2 真实安装只读实测布局）：`workspace/` 为工作根、`AGENTS.md` 为每会话指令文件、原生记忆是受管根父目录层级的 sqlite sidecar。已交付脱敏 fixture（`tests/fixtures/adapters/openclaw/`）+ 读路径回归（只收受管根 / 敏感目录 exclude 在顶层与嵌套两处生效 / 原生库与 `.env` 按实际生效层次拒绝：位置 + `include` 的 `**/*.md`（`file_pattern` 与隐藏路径跳过是其后的冗余层），`exclude` 里那两条为声明式、运行期不会被执行到 / `..` 与符号链接越界报错 / hint 注入幂等 / fixture 占位文件保持空）。**收窄口径：不含真实消费证据，`support_status` 保持 `experimental`**；收窄理由：openclaw 是 gateway 架构，沙箱内隔离启动且不复制 credentials 的可行性未实测 |
 | M3-003 | [x] | OpenCode adapter YAML | roadmap:2026-04-21 | - | 官方路径依据**未取得**（本机未安装 opencode，取得依据需新装 CLI，属需人工批准的外部动作）。新口径 = 显式 UNVERIFIED banner（写明路径为约定而非实测）+ 约定根/受管根边界回归 + 元测试防复发（experimental 且无 fixture/校准记录的 adapter 必须带 banner）+ 保持 `experimental`。升级为已校准 adapter 需一次真实安装与消费验证，列为 MVP 外后续项 |
-| M3-004 | [>] | Codex adapter YAML | roadmap:2026-04-21 | - | 需要当前 Codex 官方路径依据和 fixture |
+| M3-004 | [>] | Codex adapter YAML | roadmap:2026-04-21 | - | **口径收窄（已定案，交付见 S32）**：原口径要求"真实 codex run 证明 team hint 被消费"；新口径为脱敏 fixture + adapter 读路径回归（list_shared / exclude / 受管根边界 / hint 幂等），`support_status` 保持 `experimental`。收窄理由：codex 是账号态 OAuth，在沙箱内通过认证只能把 `auth.json` 复制进去，与"凭据只进程内传递、绝不落盘"的红线冲突，且令牌刷新会让两份副本状态分叉。**fixture 测试不得记作真实消费证据** |
 | M3-005 | [x] | 冲突 preserve_both 策略 | roadmap:2026-04-21 | - | conflict handler + marker 渲染 |
 | M3-006 | [x] | 蒸馏产物 conflicts frontmatter | roadmap:2026-04-21 | - | `conflicts` 字段写入并验证 |
 | M3-007 | [x] | Hermes + Claude Code 冲突 E2E | roadmap:2026-04-21 | - | 至少一个产物 `conflicts != []` |
@@ -47,8 +47,8 @@
 | M3-009 | [x] | Prompt A/B 基础脚本 | roadmap:2026-04-21 | - | 同 cluster 集输出基础产物 diff；结构化质量/成本比较属后续扩展 |
 | M4-001 | [x] | Hermes tool LLMProvider bridge | roadmap:2026-04-21 | - | `hermes_tool` provider 可运行 |
 | M4-002 | [x] | Hermes 蒸馏 skill | roadmap:2026-04-21 | - | skill 文档 + 工具声明 |
-| M4-003 | [>] | CI 内启动 Hermes Agent 蒸馏 | roadmap:2026-04-21 | - | 需要有 Hermes runner 的 CI 环境真实执行 |
-| M4-004 | [>] | Hermes 路径与 Anthropic/mock 路径回归等价 | roadmap:2026-04-21 | - | 需要真实 Hermes provider 路径与 mock/Anthropic 产物等价证据 |
+| M4-003 | [x] | CI 内的生产蒸馏回归 | roadmap:2026-04-21 | - | **口径收窄**：原口径要求"有 Hermes runner 的 CI 环境真实执行"；新口径为 Tier A（golden bundle strict replay 回归 + 假 provider/桩契约测试，**每 PR 阻塞**）+ Tier B（`workflow_dispatch` 手动 live smoke，装 `.[dev,llm]`，依赖→endpoint→凭据三项 fail-fast 预检，缺凭据才 skip）。收窄理由：公开仓 CI 对 fork PR 永远拿不到 secrets，把它挂在阻塞路径上会挡死外部贡献者；且生产蒸馏后端已改为直连 OpenAI 兼容端点，公有 runner 上本就不需要装 agent CLI。**桩测试与 replay 不等同于"CI 里真实执行一次 agent 蒸馏"**；CI artifact 不再上传 `**/record_runs/**`（含完整 prompt/response），只留 `record_metrics.json` |
+| M4-004 | [x] | 生产路径（DeepSeek）与 mock 路径契约等价 | roadmap:2026-04-21 | - | **定位澄清（非收窄）**：原摘要写"Hermes 路径与 Anthropic/mock 路径等价"，而 `hermes_tool` 的末端本身就是 mock，该断言零信息量；且该通道无 system/user role 边界、无服务端结构化输出约束，不能作为生产基准。新基准 = mock 车道 vs **DeepSeek 生产车道的 golden-bundle strict replay**，17 条不变量逐条比对（§9.12），`hermes_tool` 不参与。跨后端逐字节等价在结构上不可能（标题由模型决定，派生标识随之改变），故等价定义为契约等价；后 8 条不变量专门堵住"空产物 + 0 citation 也能完美通过"，并各有注入式负向测试 |
 | M5-001 | [x] | `scripts/metrics_aggregate.py` | roadmap:2026-04-21 | - | 按 run_id 聚合 tokens/cost/duration |
 | M5-002 | [x] | Golden cluster 框架 | roadmap:2026-04-21 | - | fixtures + `distiller run --eval` |
 | M5-003 | [x] | Prompt A/B 基础可视化 | roadmap:2026-04-21 | - | 基于 M3 基础 diff 输出可读视图；结构化 fidelity 属后续扩展 |
