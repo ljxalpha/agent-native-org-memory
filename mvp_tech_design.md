@@ -2254,13 +2254,19 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
   `base == master` 且 `head` 匹配 `release/*` 时执行，对 release 分支内容重跑
   schema / citation / evidence-rule 校验。零凭据、零 secret（`permissions: contents: read`），
   fork PR 常绿；条件不满足时 job 被跳过（skip）而不是失败。
+- 该 job 以 `--review-request-required` 调用 merge gate：release 分支上
+  `distill_runs/*/review_request.json` **缺失即失败**——产物与 manifest 结构合法
+  但没有评审记录，正是"评审被绕过"的安静形态。该开关默认关闭，使同一函数也能
+  校验本就不产生 review request 的普通树。
 - `scripts/validate_shared_pilot_gate.py` 从布尔位检查升级为**配置自洽探针**：
   review gate 开启时要求 `config/platform.yaml` 的
   `branch_protection.master_writers_only` 非空，且 `branch_protection.protected_branch`
   与 `distill.yaml.review_gate.pr_target_branch` 一致。
   仅当环境提供 `AOMT_PLATFORM_TOKEN` 时才可能做平台侧实证；没有该 token 时，
   脚本在 stdout 明确打印 `platform-side protection NOT empirically verified`
-  并以 0 退出——**不假装验证过**。
+  并以 0 退出——**不假装验证过**。该声明同样适用于"未开 review gate、仅由
+  `platform_write_protection` 声明保护"的配置：这条路径同样只看了配置，绿色
+  退出必须附带同一句限制说明。
 
 ### 7.3 分类与分级产物
 
