@@ -1978,7 +1978,9 @@ collect_ops_identity(
 
 采集是**尽力而为**：安装布局不完整（例如未经 `install_leaf.sh` 的开发运行）时记一条
 warning 并照旧写出不含运维身份的 health，而不是让 `report` / `daemon` 失败。
-真正的把关点在 `status`。
+真正的把关点在 `status`。"尽力而为"覆盖的失败面不止 `OpsIdentityError`——
+布局文件存在但不可读（权限、坏编码）同样必须降级为 warning，
+否则一条本应软失败的路径会以 traceback 崩掉 `report`。
 
 `status` 不再是 `cat`：它执行「读 → `validate_health(require_ops_identity=True)` → 打印」。
 

@@ -492,3 +492,80 @@ def _init_repo_with_one_commit(repo: Path) -> str:
     git("add", "-A")
     git("commit", "-qm", "seed")
     return git("rev-parse", "HEAD")
+
+
+def test_report_command_stamps_operational_identity_on_the_leaf_health_file(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The published ``.health.json`` is the operator-facing artifact.
+
+    Asserting on ``report()``'s own parameter proves nothing about the command,
+    so this drives ``main(["report", ...])`` and reads the file it leaves in the
+    leaf repo. It fails if the CLI stops collecting or forwarding identity.
+    """
+    home = _install_layout(tmp_path, monkeypatch)
+    _writable_adapter(home / "config.generations" / "gen1", tmp_path / "agent")
+    (home / "config.generations" / "gen1" / "redaction_patterns.yaml").write_text(
+        "version: test\npatterns: []\n", encoding="utf-8"
+    )
+    repo = tmp_path / "leaf-repo"
+    repo.mkdir()
+    (repo / "bootstrap_state.json").write_text(
+        Path("bootstrap_state.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.setattr(leaf_cli, "_prepare_leaf_branch", lambda *_args: None)
+    monkeypatch.setattr(
+        leaf_cli, "_commit_and_push_report", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(leaf_cli, "_repo_lock", lambda *_args: nullcontext())
+
+    exit_code = leaf_cli.main(
+        [
+            "report",
+            "--repo",
+            str(repo),
+            "--node-id",
+            "alice",
+            "--agent-root",
+            str(tmp_path / "agent"),
+            "--adapter",
+            str(home / "config-current" / "adapters" / "claude-code.yaml"),
+        ]
+    )
+
+    assert exit_code == 0
+    health = json.loads((repo / ".health.json").read_text(encoding="utf-8"))
+    for field, value in OPS_IDENTITY_SAMPLE.items():
+        assert health[field] == value
+    assert health["build_id_source"] == "package_ref"
+
+
+def test_ops_identity_degrades_when_a_source_is_present_but_unreadable(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """An unreadable source must warn like a missing one, not raise."""
+    home = _install_layout(tmp_path, monkeypatch)
+    (home / "state" / "install_id").write_bytes(b"\xff\xfe\x00bad")
+
+    args = Namespace(state_dir=home / "state", adapter=None)
+
+    assert leaf_cli._ops_identity(args) is None
+
+
+def _writable_adapter(generation: Path, agent_root: Path) -> None:
+    """Give the generation's adapter YAML a real shared root to scan."""
+    (agent_root / "memory" / "shared").mkdir(parents=True)
+    (agent_root / "memory" / "shared" / "note.md").write_text(
+        "hello\n", encoding="utf-8"
+    )
+    (generation / "adapters" / "claude-code.yaml").write_text(
+        "name: claude-code\n"
+        "roots:\n"
+        "  shared:\n"
+        "    - alias: shared\n"
+        '      base_dir: "${AGENT_ROOT}/memory/shared"\n'
+        '      include: ["**/*.md"]\n'
+        'team_target: "${AGENT_ROOT}/memory/team"\n'
+        'file_pattern: "*.md"\n',
+        encoding="utf-8",
+    )

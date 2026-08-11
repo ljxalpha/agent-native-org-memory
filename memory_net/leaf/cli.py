@@ -173,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                     scanner_config=scanner_config_from_report_config(report_config),
                     state_dir=_state_home(args) / "state",
                     dry_run=args.dry_run,
+                    ops_identity=_ops_identity(args),
                 )
             except RedactionBlockedError:
                 if not args.dry_run:
@@ -268,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             health_task=health_task,
             interval_seconds=args.interval_seconds,
             once=args.once,
+            ops_identity=_ops_identity(args),
         )
         return 0
 
@@ -388,6 +390,7 @@ def _daemon_tasks(
                     config_revision=_active_config_revision(args),
                     scanner_config=scanner_config_from_report_config(report_config),
                     state_dir=args.state_dir,
+                    ops_identity=_ops_identity(args),
                 )
             except RedactionBlockedError:
                 if _commit_health_only(args):
@@ -952,6 +955,10 @@ def _ops_identity(args: argparse.Namespace) -> dict[str, str] | None:
     A development run without a full ``install_leaf.sh`` layout must not break
     reporting, so an incomplete layout logs a warning and yields ``None``; the
     strict gate lives in ``status`` instead.
+
+    An unreadable-but-present source (permissions, bad encoding) is the same
+    class of failure as an absent one and is degraded the same way, otherwise a
+    path that is supposed to fail softly would abort ``report`` with a traceback.
     """
     state_home = _state_home(args)
     try:
@@ -962,7 +969,7 @@ def _ops_identity(args: argparse.Namespace) -> dict[str, str] | None:
             generation_dir=state_home / "config-current",
             started_at=_PROCESS_STARTED_AT,
         )
-    except OpsIdentityError as exc:
+    except (OpsIdentityError, OSError, UnicodeDecodeError) as exc:
         LOGGER.warning("operational identity is unavailable: %s", exc)
         return None
 
