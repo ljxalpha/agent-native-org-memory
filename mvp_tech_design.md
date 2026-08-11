@@ -683,6 +683,16 @@ class LLMProvider(ABC):
 | 字段 | 类型 | 默认 | 语义 |
 |---|---|---|---|
 | `usage_source` | `str` | `"unknown"` | 本次调用的 token 计数来源，取值域**固定为** `reported`（服务端返回的真实用量）/ `estimated`（本地估算）/ `unknown`（无法判定）。传入取值域外的值直接 `ValueError`。 |
+
+**`reported` 由 `LLMResponse.__post_init__` 强制校验，不信任任何 provider 的自我申报**：
+只有 `usage` 里 `input_tokens` 与 `output_tokens` **两个都是非负整数**（显式排除 `bool`，
+它是 `int` 子类）时才保留 `reported`，否则**降级为 `unknown`**。
+理由是它是**唯一与钱直接挂钩**的 provenance 值：结算会按这两个数计费并回补预扣差额
+（§5.5.2），所以补 0 的"reported"会低估花费，**负数更糟——会把已经记上的花费再减回去**。
+把它放在契约对象里而不是逐个 provider 里，是因为这样任何 provider（含将来新增的）
+都**无法**伪造这个声明。
+**降级而非报错**：计数本身仍有保留价值，且在这里硬抛会把后端一次草率的响应变成一次崩掉的 run，
+包括回放旧 bundle 的时候。
 | `provider_backend` | `str` | `"unknown"` | 实际执行该调用的后端标识（自由字符串，如 `mock` / `hermes_tool`），用于 run 级聚合。**必须是 `str`**：非字符串直接 `TypeError`，空串直接 `ValueError`。 |
 | `raw_meta` | `dict[str, str]` | `{}` | 仅存**字符串标量**的附加元数据（如模型版本、`finish_reason`）。禁止放原始响应体——那会凭空多出一个未经扫描的落盘面。非 mapping、非字符串键值都直接 `TypeError`。 |
 

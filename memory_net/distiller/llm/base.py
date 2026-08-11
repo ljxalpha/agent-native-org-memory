@@ -14,6 +14,25 @@ class LLMRequest:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+REPORTED_USAGE_KEYS = ("input_tokens", "output_tokens")
+"""Both counters a ``usage_source="reported"`` claim has to be backed by."""
+
+
+def has_reported_counts(usage: dict[str, int]) -> bool:
+    """Whether ``usage`` really carries service-reported token counts.
+
+    ``bool`` is rejected because it is an ``int`` subclass, and negatives are
+    rejected because a settlement charges what it is given: a negative count
+    would *reduce* the run's recorded spend and hand back budget that was
+    already used.
+    """
+    for key in REPORTED_USAGE_KEYS:
+        value = usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    return True
+
+
 USAGE_SOURCES = ("reported", "estimated", "unknown")
 """Fixed value domain of ``LLMResponse.usage_source``.
 
@@ -45,6 +64,16 @@ class LLMResponse:
     raw_meta: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # "reported" is enforced here rather than trusted from each provider,
+        # because it is the one provenance value that money depends on: a
+        # settlement refunds the reserved upper bound and charges these counts
+        # instead. A backend that returns a partial usage object -- or a relay
+        # that cannot vouch for what it forwarded -- must not be able to claim
+        # it. Downgraded rather than rejected: the counts themselves are still
+        # worth keeping, and a hard error here would turn a backend's sloppy
+        # response into a crashed run, including when replaying an old bundle.
+        if self.usage_source == "reported" and not has_reported_counts(self.usage):
+            object.__setattr__(self, "usage_source", "unknown")
         if self.usage_source not in USAGE_SOURCES:
             raise ValueError(
                 f"usage_source must be one of {USAGE_SOURCES}, got {self.usage_source!r}"

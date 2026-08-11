@@ -22,6 +22,9 @@ def _response(usage_source: str, provider_backend: str) -> LLMResponse:
     return LLMResponse(
         text="{}",
         model="m",
+        # Real counters, because "reported" is only honoured when both are
+        # present: it is the one provenance value a settlement charges against.
+        usage={"input_tokens": 1, "output_tokens": 1},
         usage_source=usage_source,
         provider_backend=provider_backend,
     )

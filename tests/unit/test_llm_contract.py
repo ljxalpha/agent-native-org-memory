@@ -45,8 +45,54 @@ def test_usage_source_domain_is_fixed() -> None:
     assert USAGE_SOURCES == ("reported", "estimated", "unknown")
     for value in USAGE_SOURCES:
         assert (
-            LLMResponse(text="{}", model="m", usage_source=value).usage_source == value
+            LLMResponse(
+                text="{}",
+                model="m",
+                # Backed by real counters: "reported" is only honoured when
+                # both are present, so an empty usage here would be testing the
+                # downgrade rather than the value domain.
+                usage={"input_tokens": 1, "output_tokens": 1},
+                usage_source=value,
+            ).usage_source
+            == value
         )
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        pytest.param({}, id="no-counters"),
+        pytest.param({"input_tokens": 1}, id="output-counter-missing"),
+        pytest.param({"output_tokens": 1}, id="input-counter-missing"),
+        pytest.param({"input_tokens": -1, "output_tokens": 1}, id="negative-input"),
+        pytest.param({"input_tokens": 1, "output_tokens": -1}, id="negative-output"),
+    ],
+)
+def test_reported_is_downgraded_when_the_counts_do_not_back_it(
+    usage: dict[str, int],
+) -> None:
+    """ "reported" is the one provenance value money depends on: a settlement
+    refunds the reserved upper bound and charges these counts instead. A
+    backend returning a partial usage object, or a relay that cannot vouch for
+    what it forwarded, must not be able to claim it. A negative count is worse
+    than a missing one -- it would *reduce* the recorded spend."""
+    response = LLMResponse(text="{}", model="m", usage=usage, usage_source="reported")
+
+    assert response.usage_source == "unknown"
+    # The counts themselves are kept; only the claim about them is corrected.
+    assert response.usage == usage
+
+
+def test_the_downgrade_leaves_a_well_formed_report_alone() -> None:
+    """A scanner that flags everything would be no better than none."""
+    response = LLMResponse(
+        text="{}",
+        model="m",
+        usage={"input_tokens": 0, "output_tokens": 0},
+        usage_source="reported",
+    )
+
+    assert response.usage_source == "reported"
 
 
 @pytest.mark.parametrize("value", ["", "replay", "REPORTED", "mixed", "none"])

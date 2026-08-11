@@ -46,7 +46,7 @@ def test_provider_relays_the_backend_declared_provenance() -> None:
         {
             "text": "t",
             "model": "m",
-            "usage": {"input_tokens": 3},
+            "usage": {"input_tokens": 3, "output_tokens": 4},
             "usage_source": "reported",
             "provider_backend": "hermes/claude-x",
             "raw_meta": {"finish_reason": "stop"},
@@ -60,6 +60,27 @@ def test_provider_relays_the_backend_declared_provenance() -> None:
     assert response.usage_source == "reported"
     assert response.provider_backend == "hermes/claude-x"
     assert response.raw_meta == {"finish_reason": "stop"}
+
+
+def test_a_bridge_claiming_reported_without_both_counts_is_downgraded() -> None:
+    """The bridge is a relay: it cannot vouch for counts it only forwarded, and
+    a settlement charges those counts against the run ceiling."""
+    payload = json.dumps(
+        {
+            "text": "t",
+            "model": "m",
+            "usage": {"input_tokens": 3},
+            "usage_source": "reported",
+            "provider_backend": "hermes/claude-x",
+        }
+    )
+
+    response = HermesToolProvider(command=_echo_command(payload)).generate(
+        LLMRequest("s", "u", "m")
+    )
+
+    assert response.usage_source == "unknown"
+    assert response.usage == {"input_tokens": 3}
 
 
 def test_a_bridge_without_provenance_degrades_instead_of_failing() -> None:
