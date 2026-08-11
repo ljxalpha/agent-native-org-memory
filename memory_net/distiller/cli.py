@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import platform
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,7 @@ from memory_net.distiller.runctx import (
 from memory_net.shared.git_io import GitRepo
 from memory_net.shared.observability import setup_logging
 from memory_net.shared.schema import validate_bootstrap_state
+from memory_net.shared.util.paths import safe_posix_relative_path
 
 BUILD_API = 1
 MOCK_MODEL = "mock-memory-distiller"
@@ -60,6 +63,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--repo", required=True, type=Path)
+    run_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="REPO_RELATIVE_PATH",
+        help=(
+            "distillation profile to run, as a path inside the repo "
+            f"(default {DEFAULT_PROFILE_PATH}; env {PROFILE_ENV_VAR}). "
+            "Read from the frozen master snapshot, never from the working tree."
+        ),
+    )
     run_parser.add_argument("--provider", choices=PROVIDER_CHOICES, default=None)
     run_parser.add_argument(
         "--fallback-provider",
@@ -97,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_sha = _freeze_master_snapshot(args.repo)
         _setup_runtime(args, snapshot_sha=snapshot_sha)
         _validate_bootstrap_state_from_repo(args.repo, snapshot_sha)
-        distill_config = _distill_config(args.repo, snapshot_sha)
+        profile = _selected_profile(args)
+        distill_config = _distill_config(args.repo, snapshot_sha, profile=profile.path)
         provider_name = _provider_name(args, distill_config)
         fallback_name = _fallback_provider_name(args, distill_config)
         # One assembly, one freeze, before any consumer exists (§5.5.4). The
@@ -634,14 +648,70 @@ def _freeze_master_snapshot(repo_path: Path) -> str | None:
     return snapshot_sha
 
 
-def _distill_config(repo_path: Path, snapshot_sha: str | None = None) -> dict[str, Any]:
+DEFAULT_PROFILE_PATH = "config/distill.yaml"
+PROFILE_ENV_VAR = "AOMT_DISTILL_PROFILE"
+
+
+@dataclass(frozen=True)
+class SelectedProfile:
+    """Which distillation profile this run uses, and whether it was asked for.
+
+    ``explicit`` drives the missing-file behaviour, which is deliberately
+    asymmetric: a named profile that is absent must stop the run, while the
+    default one falling back is what lets a brand-new repo work at all.
+    """
+
+    path: str
+    explicit: bool
+
+
+def _selected_profile(args: argparse.Namespace) -> SelectedProfile:
+    """Resolve the profile path: flag, then environment, then the default.
+
+    The flag beats the environment variable because it is typed for this one
+    run while the variable is ambient, and ambient state quietly winning is how
+    a run ends up on a budget nobody chose.
+    """
+    raw = getattr(args, "config", None)
+    if raw is None:
+        raw = os.environ.get(PROFILE_ENV_VAR)
+    if raw is None:
+        return SelectedProfile(path=DEFAULT_PROFILE_PATH, explicit=False)
+    # An empty selection is not the default: the caller asked for something,
+    # and running the default instead would run a profile nobody named.
+    try:
+        # Repo-relative only. A profile read from outside the snapshot would
+        # leave the run's recorded master_snapshot_sha looking clean while the
+        # configuration it actually ran under was never in that snapshot --
+        # exactly the tampering the frozen-snapshot design exists to prevent.
+        safe = safe_posix_relative_path(str(raw))
+    except ValueError as exc:
+        raise SystemExit(f"profile path must stay inside the repo: {raw!r}") from exc
+    return SelectedProfile(path=safe.as_posix(), explicit=True)
+
+
+def _distill_config(
+    repo_path: Path,
+    snapshot_sha: str | None = None,
+    *,
+    profile: str = DEFAULT_PROFILE_PATH,
+) -> dict[str, Any]:
+    """Load the profile out of the frozen snapshot (§5.5.5)."""
+    explicit = profile != DEFAULT_PROFILE_PATH
     if snapshot_sha is not None and (repo_path / ".git").exists():
         repo = GitRepo(repo_path)
-        result = repo.run("show", f"{snapshot_sha}:config/distill.yaml", check=False)
+        spec = f"{snapshot_sha}:{profile}"
+        result = repo.run("show", spec, check=False)
         if result.returncode == 0 and result.stdout.strip():
-            return _load_yaml_text(result.stdout, f"{snapshot_sha}:config/distill.yaml")
-    path = repo_path / "config" / "distill.yaml"
-    return _load_optional_yaml_mapping(path)
+            return _load_yaml_text(result.stdout, spec)
+        if explicit:
+            raise SystemExit(f"profile is not in the frozen snapshot: {spec}")
+    if explicit:
+        # No snapshot to read from (a non-git working directory), so the
+        # request cannot be honoured as specified. Falling back to the default
+        # would run something other than what was asked for.
+        raise SystemExit(f"profile is not in the frozen snapshot: {profile}")
+    return _load_optional_yaml_mapping(repo_path / DEFAULT_PROFILE_PATH)
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:

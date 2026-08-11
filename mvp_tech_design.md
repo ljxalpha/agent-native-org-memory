@@ -1011,6 +1011,33 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 `_base_provider()` 的签名扩为带 `budget` 关键字参数：预算是构造期注入的，
 不是调用期参数，这样 provider 内部的重试无需把它一路传下去。
 
+#### 5.5.5 profile 选择：`--config`（快照受保护）
+
+一个 run 用哪份蒸馏配置，由**三级优先级**决定，且**默认值不变**：
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | `--config <仓相对路径>` | 显式指定 |
+| 2 | `AOMT_DISTILL_PROFILE` 环境变量 | 无 `--config` 时生效 |
+| 3 | `config/distill.yaml` | 默认，行为与今天逐字节一致 |
+
+**profile 与它引用的 prompt 一律走 `git show <snapshot_sha>:<path>` 从冻结快照读取**，
+与既有的 `_distill_config()` / `_snapshot_prompts()` 同一条路径。
+**禁止从仓外任意文件系统路径加载**——那等于给"prompt/配置随 run 一起被固定与哈希"
+这个防篡改设计开一个后门：谁都能在 run 之外改一份 YAML 塞进来，而产物里记录的
+`master_snapshot_sha` 仍然看起来干净。
+
+路径校验（复用 `memory_net/shared/util/paths.safe_posix_relative_path`）：
+必须是仓相对路径，绝对路径、`..` 段、空段一律拒绝，一律以 `SystemExit` 退出。
+
+**显式 profile 与默认 profile 的缺失语义不同**，这是有意的不对称：
+
+- **显式**（`--config` 或环境变量）指定的路径在快照中不存在 → **拒绝启动**。
+  用户点名要某份配置却拿到默认值，是最糟的失败模式：run 会成功，
+  但跑的根本不是他要的那套预算与模型。
+- **默认** `config/distill.yaml` 缺失 → 回落到工作区文件、再回落到空配置，
+  与今天完全一致（非 git 仓与全新仓都要能跑）。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
