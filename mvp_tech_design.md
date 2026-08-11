@@ -1113,6 +1113,9 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 `distill_runs/<run_id>/snapshot.json` 与 `metrics.json` 时直接取用。
 `blob_sha256` 是**profile 原始字节**的 sha256（不是解析后的 YAML），
 因为要回答的问题是"这次 run 到底读了哪几个字节"，而解析会丢掉注释、键序与格式。
+"原始字节"是字面意思：读取走 `git show` 的**二进制**通道、工作区回落走 `read_bytes()`，
+解码只发生在喂给 YAML 解析器之前。文本模式会做行尾归一（CRLF→LF），
+那样算出来的哈希对不上仓库里那个 blob，而溯源哈希的全部价值就在于能对得上。
 `context.profile` 为 `None` 时 `snapshot.json` **不写这三个键**，与今天完全一致。
 
 `metrics.json` 侧另加三个字段，缺省空串 / `False`，因此不带 profile 的旧 run 字面不变：

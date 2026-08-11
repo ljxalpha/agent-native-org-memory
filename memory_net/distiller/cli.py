@@ -17,9 +17,7 @@ from memory_net import __version__
 from memory_net.distiller.categories import canonical_category
 from memory_net.distiller.clustering.embedder import FastEmbedder
 from memory_net.distiller.clustering.policy import (
-    DEFAULT_MODEL_NAME as DEFAULT_EMBEDDING_MODEL,
-)
-from memory_net.distiller.clustering.policy import (
+    DEFAULT_MODEL_NAME,
     TEST_CHEAP,
     EmbeddingPolicy,
 )
@@ -35,11 +33,7 @@ from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import (
     API_KEY_ENV,
     BASE_URL_ENV,
-)
-from memory_net.distiller.llm.openai_compat import (
-    DEFAULT_MODEL as DEFAULT_DEEPSEEK_MODEL,
-)
-from memory_net.distiller.llm.openai_compat import (
+    DEFAULT_MODEL,
     OpenAICompatProvider,
 )
 from memory_net.distiller.llm.recording import (
@@ -61,10 +55,15 @@ from memory_net.distiller.runctx import (
     RunContextBuilder,
     RunIdentity,
 )
-from memory_net.shared.git_io import GitRepo
+from memory_net.shared.git_io import GitError, GitRepo
 from memory_net.shared.observability import setup_logging
 from memory_net.shared.schema import validate_bootstrap_state
 from memory_net.shared.util.paths import safe_posix_relative_path
+
+# Renamed here rather than aliased at the import, so that "which default"
+# stays readable at every use site while the import block holds no aliases.
+DEFAULT_EMBEDDING_MODEL = DEFAULT_MODEL_NAME
+DEFAULT_DEEPSEEK_MODEL = DEFAULT_MODEL
 
 BUILD_API = 1
 MOCK_MODEL = "mock-memory-distiller"
@@ -133,8 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         _setup_runtime(args, snapshot_sha=snapshot_sha)
         _validate_bootstrap_state_from_repo(args.repo, snapshot_sha)
         profile = _selected_profile(args)
-        profile_text = _read_profile_text(args.repo, snapshot_sha, profile=profile.path)
-        distill_config = _parse_profile(profile_text, profile.path)
+        profile_bytes = _read_profile_bytes(
+            args.repo, snapshot_sha, profile=profile.path
+        )
+        distill_config = _parse_profile(profile_bytes, profile.path)
         _validated_profile(distill_config, profile.path)
         embedding = _embedding_policy(distill_config)
         # After the profile (which is where the backend is named) and before
@@ -167,10 +168,10 @@ def main(argv: list[str] | None = None) -> int:
             # existed rather than recording a hash of nothing.
             .set_profile(
                 None
-                if profile_text is None
+                if profile_bytes is None
                 else ProfileProvenance.of(
                     profile_path=profile.path,
-                    raw=profile_text,
+                    raw=profile_bytes,
                     master_snapshot_sha=snapshot_sha,
                 )
             )
@@ -810,17 +811,19 @@ def _preflight(args: argparse.Namespace) -> None:
         ) from exc
 
 
-def _read_profile_text(
+def _read_profile_bytes(
     repo_path: Path,
     snapshot_sha: str | None = None,
     *,
     profile: str = DEFAULT_PROFILE_PATH,
-) -> str | None:
+) -> bytes | None:
     """The profile's raw bytes from the frozen snapshot (§5.5.5).
 
-    Returns the text rather than the parsed mapping because the provenance hash
-    is taken over exactly these bytes: parsing discards comments, key order and
+    Bytes rather than the parsed mapping because the provenance hash is taken
+    over exactly these bytes: parsing discards comments, key order and
     formatting, so hashing the mapping could not answer "which bytes ran".
+    Bytes rather than text for the same reason one step down -- the text layer
+    normalizes line endings, and a hash of normalized content matches no blob.
 
     ``None`` means the default profile is simply absent, which a brand-new repo
     and any non-git working directory must both survive.
@@ -829,9 +832,14 @@ def _read_profile_text(
     if snapshot_sha is not None and (repo_path / ".git").exists():
         repo = GitRepo(repo_path)
         spec = f"{snapshot_sha}:{profile}"
-        result = repo.run("show", spec, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            return str(result.stdout)
+        try:
+            # show_bytes, not show/run: the text channel would normalize line
+            # endings, and the provenance hash is taken over what comes back.
+            blob = repo.show_bytes(spec)
+        except GitError:
+            blob = b""
+        if blob.strip():
+            return blob
         if explicit:
             raise SystemExit(f"profile is not in the frozen snapshot: {spec}")
     if explicit:
@@ -843,7 +851,7 @@ def _read_profile_text(
     if not path.exists():
         LOGGER.info("using default config; file not found: %s", path)
         return None
-    return path.read_text(encoding="utf-8")
+    return path.read_bytes()
 
 
 def _distill_config(
@@ -853,12 +861,20 @@ def _distill_config(
     profile: str = DEFAULT_PROFILE_PATH,
 ) -> dict[str, Any]:
     """The parsed profile; ``{}`` when the default one is absent."""
-    raw = _read_profile_text(repo_path, snapshot_sha, profile=profile)
+    raw = _read_profile_bytes(repo_path, snapshot_sha, profile=profile)
     return _parse_profile(raw, profile)
 
 
-def _parse_profile(raw: str | None, profile: str) -> dict[str, Any]:
-    return {} if raw is None else _load_yaml_text(raw, profile)
+def _parse_profile(raw: bytes | None, profile: str) -> dict[str, Any]:
+    """Decode here and only here: the bytes exist for the provenance hash, and
+    YAML is the one consumer that needs them as text."""
+    if raw is None:
+        return {}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"profile is not valid UTF-8: {profile}: {exc}") from exc
+    return _load_yaml_text(text, profile)
 
 
 def _validated_profile(config: dict[str, Any], profile: str) -> None:

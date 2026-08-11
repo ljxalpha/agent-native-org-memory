@@ -124,11 +124,11 @@ def test_the_probe_runs_after_the_profile_is_read(
     """It cannot run earlier: the backend is named in the profile, and the
     profile is read out of the frozen snapshot, which the fetch produces."""
     order: list[str] = []
-    real_read = cli_module._read_profile_text
+    real_read = cli_module._read_profile_bytes
 
     monkeypatch.setattr(
         cli_module,
-        "_read_profile_text",
+        "_read_profile_bytes",
         lambda *a, **k: (order.append("profile"), real_read(*a, **k))[1],
     )
     monkeypatch.setattr(

@@ -174,18 +174,20 @@ def test_the_read_really_goes_through_git_show(
     """Pinned at the argv boundary: a later refactor that "helpfully" falls back
     to opening the working-tree file would keep every value assertion green."""
     repo, sha = _repo_with_profiles(tmp_path)
-    seen: list[tuple[str, ...]] = []
-    real_run = cli_module.GitRepo.run
+    seen: list[str] = []
+    real_show = cli_module.GitRepo.show_bytes
 
-    def spy(self: Any, *args: str, **kwargs: Any) -> Any:
-        seen.append(args)
-        return real_run(self, *args, **kwargs)
+    def spy(self: Any, ref_path: str) -> Any:
+        seen.append(ref_path)
+        return real_show(self, ref_path)
 
-    monkeypatch.setattr(cli_module.GitRepo, "run", spy)
+    monkeypatch.setattr(cli_module.GitRepo, "show_bytes", spy)
 
     cli_module._distill_config(repo, sha, profile="config/profiles/production.yaml")
 
-    assert ("show", f"{sha}:config/profiles/production.yaml") in seen
+    # show_bytes specifically: the text channel normalizes line endings, and the
+    # provenance hash is taken over whatever comes back from here.
+    assert seen == [f"{sha}:config/profiles/production.yaml"]
 
 
 # --------------------------------------------------------------------------

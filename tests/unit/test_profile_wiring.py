@@ -133,7 +133,7 @@ def test_the_snapshot_artifact_carries_the_profile_that_produced_it(
         tmp_path,
         ProfileProvenance.of(
             profile_path="config/profiles/production.yaml",
-            raw="llm: {}\n",
+            raw=b"llm: {}\n",
             master_snapshot_sha="from-the-profile",
         ),
     )
@@ -251,7 +251,7 @@ def test_metrics_and_the_snapshot_agree_on_which_profile_ran(tmp_path: Path) -> 
     snapshot alone is not enough: metrics is what the tuning loop reads."""
     provenance = ProfileProvenance.of(
         profile_path="config/profiles/production.yaml",
-        raw="llm: {}\n",
+        raw=b"llm: {}\n",
         master_snapshot_sha="sha",
     )
     orchestrator = _orchestrator(tmp_path, provenance)

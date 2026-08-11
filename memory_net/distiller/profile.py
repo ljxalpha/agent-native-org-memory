@@ -76,11 +76,14 @@ class ProfileProvenance:
 
     @classmethod
     def of(
-        cls, *, profile_path: str, raw: str, master_snapshot_sha: str | None
+        cls, *, profile_path: str, raw: bytes, master_snapshot_sha: str | None
     ) -> ProfileProvenance:
+        """``raw`` is bytes, deliberately: hashing a decoded string would hash
+        whatever the text layer normalized (CRLF to LF, most of all), and the
+        result would match no blob in the repository."""
         return cls(
             profile_path=profile_path,
-            blob_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            blob_sha256=hashlib.sha256(raw).hexdigest(),
             # "" rather than None: this lands in JSON next to other string
             # fields, and a null there reads as "unknown" instead of "no
             # snapshot", which is what a non-git working directory means.

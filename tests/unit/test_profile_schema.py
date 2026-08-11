@@ -226,12 +226,12 @@ def test_provenance_hashes_the_raw_bytes_not_the_parsed_mapping() -> None:
     different files would otherwise carry identical provenance."""
     first = ProfileProvenance.of(
         profile_path="config/distill.yaml",
-        raw="llm:\n  provider: mock\n",
+        raw=b"llm:\n  provider: mock\n",
         master_snapshot_sha="abc",
     )
     second = ProfileProvenance.of(
         profile_path="config/distill.yaml",
-        raw="# a comment\nllm:\n  provider: mock\n",
+        raw=b"# a comment\nllm:\n  provider: mock\n",
         master_snapshot_sha="abc",
     )
 
@@ -239,11 +239,30 @@ def test_provenance_hashes_the_raw_bytes_not_the_parsed_mapping() -> None:
     assert len(first.blob_sha256) == 64
 
 
+def test_a_crlf_profile_hashes_to_the_bytes_git_actually_holds() -> None:
+    """Read in text mode, CRLF is normalized to LF before hashing, and the
+    recorded hash then matches no blob in the repository -- which is the whole
+    of what a provenance hash is for."""
+    import hashlib
+
+    raw = b"llm:\r\n  provider: mock\r\n"
+
+    provenance = ProfileProvenance.of(
+        profile_path="config/distill.yaml", raw=raw, master_snapshot_sha="abc"
+    )
+
+    assert provenance.blob_sha256 == hashlib.sha256(raw).hexdigest()
+    assert (
+        provenance.blob_sha256
+        != hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+    )
+
+
 def test_provenance_without_a_snapshot_records_an_empty_string() -> None:
     """It lands in JSON beside other string fields, where a null would read as
     "unknown" rather than "there was no snapshot"."""
     provenance = ProfileProvenance.of(
-        profile_path="config/distill.yaml", raw="x", master_snapshot_sha=None
+        profile_path="config/distill.yaml", raw=b"x", master_snapshot_sha=None
     )
 
     assert provenance.master_snapshot_sha == ""
@@ -254,7 +273,7 @@ def test_provenance_dict_keys_are_pinned() -> None:
     silently breaks whoever reads those."""
     provenance = ProfileProvenance.of(
         profile_path="config/profiles/production.yaml",
-        raw="x",
+        raw=b"x",
         master_snapshot_sha="deadbeef",
     )
 
