@@ -303,3 +303,153 @@ def test_a_run_on_the_stand_in_embedding_says_so_in_metrics(tmp_path: Path) -> N
     assert not orchestrator_with("fastembed")._run_configuration_fields()[
         "embedding_test_only"
     ]
+
+
+# --------------------------------------------------------------------------
+# The effective configuration, checked before anything expensive loads
+# --------------------------------------------------------------------------
+
+PRODUCTION_PROFILE = (
+    "profile_class: production\n"
+    "llm:\n"
+    "  provider: deepseek\n"
+    "  model: deepseek-v4-flash\n"
+    "  budget_usd: 1.0\n"
+    "  pricing:\n"
+    "    input_per_mtok_usd: 0.27\n"
+    "    output_per_mtok_usd: 1.1\n"
+    "clustering:\n"
+    "  embedding_backend: fastembed\n"
+    "  embedding_model: BAAI/bge-small-en-v1.5\n"
+    "output_scanner:\n"
+    "  schema_version: memory-net/output-scanner/v1\n"
+    "  mode: enforce\n"
+)
+
+
+def test_an_otherwise_valid_production_profile_still_refuses_provider_mock(
+    tmp_path: Path,
+) -> None:
+    """The profile itself passes every schema check, so the only thing that can
+    stop this run is the effective-value check. The earlier version of this test
+    used a profile the schema already rejected, and would have stayed green with
+    the effective check deleted."""
+    repo = _repo(tmp_path, PRODUCTION_PROFILE)
+
+    with pytest.raises(SystemExit, match="production run cannot use llm.provider"):
+        cli_module.main(["run", "--repo", str(repo), "--provider", "mock", "--dry-run"])
+
+
+def test_the_fallback_lane_is_refused_on_its_own(tmp_path: Path) -> None:
+    """It handles the first parse failure, so a mock there substitutes
+    fabricated products for the real ones just as effectively."""
+    repo = _repo(tmp_path, PRODUCTION_PROFILE)
+
+    with pytest.raises(SystemExit, match="fallback provider"):
+        cli_module.main(
+            [
+                "run",
+                "--repo",
+                str(repo),
+                "--fallback-provider",
+                "mock",
+                "--dry-run",
+            ]
+        )
+
+
+def test_a_production_run_refuses_to_replay_a_bundle(tmp_path: Path) -> None:
+    """Replay swaps the whole provider out after the name check, and the bundle
+    may hold mock responses -- a production-classed run would then publish
+    products no model ever produced."""
+    repo = _repo(tmp_path, PRODUCTION_PROFILE)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    with pytest.raises(SystemExit, match="replay"):
+        cli_module.main(
+            ["run", "--repo", str(repo), "--replay", str(bundle), "--dry-run"]
+        )
+
+
+def test_the_effective_check_runs_before_the_embedding_model_loads(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Ordering, asserted rather than assumed: probing loads a real model, and a
+    run that is already known to be misconfigured must not pay for it."""
+    repo = _repo(tmp_path, PRODUCTION_PROFILE)
+    probed: list[str] = []
+    monkeypatch.setattr(
+        cli_module.EmbeddingPolicy,
+        "probe",
+        lambda self: probed.append(self.backend),
+    )
+
+    with pytest.raises(SystemExit, match="production run cannot use"):
+        cli_module.main(["run", "--repo", str(repo), "--provider", "mock", "--dry-run"])
+
+    assert probed == []
+
+
+def test_a_zero_price_is_not_a_budget(tmp_path: Path) -> None:
+    """The reservation is computed entirely from these prices, so zero makes
+    every reservation zero and the ceiling unreachable -- while the run still
+    looks like it had one."""
+    repo = _repo(
+        tmp_path,
+        PRODUCTION_PROFILE.replace(
+            "input_per_mtok_usd: 0.27", "x: 0.27\n    input_per_mtok_usd: 0"
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="input_per_mtok_usd"):
+        cli_module.main(["run", "--repo", str(repo), "--dry-run"])
+
+
+def test_a_not_a_number_budget_is_refused(tmp_path: Path) -> None:
+    """Every comparison against NaN is false, so the ceiling can never be
+    reached; the run reports a configured budget throughout."""
+    repo = _repo(
+        tmp_path, PRODUCTION_PROFILE.replace("budget_usd: 1.0", "budget_usd: .nan")
+    )
+
+    with pytest.raises(SystemExit, match="budget_usd"):
+        cli_module.main(["run", "--repo", str(repo), "--dry-run"])
+
+
+def test_metrics_written_to_disk_carry_the_configuration(tmp_path: Path) -> None:
+    """Asserted on the serialized artifact, not on the helper that feeds it:
+    deleting the spread from the writer must fail something."""
+    provenance = ProfileProvenance.of(
+        profile_path="config/profiles/production.yaml",
+        raw=b"llm: {}\n",
+        master_snapshot_sha="sha",
+    )
+    orchestrator = _orchestrator(tmp_path, provenance)
+    target = tmp_path / "metrics.json"
+
+    orchestrator._distill_metrics(
+        run_id="r",
+        snapshot_sha="sha",
+        records=[],
+        output=_empty_output(),
+        duration_seconds=0.0,
+        review_gate_status="dry_run",
+        publish_branch="dry_run",
+    ).write(target)
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["profile_path"] == "config/profiles/production.yaml"
+    assert payload["profile_blob_sha256"] == provenance.blob_sha256
+    assert payload["embedding_test_only"] is True
+
+
+def _empty_output() -> Any:
+    from memory_net.distiller.llm.base import LLMResponse
+    from memory_net.distiller.pipeline import DistillationOutput
+
+    return DistillationOutput(
+        products=[],
+        response=LLMResponse(text="{}", model="m", usage={}, usage_source="unknown"),
+        cluster_assignments=[],
+    )

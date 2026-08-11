@@ -1090,20 +1090,28 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 | `clustering.embedding_model` | 默认会替操作者挑一个模型，也就挑了一个 embedding 空间 |
 | `output_scanner.schema_version` / `output_scanner.mode` | 没有它就没有输出侧泄漏闸 |
 
-另有三条**取值**约束：
+另有五条**取值**约束：
 
 1. `llm.provider` 不得为 `mock` / `hermes_tool`——前者是假的，后者的通道丢 role 边界
    且无结构化输出约束（§3.0 / §5.3.2），都不能承担把不可信记录喂给模型的生产职责。
    这条按**生效值**判定而非 profile 字面值：`--provider` / `--fallback-provider` 会覆盖 profile，
    只查 profile 的话，一条 `--provider mock` 就能让 production profile 跑出一份假产物，
    而 `profile_class: production` 仍照常写进 metrics。**主备两条通道分别判**——
-   备用通道同样会产出发布物。
-2. `output_scanner.mode` 在 production 下**唯一合法值是 `enforce`**；写 `observe` 直接拒绝启动，
-   **不静默改回 `enforce`**——静默纠正会让人以为 `observe` 生效了。
-3. `clustering.embedding_backend` 在 production 下**不得为 `test-cheap`**。
+   备用通道同样会产出发布物。同理 **production 下 `--replay` 一律拒绝**：
+   回放会把 provider 整个换成 `ReplayProvider`，绕过上面这条检查，
+   而 bundle 里录的可能正是 mock 的响应，`provider_backend` 也照录不误。
+2. 数值键必须是**有限且为正**的数（`llm.budget_usd` 与两个 `*_per_mtok_usd`）。
+   只查"键存在"挡不住 `0` / `.nan` / `.inf`：预扣额度完全由这几个价格算出，
+   价格为 0 则任何调用的预扣都是 0，`.nan` 的比较恒为假——两种写法都让上界形同虚设，
+   而 run 看起来配了预算。
+3. `output_scanner.mode` 在 production 下**唯一合法值是 `enforce`**；写 `observe` 直接拒绝启动，
+   **不静默改回 `enforce`**——静默纠正会让人以为 `observe` 生效了。这一步只校验声明；
+   真正的输出侧扫描器是独立的后续交付，在它落地之前，production profile 得到的是
+   "声明被锁定"而不是"扫描已生效"。
+4. `clustering.embedding_backend` 在 production 下**不得为 `test-cheap`**。
    这条按**语义**而非文件名判定——与 profile 叫什么名字无关，
    要挡的是"3 维词频向量 + 按语义距离调的 DBSCAN 参数"这个组合本身。
-4. `output_scanner.mode` 的取值域是 `enforce` / `observe`，与叶子侧
+5. `output_scanner.mode` 的取值域是 `enforce` / `observe`，与叶子侧
    `leaf/scanner.py` 的 `audit` / `warn` / `block` **不共用取值域**。写叶子侧的词一律拒绝，
    哪怕在非 production profile 下：两套词汇混用早晚会让人把叶子侧的 `audit`
    误当成输出侧的 `observe`。
@@ -1118,7 +1126,11 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 那样算出来的哈希对不上仓库里那个 blob，而溯源哈希的全部价值就在于能对得上。
 `context.profile` 为 `None` 时 `snapshot.json` **不写这三个键**，与今天完全一致。
 
-`metrics.json` 侧另加三个字段，缺省空串 / `False`，因此不带 profile 的旧 run 字面不变：
+`metrics.json` 侧另加三个字段，缺省空串 / `False`。注意与 `snapshot.json` 的差别：
+`DistillMetrics` 序列化全部字段，所以**没有 profile 的 run 也会多出这三个键**（值为空串 / `False`），
+metrics 的字节不再与旧版逐字相同；`snapshot.json` 则仍然在无 profile 时一个键都不加。
+两者不同是有意的：metrics 是调参回路读的地方，"这次没有 profile"必须是一个可读到的事实，
+而不是一个缺失的键；`snapshot.json` 是产物身份的一部分，多一个键就是另一份快照。字段为：
 `profile_path`、`profile_blob_sha256`，以及 `embedding_test_only`——
 后者取自本次 run 实际用的 `EmbeddingPolicy.test_only`（§5.5.7），
 回答的是"这一跑的向量是不是那 3 维替身"。它必须落在 metrics 里而不是只在日志里：

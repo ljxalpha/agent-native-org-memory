@@ -15,6 +15,7 @@ products are worthless. Refusing to start is the only signal available.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,17 @@ REQUIRED_PRODUCTION_KEYS = (
     "clustering.embedding_model",
     "output_scanner.schema_version",
     "output_scanner.mode",
+)
+
+
+# The keys whose *value* decides whether a ceiling exists at all. Presence is
+# not enough: the reservation a call makes is computed entirely from the two
+# prices, so a zero price reserves nothing and a NaN compares false against
+# every limit -- in both cases the run reports a configured budget and has none.
+POSITIVE_PRODUCTION_KEYS = (
+    "llm.budget_usd",
+    "llm.pricing.input_per_mtok_usd",
+    "llm.pricing.output_per_mtok_usd",
 )
 
 
@@ -147,6 +159,8 @@ def validate_profile(config: dict[str, Any]) -> str:
             f"clustering.embedding_backend must be one of {EMBEDDING_BACKENDS}, "
             f"got {backend!r}"
         )
+    for key in POSITIVE_PRODUCTION_KEYS:
+        _validate_positive_number(config, key)
     mode = str(_lookup(config, "output_scanner.mode"))
     if mode != "enforce":
         # Not silently corrected to "enforce": a correction nobody sees leaves
@@ -155,6 +169,23 @@ def validate_profile(config: dict[str, Any]) -> str:
             f"production profile requires output_scanner.mode=enforce, got {mode!r}"
         )
     return declared
+
+
+def _validate_positive_number(config: dict[str, Any], key: str) -> None:
+    """A finite, strictly positive number, or refuse to start.
+
+    ``bool`` is rejected explicitly because it is an ``int`` subclass, and
+    ``budget_usd: true`` would otherwise be read as a one-dollar ceiling.
+    """
+    raw = _lookup(config, key)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ProfileError(f"{key} must be a number, got {raw!r}")
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0:
+        raise ProfileError(
+            f"{key} must be a finite positive number, got {raw!r}; "
+            "a zero or non-finite value leaves the run with no usable ceiling"
+        )
 
 
 def _validate_output_scanner_mode(config: dict[str, Any]) -> None:
@@ -198,7 +229,7 @@ def _lookup(config: dict[str, Any], dotted: str) -> Any:
 
 
 def validate_effective_provider(
-    declared_class: str, *, provider: str, fallback: str
+    declared_class: str, *, provider: str, fallback: str, replay: bool = False
 ) -> None:
     """Check the provider a run will *actually* use, not the one it declared.
 
@@ -207,9 +238,18 @@ def validate_effective_provider(
     model while still publishing its output as team knowledge. The fallback lane
     matters just as much -- it is what handles the first parse failure, so a
     mock there quietly substitutes fabricated products for the real ones.
+
+    ``replay`` is a third override in disguise: it replaces both providers with
+    a bundle reader after the names have been checked, and a bundle recorded
+    against the mock replays as the mock.
     """
     if declared_class != PRODUCTION:
         return
+    if replay:
+        raise ProfileError(
+            "production run cannot replay a recorded bundle; the recording may "
+            "have come from any backend, including the mock"
+        )
     for role, name in (("llm.provider", provider), ("fallback provider", fallback)):
         if name in FORBIDDEN_PRODUCTION_PROVIDERS:
             raise ProfileError(

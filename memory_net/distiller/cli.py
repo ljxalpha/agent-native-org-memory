@@ -137,25 +137,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         distill_config = _parse_profile(profile_bytes, profile.path)
         _validated_profile(distill_config, profile.path)
+        provider_name = _provider_name(args, distill_config)
+        fallback_name = _fallback_provider_name(args, distill_config)
+        # Re-checked against the *resolved* names, because --provider overrides
+        # the profile: a production profile invoked with --provider mock would
+        # otherwise publish fabricated products as team knowledge. Before the
+        # probe on purpose -- probing loads a real embedding model, and a run
+        # already known to be misconfigured must not pay for that.
+        try:
+            validate_effective_provider(
+                profile_class(distill_config),
+                provider=provider_name,
+                fallback=fallback_name,
+                replay=bool(args.replay),
+            )
+        except ProfileError as exc:
+            raise SystemExit(f"invalid profile {profile.path}: {exc}") from exc
         embedding = _embedding_policy(distill_config)
         # After the profile (which is where the backend is named) and before
         # any leaf branch is read or any model is called. A backend that cannot
         # load is fatal, and discovering it later means the run has already
         # done the expensive, and possibly billed, part for nothing.
         embedding.probe()
-        provider_name = _provider_name(args, distill_config)
-        fallback_name = _fallback_provider_name(args, distill_config)
-        # Re-checked against the *resolved* names, because --provider overrides
-        # the profile: a production profile invoked with --provider mock would
-        # otherwise publish fabricated products as team knowledge.
-        try:
-            validate_effective_provider(
-                profile_class(distill_config),
-                provider=provider_name,
-                fallback=fallback_name,
-            )
-        except ProfileError as exc:
-            raise SystemExit(f"invalid profile {profile.path}: {exc}") from exc
         # One assembly, one freeze, before any consumer exists (§5.5.4). The
         # run id has to precede its consumers: anything named after it could
         # not be constructed otherwise.
