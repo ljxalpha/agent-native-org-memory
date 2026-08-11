@@ -1,0 +1,8 @@
+{
+  "schema_version": "memory-net/master-manifest/v1",
+  "compatible_leaf_range": ">=0.1.0,<0.2.0",
+  "products_active": {},
+  "products_tombstones": {},
+  "subject_index": {},
+  "topic_migrations": {}
+}

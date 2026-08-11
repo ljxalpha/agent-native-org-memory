@@ -1,0 +1,34 @@
+{
+  "node_id": "bob-claude-01",
+  "branch": "leaf/bob-claude-01",
+  "adapter": "claude-code",
+  "adapter_config_revision": "golden-adapter-0001",
+  "redaction_pattern_version": "golden-rules-0001",
+  "reported_at": "2026-01-01T00:00:00Z",
+  "records": [
+    {
+      "memory_id": "golden-deploy-window-001",
+      "source_locator": "memory/shared/release/deploy-window.md",
+      "category_hint": "common_knowledge",
+      "title": "Production deploy window",
+      "tags": [
+        "deploy",
+        "release",
+        "window"
+      ],
+      "body": "The production deploy window is Tuesday to Thursday, 09:00 to 15:00. Deploy\ninside the deploy window so the person who deployed is still awake and watching\nthe deploy. A deploy outside the deploy window is a deploy nobody is watching.\n"
+    },
+    {
+      "memory_id": "golden-deploy-window-002",
+      "source_locator": "memory/shared/release/deploy-freeze.md",
+      "category_hint": "common_knowledge",
+      "title": "Deploy window freeze rules",
+      "tags": [
+        "deploy",
+        "release",
+        "freeze"
+      ],
+      "body": "The production deploy window is Tuesday to Thursday, 09:00 to 15:00. Deploy\noutside the deploy window only to roll back, and announce the rollback deploy in\nthe release channel first. The deploy window is frozen at quarter end.\n"
+    }
+  ]
+}

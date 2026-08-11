@@ -1,0 +1,72 @@
+schema_version: memory-net/distill-config/v1
+# The golden fixture's copy of the production profile. It lives at the same
+# repo-relative path as the real one on purpose: `--config` names a path inside
+# the repository being distilled, so a differently named copy would make the
+# same flag mean two different files (§9.10).
+#
+# Every run-relevant field below is asserted equal to the shipped production
+# profile by tests/unit/test_golden_repo_builder.py. Only the budget differs:
+# this repository is a fixed three-cluster fixture, and a ceiling sized for it
+# is a tighter guard than one sized for an unknown corpus.
+profile_class: production
+llm:
+  provider: deepseek
+  # The same id the OpenAI-compatible provider defaults to, so the repository
+  # names exactly one production model. Confirm it against the endpoint's own
+  # model listing (a plain GET, no tokens billed) before the first live run.
+  model: deepseek-v4-flash
+  max_tokens: 2000
+  # Deliberately small. The ceiling is what a misconfigured run runs into, and
+  # the cost of raising it once is much lower than the cost of discovering it
+  # was never reached.
+  budget_usd: 0.25
+  max_attempts: 30
+  pricing:
+    # DeepSeek's own dimensions, not Anthropic's: the shipped default profile
+    # prices at 3.0 / 15.0 USD per million tokens, which over-estimates this
+    # endpoint by more than an order of magnitude and would stop a run on
+    # budget_exhausted long before it had spent anything like the ceiling.
+    #
+    # Rounded *up* on purpose. These two numbers only ever produce a reservation
+    # upper bound, so over-estimating stops the run early, while
+    # under-estimating lets it overspend a ceiling it believes it is respecting.
+    input_per_mtok_usd: 0.6
+    output_per_mtok_usd: 2.4
+prompts:
+  system_template_path: prompts/distill_system.md
+  user_template_path: prompts/distill_user.md
+output:
+  default_category: common_knowledge
+  products_dir: team
+categories:
+  - common_knowledge
+  - best_practices
+  - shared_qa
+  - risk_signals
+  - open_questions
+clustering:
+  eps: 0.5
+  min_samples: 2
+  # A real local embedding model. The stand-in backend produces three
+  # dimensional word counts, and the eps above is tuned for semantic distance:
+  # the pair yields ordinary-looking metrics over meaningless clusters, which is
+  # why the schema refuses it here.
+  embedding_backend: fastembed
+  embedding_model: BAAI/bge-small-en-v1.5
+output_scanner:
+  schema_version: memory-net/output-scanner/v1
+  # Locked: a production profile that asks to observe is refused at startup, and
+  # so is any attempt to override this from the command line or the environment.
+  mode: enforce
+  patterns_path: config/redaction_patterns.yaml
+category_evidence_rules:
+  common_knowledge:
+    min_citations: 1
+review_gate:
+  enabled: true
+  # `<run_id>` is a substitution point evaluated per run, not an unfilled blank.
+  branch_template: release/<run_id>
+  pr_target_branch: master
+  codeowners_path: .github/CODEOWNERS
+platform_write_protection:
+  required: true

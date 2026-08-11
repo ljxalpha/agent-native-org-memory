@@ -1,0 +1,34 @@
+{
+  "node_id": "carol-claude-01",
+  "branch": "leaf/carol-claude-01",
+  "adapter": "claude-code",
+  "adapter_config_revision": "golden-adapter-0001",
+  "redaction_pattern_version": "golden-rules-0001",
+  "reported_at": "2026-01-01T00:00:00Z",
+  "records": [
+    {
+      "memory_id": "golden-search-index-001",
+      "source_locator": "memory/shared/search/reindex.md",
+      "category_hint": "common_knowledge",
+      "title": "Search index rebuild after schema change",
+      "tags": [
+        "search",
+        "index",
+        "schema"
+      ],
+      "body": "Rebuild the whole search index when the document schema changes. A partial\nsearch index rebuild leaves old-schema documents unreachable by the new\nanalyzer, and the symptom is a silent drop in search recall, so nothing alerts\non a half-rebuilt search index.\n"
+    },
+    {
+      "memory_id": "golden-search-index-002",
+      "source_locator": "memory/shared/search/index-alias.md",
+      "category_hint": "common_knowledge",
+      "title": "Search index alias swap",
+      "tags": [
+        "search",
+        "index",
+        "alias"
+      ],
+      "body": "Rebuild the whole search index under a fresh index name when the document\nschema changes, and swap the search alias once the search index rebuild\nfinishes. Rebuilding the search index in place leaves the search index\nunqueryable for the whole rebuild, and search recall drops silently.\n"
+    }
+  ]
+}

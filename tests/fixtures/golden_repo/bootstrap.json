@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "compatible_build_api_range": ">=1,<2",
+  "compatible_code_range": ">=0.1.0,<0.2.0",
+  "manifest_schema_version": 1,
+  "record_frontmatter_schema_version": 1,
+  "product_frontmatter_schema_version": 1,
+  "health_schema_version": 1,
+  "owner_schema_version": 1
+}

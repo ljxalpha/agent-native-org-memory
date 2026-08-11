@@ -1,0 +1,26 @@
+{
+  "node_id": "alice-claude-01",
+  "branch": "leaf/alice-claude-01",
+  "adapter": "claude-code",
+  "adapter_config_revision": "golden-adapter-0001",
+  "redaction_pattern_version": "golden-rules-0001",
+  "reported_at": "2026-01-01T00:00:00Z",
+  "records": [
+    {
+      "memory_id": "golden-auth-retry-001",
+      "source_locator": "memory/shared/auth/oauth-retry.md",
+      "category_hint": "common_knowledge",
+      "title": "OAuth token refresh retry policy",
+      "tags": ["auth", "retry", "oauth"],
+      "body": "When the OAuth token refresh endpoint answers 429, retry with bounded\nexponential backoff: four attempts, starting at one second and doubling, with\nfull jitter. Give up after the fourth attempt and surface the failure instead\nof looping, because a client that retries forever turns one throttled endpoint\ninto an outage for every caller behind it.\n"
+    },
+    {
+      "memory_id": "golden-auth-retry-002",
+      "source_locator": "memory/shared/auth/oauth-backoff.md",
+      "category_hint": "common_knowledge",
+      "title": "OAuth retry backoff jitter",
+      "tags": ["auth", "retry", "backoff"],
+      "body": "Retrying an OAuth refresh without jitter makes every throttled client wake up\nat the same instant, so the second attempt is as throttled as the first. Use\nfull jitter on the exponential backoff for token refresh, keep the ceiling at\nfour attempts, and treat a 429 on the last attempt as a hard failure rather\nthan as a reason to extend the retry budget.\n"
+    }
+  ]
+}
