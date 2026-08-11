@@ -713,23 +713,55 @@ def _run_budget(config: dict[str, Any]) -> RunBudget | None:
     max_usd = _cost_budget_usd(config)
     max_attempts = _budget_limit_int(config, "max_attempts")
     max_wall_clock_s = _budget_limit_float(config, "max_wall_clock_s")
-    # Any one of the three is enough to build the budget. Keying only off the
-    # cost ceiling would silently discard an attempt or wall-clock limit the
-    # profile did configure, leaving every paid lane with no pre-call guard at
-    # all -- the exact failure the limits were written to prevent.
-    if max_usd is None and max_attempts is None and max_wall_clock_s is None:
+    soft_max_usd = _stricter_ceiling(config, "soft_max_usd")
+    per_cluster_max_usd = _stricter_ceiling(config, "per_cluster_max_usd")
+    # Any one of them is enough to build the budget. Keying only off the cost
+    # ceiling would silently discard an attempt or wall-clock limit the profile
+    # did configure, leaving every paid lane with no pre-call guard at all --
+    # the exact failure the limits were written to prevent.
+    if (
+        max_usd is None
+        and max_attempts is None
+        and max_wall_clock_s is None
+        and soft_max_usd is None
+        and per_cluster_max_usd is None
+    ):
         return None
-    return RunBudget(
-        input_per_mtok_usd=_input_cost_per_mtok_usd(config),
-        output_per_mtok_usd=_output_cost_per_mtok_usd(config),
-        # Each dimension stays None unless the profile names it. A cost ceiling
-        # alone leaves a run that retries forever, or one that wedges against a
-        # slow endpoint, with nothing to stop it; and a silent default here
-        # would cap runs nobody asked to cap.
-        max_usd=max_usd,
-        max_attempts=max_attempts,
-        max_wall_clock_s=max_wall_clock_s,
-    )
+    try:
+        return RunBudget(
+            input_per_mtok_usd=_input_cost_per_mtok_usd(config),
+            output_per_mtok_usd=_output_cost_per_mtok_usd(config),
+            # Each dimension stays None unless the profile names it. A cost
+            # ceiling alone leaves a run that retries forever, or one that
+            # wedges against a slow endpoint, with nothing to stop it; and a
+            # silent default here would cap runs nobody asked to cap.
+            max_usd=max_usd,
+            max_attempts=max_attempts,
+            max_wall_clock_s=max_wall_clock_s,
+            # Refused, not clamped, when they contradict max_usd: see RunBudget.
+            soft_max_usd=soft_max_usd,
+            per_cluster_max_usd=per_cluster_max_usd,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"invalid llm.budget configuration: {exc}") from exc
+
+
+def _stricter_ceiling(config: dict[str, Any], key: str) -> float | None:
+    """One value from the ``llm.budget`` sub-block, or ``None``.
+
+    A *sub-block*, deliberately not a second spelling of ``llm.budget_usd``:
+    that flat key stays the sole source of the hard ceiling, so a profile
+    carrying both keeps the hard ceiling it always had and the sub-block can
+    only narrow it (§7.2 DISTILL-001).
+    """
+    llm = config.get("llm")
+    budget = llm.get("budget") if isinstance(llm, dict) else None
+    if not isinstance(budget, dict) or budget.get(key) is None:
+        return None
+    value = budget[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SystemExit(f"llm.budget.{key} must be a number; got {value!r}")
+    return float(value)
 
 
 def _budget_limit_int(config: dict[str, Any], key: str) -> int | None:

@@ -267,9 +267,12 @@ class DistillationPipeline:
         ]
         tally = _RunTally()
 
-        for cluster_records in self._execution_order(clusters, tally=tally):
-            terminal = self._run_cluster(
+        for index, cluster_records in enumerate(
+            self._execution_order(clusters, tally=tally)
+        ):
+            terminal = self._run_cluster_in_scope(
                 cluster_records,
+                scope=f"cluster-{index}",
                 tally=tally,
                 system_prompt=system_prompt,
                 template=template,
@@ -341,6 +344,44 @@ class DistillationPipeline:
                 + ", ".join(sorted(rule_counts)),
             )
         return output
+
+    def _run_cluster_in_scope(
+        self,
+        cluster_records: list[dict[str, Any]],
+        *,
+        scope: str,
+        tally: _RunTally,
+        system_prompt: str,
+        template: str,
+        run_id: str,
+    ) -> str:
+        """One cluster, inside its own budget scope and behind the soft ceiling.
+
+        The soft ceiling is checked *here* rather than inside ``reserve()``: it
+        means "open no new cluster", which only the loop can honour. A budget
+        that refused mid-cluster would abandon a cluster whose earlier
+        sub-prompts have already been paid for.
+        """
+        budget = self.run_budget
+        if budget is None:
+            return self._run_cluster(
+                cluster_records,
+                tally=tally,
+                system_prompt=system_prompt,
+                template=template,
+                run_id=run_id,
+            )
+        if budget.soft_exhausted:
+            tally.skipped_clusters += 1
+            return SKIPPED_BUDGET
+        with budget.enter_scope(scope):
+            return self._run_cluster(
+                cluster_records,
+                tally=tally,
+                system_prompt=system_prompt,
+                template=template,
+                run_id=run_id,
+            )
 
     def _run_cluster(
         self,
