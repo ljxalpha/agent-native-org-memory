@@ -8,6 +8,7 @@ raises at the consumer instead of at construction.
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
@@ -150,3 +151,79 @@ def _request() -> LLMRequest:
         ),
         model="mock-memory-distiller",
     )
+
+
+def _pipeline_shaped_record(memory_id: str, title: str) -> dict[str, object]:
+    """The record shape the pipeline actually hands the provider.
+
+    The original frontmatter is inside ``content``; there is no
+    ``source_frontmatter`` key at the top level, which is where the mock used
+    to look for the title.
+    """
+    return {
+        "memory_id": memory_id,
+        "revision_hash": "a1b2c3d4",
+        "category_hint": "common_knowledge",
+        "content": (
+            "---\n"
+            f"title: {title}\n"
+            "source_frontmatter:\n"
+            f"  title: {title}\n"
+            "---\n"
+            f"Body text for {memory_id}.\n"
+        ),
+    }
+
+
+def _mock_titles(*titles: str) -> list[str]:
+    """One mock response per cluster, as a run with several clusters produces."""
+    produced = []
+    for index, title in enumerate(titles):
+        record = _pipeline_shaped_record(f"mem-{index}", title)
+        response = MockLLMProvider().generate(
+            LLMRequest(
+                system_prompt="s",
+                user_prompt=json.dumps([record]),
+                model="mock-memory-distiller",
+                max_tokens=100,
+            )
+        )
+        produced.extend(
+            product["title"] for product in json.loads(response.text)["products"]
+        )
+    return produced
+
+
+def test_mock_names_a_product_after_its_memory_not_its_category() -> None:
+    """Two clusters sharing a category hint is the ordinary case.
+
+    Naming both after the category gives them one topic id, and the second is
+    then refused as a duplicate topic -- so the mock would fail nearly every
+    real repository rather than the pathological one.
+    """
+    assert _mock_titles("OAuth retry policy", "Deploy window") == [
+        "OAuth retry policy",
+        "Deploy window",
+    ]
+
+
+def test_mock_falls_back_to_the_category_when_nothing_is_titled() -> None:
+    response = MockLLMProvider().generate(
+        LLMRequest(
+            system_prompt="s",
+            user_prompt=json.dumps(
+                [
+                    {
+                        "memory_id": "mem-0",
+                        "revision_hash": "a1b2c3d4",
+                        "category_hint": "common_knowledge",
+                        "content": "no frontmatter here\n",
+                    }
+                ]
+            ),
+            model="mock-memory-distiller",
+            max_tokens=100,
+        )
+    )
+
+    assert json.loads(response.text)["products"][0]["title"] == "Common Knowledge"

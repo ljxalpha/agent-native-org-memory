@@ -26,8 +26,8 @@ class MockLLMProvider(LLMProvider):
 
         for category, items in sorted(by_category.items()):
             first = items[0]
-            _frontmatter, body = split_frontmatter(str(first.get("content") or ""))
-            title = _title(first, category)
+            frontmatter, body = split_frontmatter(str(first.get("content") or ""))
+            title = _title(first, frontmatter, category)
             products.append(
                 {
                     "title": title,
@@ -100,10 +100,27 @@ def _product_category(raw_category: str, allowed_categories: list[str]) -> str:
     return allowed_categories[0]
 
 
-def _title(record: dict[str, Any], category: str) -> str:
-    source_fm = record.get("source_frontmatter")
-    if isinstance(source_fm, dict) and source_fm.get("title"):
-        return str(source_fm["title"])
+def _title(record: dict[str, Any], frontmatter: dict[str, Any], category: str) -> str:
+    """Name the product after the memory it came from, not after its category.
+
+    Two sources, in order, because the record's shape is not the same
+    everywhere: the pipeline hands over a flat record whose original
+    frontmatter is inside ``content``, while a directly constructed record may
+    carry ``source_frontmatter`` at the top level.
+
+    The category fallback is last for a reason. A run with two clusters in one
+    category would give both products the same title, hence the same topic id,
+    and the second one is refused as a duplicate topic -- so the mock would
+    fail any repository whose records mostly share a category hint, which is
+    the ordinary case.
+    """
+    for candidate in (record.get("source_frontmatter"), frontmatter):
+        if isinstance(candidate, dict):
+            nested = candidate.get("source_frontmatter")
+            if isinstance(nested, dict) and nested.get("title"):
+                return str(nested["title"])
+            if candidate.get("title"):
+                return str(candidate["title"])
     return category.replace("_", " ").replace("-", " ").title()
 
 
