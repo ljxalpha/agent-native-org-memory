@@ -1,17 +1,43 @@
+# codex adapter — calibrated against a real install, read-only, zero LLM quota.
+# Layout snapshot: tests/fixtures/adapters/codex/ ; regressions:
+# tests/unit/test_adapter_calibration.py
+#
+# Managed root: ${AGENT_ROOT}/memory/shared — a memory-net convention directory
+# that a stock install does not have. The agent's NATIVE store is
+# ${AGENT_ROOT}/memories, which is a git checkout, and its index
+# memories_1.sqlite (plus -shm/-wal while a connection is open) is a SIBLING of
+# that store, one level above the managed root.
+#
+# Threat model: reading outside the managed root would hand the distiller the
+# agent's private state — its own notes, its checkout, its index. So the
+# boundary is enforced by position, and every gate below is stated for what it
+# actually does rather than for what it looks like it does.
 name: codex
+# Experimental until a real, quota-costing agent run shows the injected hint is
+# consumed. A calibrated read path is not evidence of that.
 support_status: experimental
 roots:
   shared:
     - alias: codex-shared
       base_dir: "${AGENT_ROOT}/memory/shared"
       include: ["**/*.md"]
-      # 真实 ~/.codex/memories 是 git 仓库（.git/ + *.sqlite + 可能的 *.lock）；显式排除
+      # Declarative cover, not today's gate. A `.git/` inside the managed root
+      # is rejected by the hidden-path skip, which runs before these patterns
+      # (filesystem_md.py: _is_hidden_path precedes the exclude loop); `.lock`
+      # siblings never enter the walk because `include` is markdown-only. These
+      # entries exist so that widening `include` later cannot quietly start
+      # collecting a checkout's plumbing.
+      #
+      # Deliberately NO `**/*.sqlite*`: the trio sits above the managed root, so
+      # a relative glob cannot reach it. A second mechanism agreeing with the
+      # first would suggest a `.sqlite` inside the managed root is expected.
       exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**", "**/*.lock"]
 team_target: "${AGENT_ROOT}/memory/team"
 file_pattern: "*.md"
 frontmatter_required: false
 team_hint_injection:
   mode: install_once
+  # AGENTS.md is the per-session instruction file, and therefore the hint target.
   target: "${AGENT_ROOT}/AGENTS.md"
   install_once_default: "${AGENT_ROOT}/AGENTS.md"
   content_template: |

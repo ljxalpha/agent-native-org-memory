@@ -423,6 +423,33 @@ def test_codex_dot_directories_in_the_native_store_stay_unreported(
     assert [r.source_locator for r in records] == ["codex-shared:kept.md"]
 
 
+def test_codex_fixture_hint_injection_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injected twice into the instruction file, unchanged the second time.
+
+    Run by every subscribe, so a non-idempotent injection grows the file the
+    agent reads on every session until it displaces the instructions. The
+    fixture has no ``AGENTS.md`` -- a stock install does not -- so this also
+    covers the install-once path creating one.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = _materialize(FIXTURES / "codex", tmp_path / "codex")
+    adapter = _load("codex", agent_root)
+    target = agent_root / "AGENTS.md"
+    assert not target.exists()
+
+    assert adapter.inject_team_hint(adapter.hint_config) is True
+    once = target.read_text(encoding="utf-8")
+    assert adapter.inject_team_hint(adapter.hint_config) is False
+    twice = target.read_text(encoding="utf-8")
+
+    assert once == twice
+    assert "@memory/team/INDEX.md" in once
+    assert once.count("<!-- memory-net-hint:start -->") == 1
+
+
 def test_the_codex_fixture_carries_no_real_content() -> None:
     """A redacted snapshot, checked as one."""
     for path in sorted((FIXTURES / "codex").rglob("*")):
