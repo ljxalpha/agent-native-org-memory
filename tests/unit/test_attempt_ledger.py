@@ -370,6 +370,42 @@ def test_a_broken_ledger_leaves_no_unsettled_run_budget(tmp_path: Path) -> None:
     budget.assert_all_settled()
 
 
+def test_a_settlement_cannot_re_reserve(tmp_path: Path) -> None:
+    """``spent()`` counts reserved lines, so accepting ``reserved`` here would
+    let a settlement inflate the count it is settling."""
+    ledger = _ledger(tmp_path, ceiling=5)
+    attempt = ledger.reserve(kind="distill_live", run_id="r1")
+
+    for outcome in ("reserved", "refused"):
+        with pytest.raises(LedgerError, match="settlement outcome"):
+            ledger.settle(attempt, outcome=outcome)
+
+    assert ledger.spent() == 1
+
+
+def test_a_broken_settlement_leaves_no_unsettled_run_budget(tmp_path: Path) -> None:
+    """The way out has the same hazard as the way in."""
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+    from memory_net.distiller.runctx import RunBudget
+
+    class _UnsettleableLedger(AttemptLedger):
+        def settle(self, attempt: Any, *, outcome: str) -> None:
+            raise LedgerError("the ledger lock is held")
+
+    budget = RunBudget(input_per_mtok_usd=0.6, output_per_mtok_usd=2.4, max_usd=10.0)
+    provider = OpenAICompatProvider(
+        client=_CountingClient(),
+        ledger=_UnsettleableLedger(tmp_path / "l.jsonl", ceiling=5),
+        model="m",
+        budget=budget,
+    )
+
+    with pytest.raises(LedgerError):
+        provider.generate(_request())
+
+    budget.assert_all_settled()
+
+
 def test_each_retry_costs_its_own_attempt(tmp_path: Path) -> None:
     """A retry is a second request on the wire, and the endpoint bills it."""
     from memory_net.distiller.llm.openai_compat import OpenAICompatProvider

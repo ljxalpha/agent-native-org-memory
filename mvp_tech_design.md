@@ -1467,6 +1467,11 @@ append-only，配 `O_CREAT|O_EXCL` 锁文件。
   而 orchestrator 的 `assert_all_settled()` 在有异常在途时刻意跳过（§5.5.3），
   于是它连报都不会报。因此预留段落包在 `try/except BaseException` 里，
   失败即 `release(wall_s=0.0)` 后再抛：那次请求根本没发出，不该占用任何额度。
+  **结算侧同理**：成功路径上 `settle()` 先于 `_to_response()`（后者才结算 run 预算），
+  这里抛错同样会吊住 hold，因此也包 `try/except BaseException` → `_close(billable=True)` 后再抛
+  （请求已经发出，按已计费结算）。
+- **`settle()` 拒绝 `reserved` / `refused` 两个取值**：结算说的是"这次尝试怎么结束的"，
+  而 `spent()` 数的正是 `reserved` 行——允许它当结算写入，等于让一次结算把自己数成第二次尝试。
 
 ### 5.6 凭据 launcher（`memory_net/shared/env_allowlist.py` + `scripts/aomt-with-env`）
 

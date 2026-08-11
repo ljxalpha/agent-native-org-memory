@@ -227,7 +227,14 @@ class OpenAICompatProvider(LLMProvider):
             # From here the request has been billed, so the reservation must
             # reach a terminal state even if decoding the response blows up on
             # a malformed body.
-            self._settle_attempt(ledger_attempt, outcome="ok")
+            try:
+                self._settle_attempt(ledger_attempt, outcome="ok")
+            except BaseException:
+                # Same reasoning as the reservation above, on the way out: a
+                # ledger write that fails here would otherwise strand the
+                # run-budget hold, and nothing downstream would say so.
+                self._close(reservation, billable=True, started=started)
+                raise
             try:
                 return self._to_response(
                     completion,

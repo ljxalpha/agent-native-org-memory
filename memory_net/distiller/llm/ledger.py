@@ -205,6 +205,11 @@ class AttemptLedger:
         """
         if outcome not in OUTCOMES:
             raise LedgerError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
+        if outcome in ("reserved", "refused"):
+            # A settlement is how an attempt *ended*. Accepting these two would
+            # let a second "reserved" line be written for the same sequence,
+            # and ``spent()`` counts reserved lines.
+            raise LedgerError(f"{outcome!r} is not a settlement outcome")
         with self._locked():
             self._append(
                 {
