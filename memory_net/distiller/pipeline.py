@@ -79,6 +79,12 @@ class DistillationOutput:
     # a live/record run (no replay markers present).
     replay_hits: int = 0
     replay_misses: int = 0
+    # Prompt-cache accounting (DISTILL-001). ``prompt_cache_source`` is
+    # ``reported`` only when some call carried the counters; the zeros of an
+    # ``unreported`` run are the absence of a report, never an estimate.
+    prompt_cache_read_tokens: int = 0
+    prompt_cache_creation_tokens: int = 0
+    prompt_cache_source: str = "unreported"
     # Output scanner refusals (§5.5.13). Non-zero means the run was stopped, not
     # that a cluster was skipped; rule names and counts only, never content.
     redaction_failures: int = 0
@@ -164,6 +170,9 @@ class _RunTally:
     replay_hits: int = 0
     replay_misses: int = 0
     estimated_cost_usd: float = 0.0
+    prompt_cache_read_tokens: int = 0
+    prompt_cache_creation_tokens: int = 0
+    prompt_cache_reported: bool = False
     clusters_attempted: int = 0
     citations_emitted: int = 0
     citations_resolved: int = 0
@@ -338,6 +347,11 @@ class DistillationPipeline:
             replay_misses=tally.replay_misses,
             redaction_failures=len(tally.redaction_hits),
             redaction_rule_counts=dict(sorted(rule_counts.items())) or None,
+            prompt_cache_read_tokens=tally.prompt_cache_read_tokens,
+            prompt_cache_creation_tokens=tally.prompt_cache_creation_tokens,
+            prompt_cache_source=(
+                "reported" if tally.prompt_cache_reported else "unreported"
+            ),
             cluster_terminal_counts=terminal_counts,
             unclustered=unclustered,
             records_cited=len(
@@ -605,6 +619,21 @@ class DistillationPipeline:
         tally.output_tokens += int(response.usage.get("output_tokens", 0))
         tally.replay_hits += int(response.usage.get("replay_hits", 0))
         tally.replay_misses += int(response.usage.get("replay_misses", 0))
+        for key, target in (
+            ("cache_read_input_tokens", "prompt_cache_read_tokens"),
+            ("cache_creation_input_tokens", "prompt_cache_creation_tokens"),
+        ):
+            if key not in response.usage:
+                continue
+            # Presence, not truthiness: a reported zero is a measurement, and
+            # treating it as silence would erase the one call that proved the
+            # backend does report.
+            tally.prompt_cache_reported = True
+            setattr(
+                tally,
+                target,
+                getattr(tally, target) + int(response.usage[key]),
+            )
         tally.raw_texts.append(response.text)
 
     def _split_cluster(

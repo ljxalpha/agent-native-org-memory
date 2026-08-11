@@ -82,6 +82,12 @@ class DistillMetrics:
     # keeps its own meaning -- the clusters that actually issued a call, which
     # total_calls, the replay counters and the parse-failure rate all read --
     # so these are new names rather than a redefinition of it.
+    # Prompt-cache hits, as the backend reported them. ``unreported`` with two
+    # zeros is the honest description of a backend that says nothing; nothing
+    # here is ever estimated (§7.2 DISTILL-001).
+    prompt_cache_read_tokens: int = 0
+    prompt_cache_creation_tokens: int = 0
+    prompt_cache_source: str = "unreported"
     clusters_total: int = 0
     clusters_terminal: int = 0
     cluster_terminal_counts: dict[str, int] = field(default_factory=dict)

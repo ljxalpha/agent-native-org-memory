@@ -548,6 +548,9 @@ class DistillOrchestrator:
             replay_hits=output.replay_hits,
             replay_misses=output.replay_misses,
             replay_live_calls=_replay_live_calls(output),
+            prompt_cache_read_tokens=output.prompt_cache_read_tokens,
+            prompt_cache_creation_tokens=output.prompt_cache_creation_tokens,
+            prompt_cache_source=output.prompt_cache_source,
             provider_backends=output.provenance.provider_backends,
             usage_source=output.provenance.usage_source,
             usage_source_counts=output.provenance.usage_source_counts,
@@ -662,6 +665,13 @@ class DistillOrchestrator:
             replay_hits=output.replay_hits if output else 0,
             replay_misses=output.replay_misses if output else 0,
             replay_live_calls=_replay_live_calls(output) if output else 0,
+            prompt_cache_read_tokens=output.prompt_cache_read_tokens if output else 0,
+            prompt_cache_creation_tokens=(
+                output.prompt_cache_creation_tokens if output else 0
+            ),
+            prompt_cache_source=(
+                output.prompt_cache_source if output else "unreported"
+            ),
             provider_backends=provenance.provider_backends,
             usage_source=provenance.usage_source,
             usage_source_counts=provenance.usage_source_counts,
@@ -1355,6 +1365,10 @@ class DistillOrchestrator:
                 "replay_hits": output.replay_hits,
                 "replay_misses": output.replay_misses,
                 "replay_live_calls": _replay_live_calls(output),
+                # Same values as distill_runs/<run_id>/metrics.json.
+                "prompt_cache_read_tokens": output.prompt_cache_read_tokens,
+                "prompt_cache_creation_tokens": output.prompt_cache_creation_tokens,
+                "prompt_cache_source": output.prompt_cache_source,
                 # Same values as distill_runs/<run_id>/metrics.json: the two
                 # sinks are read by different consumers and must never disagree.
                 "provider_backends": output.provenance.provider_backends,
