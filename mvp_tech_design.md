@@ -3488,8 +3488,10 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 - **哨兵（sentinel）**：16 位随机小写字母数字，每次验证现生成。它只存在于注入的
   `INDEX.md` 一个地方——不在 prompt 里，不在指令文件里。现生成是必需的：
   固定串可能由缓存响应或上一次运行的残留答出。
-- **对照实验（control）**：同一 prompt、同一沙箱、同一模型，唯独移除 hint 与 INDEX。
-  它把"读了那个文件"与"哨兵通过某条我们没想到的路径泄漏"区分开。
+- **对照实验（control）**：同一 prompt、同一沙箱、同一模型、**同一份 INDEX 与同一个哨兵**，
+  唯独移除 hint。**只能变动一个因素**：若对照连 INDEX 一起移除，就成了拿"有引用 + 有文件"
+  比"两者都没有"，而一个靠遍历目录找到该文件的 agent 会产生完全相同的通过模式——
+  该设计无法区分被测的那件事与一个无关能力。被测的是那条引用，所以只有那条引用变。
 - **prompt 不点名路径**：prompt 只说"读你的指令引用的那份团队记忆索引"。
   说出路径会让一次运行靠"被告知答案在哪"而非靠"跟随指令文件的引用"通过。
 
@@ -3527,18 +3529,35 @@ trace 只在**恰好存在**时附加检查，此时 `evidence_basis` 从 `senti
 `sentinel+no-inlining`，判定里写明"内联已排除，工具读取是仅剩的路径：<理由>"。
 
 对 hermes v0.18.0 的实测依据：`agent/prompt_builder.py::_load_agents_md` 把 `AGENTS.md`
-**逐字**读进 system prompt（只做扫描与截断），全仓**不存在任何 `@` 引用展开**，
-hermes 也不认识 `memory/team` 这个路径。因此注入的 `@memory/team/INDEX.md` 在 system prompt
-里只是一行字面文本，INDEX.md 的内容从未被内联——哨兵能回来，只可能是工具读取。
-**该依据是版本相关的**，升级 agent 后必须重新确认。
+**逐字**读进 system prompt（只做扫描与截断）；hermes **确实有** `@` 引用展开器
+（`agent/context_references.py`），但其 `REFERENCE_PATTERN` 只匹配
+`@file:` / `@folder:` / `@git:` / `@url:` / `@diff` / `@staged`，**裸路径不匹配**。
+因此注入的 `@memory/team/INDEX.md` 在 system prompt 里是一行**普通文本**，
+是模型可自行决定是否照做的指令，而不是被框架展开的 include。**该依据是版本相关的**。
+
+**禁止出现的命令行开关**（两个，理由相同）：`--safe-mode` 明说会关掉指令文件与记忆注入；
+`--ignore-rules` 看起来像卫生措施（"规则文件是用户的，不是本检查的"），
+实际映射到 `skip_context_files=True`，**`AGENTS.md` 根本不会进 system prompt**——
+带着它跑，观察不到任何"hint 被跟随"，因为 prompt 里就没有 hint，
+而它照样会产出一个看起来完全正常的回答。与用户自身文件的隔离是**沙箱**的职责且已是结构性的：
+`HERMES_HOME` 与工作目录都在 namespace 内，用户的文件在那里不存在。
 
 **额度**：agent 自己调模型，本项目的 provider 栈不在中间，`ATTEMPT_CEILING_HARD`
-拦不住 agent 内部的循环。因此约束必须是结构性的：沙箱 config 写死
-`agent.max_turns`（**配置文件优先级高于 `HERMES_MAX_ITERATIONS` 环境变量**，见
-`cli.py` 的 max turns 优先级链；默认 90，即一次调用最多 90 次模型请求），
-并在每次运行**开始前**按上限把 attempt 记进 ledger（`kind="agent_run"`）——
+拦不住 agent 内部的循环。因此约束必须是结构性的，且有三条容易写错的地方：
+
+1. 上限写在沙箱 config 的 `agent.max_turns`，**不能只设 `HERMES_MAX_ITERATIONS`**：
+   `cli.py` 的优先级链是 CLI 参数 → 配置文件 → 环境变量 → 默认值，配置文件会**悄悄压过**
+   那个看起来就是上限的环境变量；默认值是 90，即一次调用最多 90 次模型请求。
+2. **N 次迭代允许 N+1 次请求**：迭代预算耗尽时 agent 会再发一次**无工具**的收尾请求
+   （`agent/turn_finalizer.py`）。按迭代数记账会在**上限真正生效的那一次**少记，
+   而那恰恰是 ledger 唯一存在的场景。
+3. 上限由**上一条命令**（`agent_sandbox up --max-turns`）写进文件，
+   所以验证脚本启动前必须**校验它确实在**（`assert_turn_cap`），而不是假定。
+
+在每次运行**开始前**按 `CALLS_PER_RUN` 把 attempt 记进 ledger（`kind="agent_run"`）——
 按上限而非实际次数记账，因为没人能在调用发生前知道实际次数，
-而 ledger 的用途是拦住失控，不是精确计费。
+而 ledger 的用途是拦住失控，不是精确计费。**仍需知道的局限**：本项目拿不到
+provider 侧的真实请求计数，因此"记了 N 次"是上界声明，不是实测账单。
 
 ## 10. Sandbox 与权限兼容
 
@@ -4625,14 +4644,35 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   按上限预先记账是唯一可行的保守口径。
 - Change time: 2026-08-11
 
-## Change Record - 2026-08-11 hermes adapter 升为 stable
+## Change Record - 2026-08-11 对照实验改为单变量，hermes 保持 experimental
 
-- Change summary: `config/adapters/hermes.yaml` 的 `support_status` 由 `experimental`
-  改为 `stable`，并在文件内写明证据与**证据边界**；`todo.md` M3-001 关闭。
-  校准测试相应改为"锁定 stable 所依据的证据与其边界"，另加一条"其余已校准 adapter
-  仍为 experimental"的测试。
-- Change reason: 2026-08-11 的真实 agent 运行（4 次调用）给出了此前唯一缺失的那一环：
-  正例返回哨兵、对照未返回，且源码层面排除了内联，因此工具读取是哨兵到达模型的唯一路径。
-  边界一并写进 YAML 而非只写在验收记录里，因为读 YAML 的人是集成者，
-  而"没写出来的限制"会被默认为不存在。
+- Change summary: `prepare()` 的对照实验由"移除 hint **与** INDEX"改为"**只**移除 hint、
+  INDEX 与哨兵原样保留"，并加一条锁定该性质的测试。`config/adapters/hermes.yaml`
+  保持 `experimental`，文件内写明"已证明什么"与"还差什么"；`todo.md` M3-001 保持 `[>]`
+  并记录缺口。§9.13 同步。
+- Change reason: 原对照同时变动两个因素，等于拿"有引用 + 有文件"比"两者都没有"。
+  一个**靠遍历目录**找到 INDEX.md 的 agent 会产生与"跟随引用"完全相同的通过模式，
+  因此该设计**无法区分被测的那件事**与一个无关能力。
+  2026-08-11 的真实运行用的是旧设计，故它证明的是"注入的 INDEX.md 被真实 agent 用工具读取"
+  （受管路径可达），**不是**"这条 hint 把 agent 带了过去"。
+  后者才是 `stable` 所主张的内容，因此该标志维持不变——
+  跑过一次真实 agent 不等于跑过的那次证明了想证明的命题。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 S31b 首次真实运行无效，工具链三处修正
+
+- Change summary: (a) `sandbox_argv` 移除 `--ignore-rules`，并把它与 `--safe-mode`
+  一起纳入"禁止出现的开关"契约测试。(b) 对照实验改为单变量（只移除 hint，
+  保留 INDEX 与哨兵）。(c) 记账由 `MAX_ITERATIONS` 改为 `CALLS_PER_RUN = N+1`，
+  并新增 `assert_turn_cap` 在启动前校验沙箱 config 的 `agent.max_turns`。
+  `hermes.yaml` 保持 `experimental`，记录该次运行为何不算数；`todo.md` M3-001 同步。
+  §9.13 更正"全仓无 `@` 展开"的过强表述。
+- Change reason: 2026-08-11 那次真实运行**不构成消费证据**，两处独立缺陷：
+  `--ignore-rules` 映射到 `skip_context_files=True`，`AGENTS.md` 从未进入 system prompt，
+  即 agent 是在**没有 hint** 的情况下返回哨兵的；对照实验又同时变动了两个因素。
+  它的有效结论是一个负面结果：带文件工具的 agent 无需 hint 也能自行找到并读取
+  `memory/team/INDEX.md`。记账缺陷同源于"假定而非校验"：迭代耗尽时还有一次收尾请求，
+  上限又写在上一条命令产生的文件里。
+  另更正一处事实错误：hermes **有** `@` 引用展开器（`agent/context_references.py`），
+  只是其模式不匹配裸路径——原先写成"全仓不存在任何 `@` 引用展开"是过强断言。
 - Change time: 2026-08-11

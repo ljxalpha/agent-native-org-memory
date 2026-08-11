@@ -266,9 +266,16 @@ def test_more_than_one_new_session_file_fails() -> None:
 # -- the argv contract ---------------------------------------------------
 
 
-def test_the_command_line_never_disables_the_thing_being_verified() -> None:
-    """`--safe-mode` implies ignoring the user config and disables instruction
-    file and memory injection outright."""
+@pytest.mark.parametrize("flag", ["--safe-mode", "--ignore-rules"])
+def test_the_command_line_never_disables_the_thing_being_verified(flag: str) -> None:
+    """Both flags switch off the injection this check exists to observe.
+
+    `--safe-mode` says so plainly. `--ignore-rules` does not: it reads like
+    hygiene, and it maps to `skip_context_files=True`, so AGENTS.md never
+    reaches the system prompt. A run carrying it cannot show a hint being
+    followed, because no hint is there to follow -- and it still produces a
+    perfectly ordinary-looking answer.
+    """
     argv = verifier.sandbox_argv(
         runtime_root=Path("/opt/rt"),
         root=Path("/run/sbx"),
@@ -277,10 +284,21 @@ def test_the_command_line_never_disables_the_thing_being_verified() -> None:
         hermes="hermes",
     )
 
-    assert "--safe-mode" not in argv
+    assert flag not in argv
     # An empty toolset argument does the opposite of what it looks like: it
     # falls back to the configured sets, meaning all of them.
     assert "-t" not in argv
+
+
+def test_the_model_and_provider_are_passed_through() -> None:
+    argv = verifier.sandbox_argv(
+        runtime_root=Path("/opt/rt"),
+        root=Path("/run/sbx"),
+        model="m",
+        provider="p",
+        hermes="hermes",
+    )
+
     assert argv[argv.index("-m") + 1] == "m"
     assert argv[argv.index("--provider") + 1] == "p"
 
@@ -355,3 +373,107 @@ def test_the_conservative_reading_is_the_default() -> None:
 
     assert verdict.evidence_basis == "sentinel"
     assert any("does not distinguish" in note for note in verdict.notes)
+
+
+# -- the control must vary exactly one thing -----------------------------
+
+
+def test_the_control_keeps_the_index_and_drops_only_the_hint(tmp_path: Path) -> None:
+    """The defect this replaced: a control that removed the hint *and* the
+    index compares "reference present, file present" against "neither".
+
+    An agent that found the file by walking the tree -- rather than by
+    following the reference -- produces exactly the passing pattern under that
+    comparison, so it could not distinguish the thing being tested from an
+    unrelated capability. The reference is what is under test, so the reference
+    is the only thing that changes.
+    """
+    adapter = REPO_ROOT / "config" / "adapters" / "hermes.yaml"
+    root = tmp_path / "sbx"
+    (root / "agentroot").mkdir(parents=True)
+
+    index_text, positive_instructions = verifier.prepare(
+        root, adapter_path=adapter, sentinel=SENTINEL, inject_hint=True
+    )
+    index = root / "agentroot" / "memory" / "team" / "INDEX.md"
+    assert SENTINEL in index.read_text(encoding="utf-8")
+    assert "@memory/team/INDEX.md" in positive_instructions
+
+    control_index, control_instructions = verifier.prepare(
+        root, adapter_path=adapter, sentinel=SENTINEL, inject_hint=False
+    )
+
+    # The index survives, byte for byte, carrying the same sentinel.
+    assert index.is_file()
+    assert control_index == index_text
+    assert SENTINEL in index.read_text(encoding="utf-8")
+    # And the reference is the one thing that is gone.
+    assert "@memory/team/INDEX.md" not in control_instructions
+
+
+# -- the cost bound has to be verified, not assumed -----------------------
+
+
+def test_a_missing_sandbox_config_refuses_to_start(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="no sandbox config"):
+        verifier.assert_turn_cap(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        'platform_toolsets:\n  cli: ["file"]\n',
+        "agent:\n  max_turns: 90\n",
+        "agent:\n  max_turns: 3\n",
+    ],
+)
+def test_a_sandbox_without_the_expected_cap_refuses_to_start(
+    tmp_path: Path, config: str
+) -> None:
+    """The cap is written by a previous command, and it is the only thing
+    bounding this check's cost. Assuming it is present is how a run costs
+    ninety calls: that is the agent's own default, and its config file outranks
+    the environment variable that looks like the limit.
+    """
+    path = tmp_path / "home" / ".hermes"
+    path.mkdir(parents=True)
+    (path / "config.yaml").write_text(config, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="max_turns"):
+        verifier.assert_turn_cap(tmp_path)
+
+
+def test_the_expected_cap_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "home" / ".hermes"
+    path.mkdir(parents=True)
+    (path / "config.yaml").write_text(
+        sandbox_module().config_yaml("file", max_turns=verifier.MAX_ITERATIONS),
+        encoding="utf-8",
+    )
+
+    verifier.assert_turn_cap(tmp_path)
+
+
+def sandbox_module() -> ModuleType:
+    path = REPO_ROOT / "scripts" / "agent_sandbox"
+    spec = importlib.util.spec_from_file_location(
+        "agent_sandbox_for_verify",
+        path,
+        loader=importlib.machinery.SourceFileLoader(
+            "agent_sandbox_for_verify", str(path)
+        ),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_charge_exceeds_the_iteration_cap_by_the_grace_call() -> None:
+    """N iterations permit N+1 requests: on exhausting its budget the agent
+    makes one further toolless request to summarise.
+
+    Charging the iteration count would under-report precisely when the cap
+    binds, which is the one situation the ledger exists for.
+    """
+    assert verifier.CALLS_PER_RUN == verifier.MAX_ITERATIONS + 1

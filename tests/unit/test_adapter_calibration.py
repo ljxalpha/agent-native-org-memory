@@ -309,25 +309,28 @@ def test_the_hermes_fixture_carries_no_real_content(tmp_path: Path) -> None:
         assert "@" not in text.replace("@memory/team/INDEX.md", "")
 
 
-def test_hermes_is_stable_only_alongside_the_evidence_and_its_limits() -> None:
-    """Promoted on a real agent run, 2026-08-11.
+def test_hermes_stays_experimental_and_says_what_is_still_missing() -> None:
+    """A real agent run on 2026-08-11 did not establish consumption, twice over:
+    it passed `--ignore-rules`, so AGENTS.md never reached the system prompt,
+    and its control removed the hint and the index together.
 
-    The status is a claim to an integrator, and this pins the claim to the two
-    things that make it checkable: what the evidence was, and what it does not
-    cover. A future edit that raises another adapter to ``stable`` by copying
-    this line has to copy the record with it.
+    The status is a claim to an integrator, so the file has to carry what was
+    tried and why it did not count. Pinned here because "we ran it against a
+    real agent" is exactly the kind of statement that gets rounded up into "and
+    it worked".
     """
-    text = (ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8")
-    config = yaml.safe_load(text)
+    raw = (ADAPTERS_DIR / "hermes.yaml").read_text(encoding="utf-8")
+    config = yaml.safe_load(raw)
+    # Comment text is line-wrapped, so it is joined before matching: an
+    # assertion that a reflow can break would get "fixed" by deleting it.
+    text = " ".join(line.lstrip("# ") for line in raw.splitlines())
 
-    assert config["support_status"] == "stable"
-    # The evidence.
-    assert "control run" in text
-    assert "no `@`-reference expansion" in text
-    # And its stated limits, which are the part a reader would otherwise assume
-    # away: no trace, one invocation, and a fact tied to one version.
-    assert "writes no session trace" in text
-    assert "one invocation against one model" in text
+    assert config["support_status"] == "experimental"
+    # Why the run did not establish consumption, in both of its ways.
+    assert "skip_context_files=True" in text
+    assert "removed the hint and the index together" in text
+    # The calibration fact the run did leave behind.
+    assert "a bare path does not match" in text
     assert "an upgrade invalidates" in text
 
 

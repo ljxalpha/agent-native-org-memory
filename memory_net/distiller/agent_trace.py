@@ -135,8 +135,11 @@ def verify_consumption(evidence: ConsumptionEvidence) -> ConsumptionVerdict:
 
     if evidence.sentinel not in evidence.positive_output:
         failures.append("sentinel absent from the agent's answer")
-    # The control is what separates "read the file" from "the sentinel leaks in
-    # by some route we did not think of".
+    # The control is what separates "followed the reference" from "found the
+    # file some other way". It must differ from the positive run in the hint
+    # alone -- the index stays, carrying the same sentinel -- because a control
+    # that also removed the index would leave an agent that searched the tree
+    # producing the passing pattern without ever following anything.
     if evidence.sentinel in evidence.control_output:
         failures.append("sentinel present in the control run, which had no hint")
 

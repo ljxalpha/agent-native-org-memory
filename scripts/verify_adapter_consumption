@@ -32,6 +32,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import yaml  # type: ignore[import-untyped]
+
 if __package__ in (None, ""):  # pragma: no cover - direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -46,12 +48,22 @@ from memory_net.shared.adapters import FileSystemMdAdapter
 SANDBOX = Path(__file__).resolve().parent / "agent_sandbox"
 
 MAX_ITERATIONS = 2
-"""Model calls one agent invocation may make, capped structurally.
+"""Tool-calling iterations one agent invocation may make.
 
 An agent in a tool loop decides how many times it calls a model, and nothing
 outside it can know the number before the calls happen. Without a cap the
 budget for this check is a hope. Two is the minimum that can succeed: one call
 to decide on the read, one to answer with what came back.
+"""
+
+CALLS_PER_RUN = MAX_ITERATIONS + 1
+"""Wire requests one invocation can make, which is *not* the iteration cap.
+
+On exhausting its iteration budget the agent makes one further, toolless
+request to summarise (`agent/turn_finalizer.py`), so N iterations permit N+1
+requests. Charging the iteration count would have under-counted every capped
+run -- the direction that makes a ledger useless, since it under-reports
+exactly when the cap binds.
 """
 
 FILE_TOOLSET = ("read_file", "search_files", "patch", "write_file")
@@ -102,9 +114,15 @@ def sandbox_argv(
     includes write tools, and a namespace that cannot be written to is a
     structural limit rather than an after-the-fact check.
 
-    ``--safe-mode`` must never appear: it implies ignoring the user config, and
-    it disables the instruction-file and memory injection outright -- which is
-    the very thing being verified.
+    Two flags must never appear, for the same reason. ``--safe-mode`` implies
+    ignoring the user config and disables instruction-file and memory injection
+    outright. ``--ignore-rules`` reads like hygiene -- "the rule files are the
+    user's, not this check's" -- and maps to ``skip_context_files=True``, so
+    AGENTS.md is never loaded into the system prompt at all. A run with it
+    cannot observe a hint being followed, because there is no hint in the
+    prompt to follow. Isolation from the user's own files is the sandbox's job
+    and is already structural: HERMES_HOME and the working directory both point
+    inside the namespace, where the user's files do not exist.
     """
     return [
         sys.executable,
@@ -126,8 +144,6 @@ def sandbox_argv(
         model,
         "--provider",
         provider,
-        # The rule files are the user's, not this check's.
-        "--ignore-rules",
     ]
 
 
@@ -135,11 +151,19 @@ def prepare(
     root: Path,
     *,
     adapter_path: Path,
-    sentinel: str | None,
+    sentinel: str,
+    inject_hint: bool,
 ) -> tuple[str, str]:
     """Set up the sandbox agent root; return ``(index_text, instructions)``.
 
-    ``sentinel=None`` builds the control: same tree, no hint, no index.
+    ``inject_hint=False`` builds the control, and the index is still written.
+
+    One variable, and which one matters. A control that dropped the hint *and*
+    the index would compare "hint present, file present" against "neither" --
+    so an agent that found the file by searching the tree, rather than by
+    following the reference, would produce exactly the passing pattern. The
+    thing under test is the reference, so the reference is the only thing that
+    changes.
     """
     agent_root = root / "agentroot"
     if agent_root.exists():
@@ -150,16 +174,37 @@ def prepare(
         "# Agent instructions\n\nFollow the references in this file.\n",
         encoding="utf-8",
     )
-    if sentinel is None:
-        return "", instructions.read_text(encoding="utf-8")
     index = agent_root / "memory" / "team" / "INDEX.md"
     index.parent.mkdir(parents=True, exist_ok=True)
     index_text = INDEX_TEMPLATE.format(sentinel=sentinel)
     index.write_text(index_text, encoding="utf-8")
-    os.environ.setdefault("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
-    adapter = FileSystemMdAdapter.from_yaml(adapter_path, agent_root=agent_root)
-    adapter.inject_team_hint(adapter.hint_config)
+    if inject_hint:
+        os.environ.setdefault("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+        adapter = FileSystemMdAdapter.from_yaml(adapter_path, agent_root=agent_root)
+        adapter.inject_team_hint(adapter.hint_config)
     return index_text, instructions.read_text(encoding="utf-8")
+
+
+def assert_turn_cap(root: Path) -> None:
+    """Refuse to start unless the sandbox config actually carries the cap.
+
+    The cap is the only thing bounding this check's cost, and it lives in a
+    file written by a *previous* command (``agent_sandbox up --max-turns``).
+    Assuming it is there is how a run costs ninety calls instead of three: the
+    agent's own default is 90, and its config file outranks the environment
+    variable that looks like the limit.
+    """
+    config = root / "home" / ".hermes" / "config.yaml"
+    if not config.is_file():
+        raise SystemExit(f"no sandbox config at {config}; run `agent_sandbox up` first")
+    loaded = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    found = (loaded.get("agent") or {}).get("max_turns")
+    if found != MAX_ITERATIONS:
+        raise SystemExit(
+            f"sandbox config declares agent.max_turns={found!r}, expected "
+            f"{MAX_ITERATIONS}; re-run `agent_sandbox up --max-turns "
+            f"{MAX_ITERATIONS}`"
+        )
 
 
 def session_files(root: Path) -> list[str]:
@@ -201,7 +246,7 @@ def run_once(argv: Sequence[str], *, ledger: AttemptLedger, run_id: str) -> str:
     counting after the money was spent. Over-counting is the safe direction:
     the ledger exists to stop a runaway, not to bill accurately.
     """
-    for index in range(MAX_ITERATIONS):
+    for index in range(CALLS_PER_RUN):
         attempt = ledger.reserve(
             kind="agent_run",
             run_id=run_id,
@@ -247,7 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     ledger = AttemptLedger()
-    needed = 2 * MAX_ITERATIONS
+    needed = 2 * CALLS_PER_RUN
     if ledger.remaining() < needed:
         raise SystemExit(
             f"refusing to start: {needed} attempts are needed and "
@@ -255,15 +300,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     run_id = f"verify-{new_sentinel()[:8]}"
 
+    assert_turn_cap(args.root)
+
     sentinel = new_sentinel()
     index_text, instructions = prepare(
-        args.root, adapter_path=args.adapter, sentinel=sentinel
+        args.root, adapter_path=args.adapter, sentinel=sentinel, inject_hint=True
     )
     before = session_files(args.root)
     positive = run_once(command, ledger=ledger, run_id=run_id)
     after = session_files(args.root)
 
-    prepare(args.root, adapter_path=args.adapter, sentinel=None)
+    # Same tree, same index, same sentinel -- only the hint is gone.
+    prepare(args.root, adapter_path=args.adapter, sentinel=sentinel, inject_hint=False)
     control = run_once(command, ledger=ledger, run_id=run_id)
 
     verdict = verify_consumption(
