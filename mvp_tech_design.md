@@ -1450,6 +1450,13 @@ append-only，配 `O_CREAT|O_EXCL` 锁文件。
 - **上限是代码常量**：`ATTEMPT_CEILING_HARD = 50`。
   `AOMT_ATTEMPT_CEILING` **只在小于该常量时生效**，大于即忽略并告警。
   把闸门交给环境变量等于没有闸：那个上限属于设置该变量的人，而不属于项目。
+  构造参数 `AttemptLedger(ceiling=…)` 走**同一条**收敛规则（`min(值, 常量)`，
+  非整数或负数即拒绝）：注入点若能绕过常量，那"硬上限"就只是默认 CLI 路径上的软上限。
+- **预留失败也必须归还 run 级预算 hold**：provider 在拿到 `RunBudget` 预扣之后才向账本预留，
+  账本的锁超时 / IO 错误如果直接向上抛，那笔预扣就永远不会被结算——
+  而 orchestrator 的 `assert_all_settled()` 在有异常在途时刻意跳过（§5.5.3），
+  于是它连报都不会报。因此预留段落包在 `try/except BaseException` 里，
+  失败即 `release(wall_s=0.0)` 后再抛：那次请求根本没发出，不该占用任何额度。
 
 ### 5.6 凭据 launcher（`memory_net/shared/env_allowlist.py` + `scripts/aomt-with-env`）
 

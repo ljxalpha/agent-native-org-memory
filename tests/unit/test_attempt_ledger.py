@@ -57,6 +57,25 @@ def test_an_unusable_ceiling_value_falls_back_to_the_constant(value: str) -> Non
     assert attempt_ceiling({CEILING_ENV_VAR: value}) == ATTEMPT_CEILING_HARD
 
 
+def test_a_constructed_ceiling_cannot_exceed_the_constant(tmp_path: Path) -> None:
+    """The injection point exists for tests, not for headroom: a ceiling the
+    constructor can raise is a limit on one code path, not on the project."""
+    ledger = AttemptLedger(tmp_path / "l.jsonl", ceiling=999)
+
+    assert ledger.ceiling == ATTEMPT_CEILING_HARD
+
+
+def test_a_constructed_ceiling_may_still_be_lower(tmp_path: Path) -> None:
+    assert AttemptLedger(tmp_path / "l.jsonl", ceiling=3).ceiling == 3
+
+
+@pytest.mark.parametrize("value", [-1, True, 2.5, "5"])
+def test_an_unusable_constructed_ceiling_is_refused(value: Any, tmp_path: Path) -> None:
+    """Refused rather than coerced: ``ceiling=True`` reads as one attempt."""
+    with pytest.raises(LedgerError):
+        AttemptLedger(tmp_path / "l.jsonl", ceiling=value)
+
+
 def test_the_ledger_path_follows_the_environment(tmp_path: Path) -> None:
     assert default_ledger_path({LEDGER_ENV_VAR: str(tmp_path / "l.jsonl")}) == (
         tmp_path / "l.jsonl"
@@ -321,6 +340,33 @@ def test_a_refused_attempt_leaves_no_unsettled_run_budget(tmp_path: Path) -> Non
     with pytest.raises(BudgetExhausted):
         provider.generate(_request())
 
+    budget.assert_all_settled()
+
+
+def test_a_broken_ledger_leaves_no_unsettled_run_budget(tmp_path: Path) -> None:
+    """A ledger that cannot be written is not a refusal but a fault, and the
+    hold taken one line earlier still has to be given back -- the orchestrator
+    skips its leaked-reservation check while an exception is propagating."""
+    from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
+    from memory_net.distiller.runctx import RunBudget
+
+    class _BrokenLedger(AttemptLedger):
+        def reserve(self, *, kind: str, run_id: str, **facts: str) -> Any:
+            raise LedgerError("the ledger lock is held")
+
+    budget = RunBudget(input_per_mtok_usd=0.6, output_per_mtok_usd=2.4, max_usd=10.0)
+    client = _CountingClient()
+    provider = OpenAICompatProvider(
+        client=client,
+        ledger=_BrokenLedger(tmp_path / "l.jsonl", ceiling=5),
+        model="m",
+        budget=budget,
+    )
+
+    with pytest.raises(LedgerError):
+        provider.generate(_request())
+
+    assert client.requests == 0
     budget.assert_all_settled()
 
 

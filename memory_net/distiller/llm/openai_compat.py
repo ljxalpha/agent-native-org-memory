@@ -180,7 +180,16 @@ class OpenAICompatProvider(LLMProvider):
             # The project ledger, after the run budget and before the request:
             # one entry per attempt, which is exactly what this loop multiplies
             # and what the endpoint bills (§5.5.14).
-            ledger_attempt = self._reserve_attempt(request, model=model)
+            try:
+                ledger_attempt = self._reserve_attempt(request, model=model)
+            except BaseException:
+                # A ledger lock timeout, an IO error or an interrupt here would
+                # otherwise strand the run-budget hold taken one line above --
+                # and the orchestrator skips assert_all_settled() while an
+                # exception is in flight, so nothing would ever report it.
+                if reservation is not None:
+                    reservation.release(wall_s=0.0)
+                raise
             if ledger_attempt is _REFUSED:
                 if reservation is not None:
                     # Provably not executed: the request never went out.

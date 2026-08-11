@@ -83,6 +83,22 @@ def attempt_ceiling(environ: Mapping[str, str] | None = None) -> int:
     return requested
 
 
+def _clamped(ceiling: int) -> int:
+    """An explicitly supplied ceiling, never above the constant."""
+    if isinstance(ceiling, bool) or not isinstance(ceiling, int):
+        raise LedgerError(f"attempt ceiling must be an int, got {ceiling!r}")
+    if ceiling < 0:
+        raise LedgerError(f"attempt ceiling cannot be negative, got {ceiling}")
+    if ceiling > ATTEMPT_CEILING_HARD:
+        LOGGER.warning(
+            "requested attempt ceiling %s is above the hard ceiling %s and is "
+            "clamped to it",
+            ceiling,
+            ATTEMPT_CEILING_HARD,
+        )
+    return min(ceiling, ATTEMPT_CEILING_HARD)
+
+
 def default_ledger_path(environ: Mapping[str, str] | None = None) -> Path:
     environ = os.environ if environ is None else environ
     override = environ.get(LEDGER_ENV_VAR)
@@ -114,7 +130,13 @@ class AttemptLedger:
     ) -> None:
         environ = os.environ if environ is None else environ
         self.path = path or default_ledger_path(environ)
-        self.ceiling = attempt_ceiling(environ) if ceiling is None else ceiling
+        # An injected ceiling is clamped by the same constant the environment
+        # variable is: a construction argument that could raise it would make
+        # ATTEMPT_CEILING_HARD a limit on one code path rather than on the
+        # project, and the injection point exists for tests, not for headroom.
+        self.ceiling = (
+            attempt_ceiling(environ) if ceiling is None else _clamped(ceiling)
+        )
         # The one sanctioned clock in the distiller package. The ledger's own
         # timestamps are audit metadata and never reach a product, but reading
         # the clock a second way here would be a second clock all the same.
