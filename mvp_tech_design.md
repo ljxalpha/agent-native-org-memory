@@ -893,8 +893,25 @@ wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直�
   **不依赖 `__del__`**：析构时机不确定，不是可靠的检测点。
 - `snapshot() -> dict` 供 metrics，键集合稳定。
 
-`RunBudget` 是**单一预算真相源**：`DistillationPipeline` 原有的 `cost_budget_usd` 自累加闸
-在 `context.budget` 存在时完全委托给它，不再自行累加，避免同一个 run 出现两套互不知情的闸。
+**两道闸并存，各管一段，不是同一条规则的重复**（这条曾被写成"`context.budget` 存在时
+pipeline 完全委托给它"，与实现不符，已按实现订正）：
+
+| 闸 | 位置 | 时机 | 覆盖面 |
+|---|---|---|---|
+| `RunBudget.reserve()` | provider | **调用之前** | 会预扣的 lane；能拦住"这一次调用就超额"，也算得进重试与超时的成本 |
+| `cost_budget_usd` 累加器 | `DistillationPipeline` | **调用之后** | 全部 lane；只对**已返回**的调用累加，因此永远慢一次 |
+
+两者用同一份 profile 定价与同一个 `budget_usd`，各自独立记账，**不互相叠加计费**；
+累加器恒生效（不因注入了 `RunBudget` 就关闭），它是"任何 lane 都至少有个兜底"的保证。
+
+**会花钱但自己不预扣的 lane 必须由 `BudgetedProvider` 包起来**
+（`memory_net/distiller/llm/budgeted.py`）：它在委托之前 `reserve()`、返回后结算，
+从而把"调用前拦截"这条性质补给 `anthropic` 与 `hermes_tool`。没有它，这两条 lane
+在触顶前总能先发出一次超额调用，而重试与超时的花费累加器根本看不见。
+结算规则与生产后端一致：`usage_source == "reported"` 才 `settle`，否则 `settle_unknown`
+（不回补），异常路径按 `BaseException` 兜底 `settle_unknown`。
+**`mock` lane 不包**——它不花钱，把它计入 `budget_usd` 会让出厂默认 profile 饿死自己的确定性 run；
+`deepseek` 也不包，它自己就预扣，再包一层等于双重预扣。
 
 #### 5.5.3 消费方的注入契约与"禁止自读时钟"
 
