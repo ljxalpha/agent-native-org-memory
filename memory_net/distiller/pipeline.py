@@ -465,6 +465,7 @@ class DistillationPipeline:
             return SKIPPED_BUDGET
         calls_before = tally.clusters_attempted
         payloads: list[dict[str, Any]] = []
+        refused = False
         for chunk in self._split_cluster(cluster_records):
             outcome = self._chunk_payload(
                 chunk,
@@ -488,11 +489,18 @@ class DistillationPipeline:
                 # A gate refused before the call went out -- the run budget, or
                 # the cross-run attempt ceiling. Respect the refusal rather than
                 # re-deriving it: every later cluster is refused the same way.
+                #
+                # Whatever earlier sub-prompts produced is dropped with it. A
+                # product rendered from part of a split cluster cites part of
+                # its evidence while being indistinguishable downstream from one
+                # that saw the whole -- the same reason a parse failure fails the
+                # cluster rather than the chunk.
+                refused = True
                 break
             if outcome.parsed is not None:
                 payloads.append(outcome.parsed)
         _note_prompted(tally, calls_before)
-        if not payloads:
+        if refused or not payloads:
             tally.skipped_clusters += 1
             return SKIPPED_BUDGET
         parsed = payloads[0] if len(payloads) == 1 else _merge_payloads(payloads)

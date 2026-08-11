@@ -137,7 +137,13 @@ def test_per_cluster_ceiling_skips_only_that_cluster(tmp_path: Path) -> None:
     # First cluster: sub-prompt one runs, sub-prompt two is refused. Second
     # cluster still runs -- the run did not stop.
     assert provider.calls == ["leaf-a-mem-1", "leaf-a-mem-3"]
-    assert len(output.products) == 2
+    # The refused cluster publishes nothing: what its first sub-prompt returned
+    # would be a product citing half its cluster, indistinguishable from one
+    # that saw all of it.
+    assert len(output.products) == 1
+    assert output.cluster_terminal_counts is not None
+    assert output.cluster_terminal_counts["skipped_budget"] == 1
+    assert output.cluster_terminal_counts["distilled"] == 1
     assert budget.spent_usd == pytest.approx(4e-3)
 
 
