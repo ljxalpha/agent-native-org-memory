@@ -785,6 +785,39 @@ wall-clock 同样按上界预扣：剩余时间不足 `timeout_s_upper` 时直�
 `RunBudget` 是**单一预算真相源**：`DistillationPipeline` 原有的 `cost_budget_usd` 自累加闸
 在 `context.budget` 存在时完全委托给它，不再自行累加，避免同一个 run 出现两套互不知情的闸。
 
+#### 5.5.3 消费方的注入契约与"禁止自读时钟"
+
+`DistillationPipeline` 与 `DistillOrchestrator` 各**只**接受一个新构造参数
+`context: RunContext | None = None`。此后**所有** run 级特性都通过给 `RunContext`
+填字段抵达运行期，**不再新增构造参数**——否则消费方签名会随特性数量线性膨胀，
+而每加一个参数都要同步改 `cli.py`。
+
+- `context=None` 时，两者的行为与注入能力存在之前**逐字段一致**：自造 run_id、
+  自读时钟、沿用既有的 `cost_budget_usd` 闸。这是每个子任务都能独立合并的前提。
+- `context.identity` 存在时，`run_id` 与所有时间戳（`generated_at` / `updated_at` /
+  `snapshot.json` 的时间字段）**全部**取自它。`content_hash` 由含 `generated_at` 的正文派生，
+  因此只要冻结 identity，两次 run 的产物与 manifest 就逐字节一致。
+- `context.budget` 存在时，pipeline **不再自行累加成本做闸**：额度由 budget 在
+  `reserve()` 里拒绝，pipeline 只负责尊重这个拒绝（捕获 `BudgetExhausted`，
+  把该 cluster 计入 `skipped_clusters`）。这是"单一预算真相源"的实现方式——
+  让 pipeline 自己再算一遍剩余额度，等于把预算规则复制成两份，它们迟早会漂移。
+  `estimated_cost_usd` 仍照常统计并写进 metrics，它只是**观测值**，不再是闸。
+- `context.profile` 的落盘（`snapshot.json` / `metrics.json` 追加
+  `profile_path` / `profile_blob_sha256` / `master_snapshot_sha`）与
+  `ProfileProvenance` 类型本身同批交付：在生产者存在之前，消费侧只能对着一个
+  尚未定义的类型做鸭子类型取值，那样写出来的既非契约也不可回归。
+
+**禁止任何模块自读时钟或自造 run id**（`runctx.py` 这个唯一的默认工厂除外）。
+由结构性负向测试用 AST 扫描 `memory_net/distiller/` 全部模块守住：
+出现 `datetime.now` / `datetime.utcnow` / `AOMT_FROZEN*` 环境变量读取即失败。
+理由不是风格，而是可复现性：只要有一个模块自己读时钟，"注入固定 identity 后
+两次 run 逐字节一致"就不再成立，而这种偏差在运行期几乎不可能被发现。
+同理**禁止用环境变量做冻结开关**——冻结只通过注入实现，否则等于给防篡改设计开一个后门。
+
+`uuid.uuid4` 的禁令带一条**具名白名单**：`orchestrator._write_team_products` 用它拼临时
+目录名（与 `os.getpid()` 一起保证并发唯一），该值不进入任何产物、manifest 或 metrics。
+白名单按"模块 + 函数"逐条具名，新模块因此无法悄悄混入一处自造 id。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区

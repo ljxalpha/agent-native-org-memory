@@ -7,15 +7,12 @@ from typing import Any
 
 import pytest
 
-import memory_net.distiller.orchestrator as orchestrator_module
+import memory_net.distiller.runctx as runctx_module
 from memory_net.distiller.llm.base import LLMResponse
 from memory_net.distiller.llm.mock import MockLLMProvider
-from memory_net.distiller.orchestrator import (
-    DistillOrchestrator,
-    SupersededRunError,
-    _new_run_id,
-)
+from memory_net.distiller.orchestrator import DistillOrchestrator, SupersededRunError
 from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
+from memory_net.distiller.runctx import RunIdentity
 from memory_net.leaf.health import build_health
 from memory_net.shared.config import canonical_generation_hash
 from memory_net.shared.models import TeamProduct
@@ -73,6 +70,12 @@ def test_orchestrator_marks_tombstone_when_product_disappears(tmp_path: Path) ->
 
 
 def test_new_run_id_is_unique_with_same_timestamp(monkeypatch: Any) -> None:
+    """Two runs starting in the same second must not share a run id.
+
+    The generator now lives in runctx: the orchestrator is not allowed to mint
+    one of its own (§5.5.3).
+    """
+
     class FixedDatetime:
         @classmethod
         def now(cls, tz: Any) -> datetime:
@@ -85,11 +88,11 @@ def test_new_run_id_is_unique_with_same_timestamp(monkeypatch: Any) -> None:
         def hex(self) -> str:
             return next(suffixes)
 
-    monkeypatch.setattr(orchestrator_module, "datetime", FixedDatetime)
-    monkeypatch.setattr(orchestrator_module.uuid, "uuid4", FixedUuid)
+    monkeypatch.setattr(runctx_module, "datetime", FixedDatetime)
+    monkeypatch.setattr(runctx_module.uuid, "uuid4", FixedUuid)
 
-    assert _new_run_id() == "20260505T120000Z-aaaaaaaa"
-    assert _new_run_id() == "20260505T120000Z-bbbbbbbb"
+    assert RunIdentity.system().run_id == "20260505T120000Z-aaaaaaaa"
+    assert RunIdentity.system().run_id == "20260505T120000Z-bbbbbbbb"
 
 
 def test_orchestrator_quarantines_memory_id_collision_across_leaves(

@@ -9,7 +9,6 @@ import uuid
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +19,7 @@ from memory_net.distiller.metrics import (
 )
 from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
 from memory_net.distiller.provenance import RunProvenance
+from memory_net.distiller.runctx import RunContext, RunIdentity
 from memory_net.shared.git_io import GitError, GitRepo
 from memory_net.shared.paths import (
     MASTER_ALLOWED_EXACT_PATHS,
@@ -67,6 +67,7 @@ class DistillOrchestrator:
         frozen_master_snapshot_sha: str | None = None,
         record_bundle_dir: Path | None = None,
         replay_mode: str = "live",
+        context: RunContext | None = None,
     ) -> None:
         self.repo_path = repo_path
         self.pipeline = pipeline
@@ -78,12 +79,25 @@ class DistillOrchestrator:
         # master path whitelist. replay_mode labels this run for metrics.json.
         self.record_bundle_dir = record_bundle_dir
         self.replay_mode = replay_mode
+        # The single injection carrier (§5.5.3). None keeps the pre-injection
+        # behaviour: a freshly generated run id and the wall clock.
+        self.context = context
+        self._identity: RunIdentity = RunIdentity.system()
         self.repo = GitRepo(repo_path, dry_run=dry_run, no_push=no_push)
         self.leaf_refs: dict[str, str] = {}
         self.leaf_health_by_branch: dict[str, dict[str, Any]] = {}
         self.id_collisions = 0
         self.incompatible_leaves = 0
         self.quarantined_records = 0
+
+    def _resolve_identity(self) -> RunIdentity:
+        """The run's id and clock: injected if present, wall clock otherwise."""
+        injected = self.context.identity if self.context is not None else None
+        return injected if injected is not None else RunIdentity.system()
+
+    def _now(self) -> str:
+        """This run's clock. Never ``datetime.now`` directly (§5.5.3)."""
+        return self._identity.now()
 
     def run(self) -> OrchestratorResult:
         started = time.monotonic()
@@ -114,7 +128,10 @@ class DistillOrchestrator:
         started: float,
         snapshot_sha: str,
     ) -> OrchestratorResult:
-        run_id = _new_run_id()
+        # Resolved per run, not per instance: without an injected identity each
+        # run must still get its own id, exactly as before injection existed.
+        self._identity = self._resolve_identity()
+        run_id = self._identity.run_id
         records: list[dict[str, Any]] = []
         # Bound before the try so a failure *after* distillation succeeded still
         # reports this run's real provenance. Anything else would contradict the
@@ -173,6 +190,13 @@ class DistillOrchestrator:
                     output=output,
                 )
             raise
+        finally:
+            # Explicit, and in a finally: a reservation that never reached a
+            # terminal state means an attempt's cost was silently dropped from
+            # the run's ceiling. __del__ would be too late and too uncertain.
+            budget = self.context.budget if self.context is not None else None
+            if budget is not None:
+                budget.assert_all_settled()
         return OrchestratorResult(
             run_id=run_id,
             input_records=len(records),
@@ -347,7 +371,7 @@ class DistillOrchestrator:
         duration_seconds: float,
         output: DistillationOutput | None = None,
     ) -> None:
-        now = _utc_now()
+        now = self._now()
         health = {
             "schema_version": "memory-net/health/v1",
             "node_id": "distiller",
@@ -666,7 +690,7 @@ class DistillOrchestrator:
         previous_tombstones = _manifest_products_mapping(
             previous_manifest.get("products_tombstones") or {}
         )
-        now = _utc_now()
+        now = self._now()
         products_tombstones = previous_tombstones | {
             distillation_id: {
                 "deleted_at": now,
@@ -721,7 +745,7 @@ class DistillOrchestrator:
         }
 
     def _write_health(self, run_id: str, input_records: int, products: int) -> None:
-        now = _utc_now()
+        now = self._now()
         recent_errors: list[str] = []
         if self.incompatible_leaves:
             recent_errors.append(f"incompatible leaves: {self.incompatible_leaves}")
@@ -1226,15 +1250,6 @@ def _distill_gate_error(output: DistillationOutput) -> str | None:
     if not failures:
         return None
     return "distill quality gate failed: " + "; ".join(failures)
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _new_run_id() -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
 def _copy_frozen_artifacts(source_repo: Path, target_repo: Path) -> None:

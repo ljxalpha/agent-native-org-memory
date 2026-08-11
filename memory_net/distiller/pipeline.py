@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,12 @@ from memory_net.distiller.clustering.embedder import FastEmbedder
 from memory_net.distiller.conflict import CONFLICT_MARKER, normalize_conflicts
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
 from memory_net.distiller.provenance import RunProvenance, aggregate
+from memory_net.distiller.runctx import (
+    BudgetExhausted,
+    RunBudget,
+    RunContext,
+    utc_now,
+)
 from memory_net.shared.models import TeamProduct
 from memory_net.shared.util.frontmatter import render_frontmatter
 from memory_net.shared.util.hashing import short_hash
@@ -75,6 +81,7 @@ class DistillationPipeline:
         categories: list[str] | None = None,
         min_citations_by_category: dict[str, int] | None = None,
         min_contributors_by_category: dict[str, int] | None = None,
+        context: RunContext | None = None,
     ) -> None:
         self.provider = provider
         self.fallback_provider = fallback_provider
@@ -83,6 +90,10 @@ class DistillationPipeline:
         self.user_prompt_path = user_prompt_path
         self.model = model
         self.max_tokens = max_tokens
+        # The single injection carrier (§5.5.3): every later run-level feature
+        # arrives as a field on it, never as another constructor parameter.
+        # None keeps the pre-injection behaviour field for field.
+        self.context = context
         self.cost_budget_usd = cost_budget_usd
         self.input_cost_per_mtok_usd = input_cost_per_mtok_usd
         self.output_cost_per_mtok_usd = output_cost_per_mtok_usd
@@ -146,13 +157,21 @@ class DistillationPipeline:
                 skipped_clusters += 1
                 continue
             clusters_attempted += 1
-            response = self._generate_cluster(
-                self.provider,
-                system_prompt=system_prompt,
-                template=template,
-                records=cluster_records,
-                run_id=run_id,
-            )
+            try:
+                response = self._generate_cluster(
+                    self.provider,
+                    system_prompt=system_prompt,
+                    template=template,
+                    records=cluster_records,
+                    run_id=run_id,
+                )
+            except BudgetExhausted:
+                # The run budget refused before the call went out. Respect the
+                # refusal rather than re-deriving it: this cluster is skipped,
+                # and every later one will be refused the same way.
+                clusters_attempted -= 1
+                skipped_clusters += 1
+                continue
             call_responses.append(response)
             estimated_cost_usd += self._estimate_response_cost(response)
             input_tokens += int(response.usage.get("input_tokens", 0))
@@ -170,13 +189,21 @@ class DistillationPipeline:
                     skipped_clusters += 1
                     continue
                 fallback_attempts += 1
-                fallback_response = self._generate_cluster(
-                    self.fallback_provider,
-                    system_prompt=system_prompt,
-                    template=template,
-                    records=cluster_records,
-                    run_id=run_id,
-                )
+                try:
+                    fallback_response = self._generate_cluster(
+                        self.fallback_provider,
+                        system_prompt=system_prompt,
+                        template=template,
+                        records=cluster_records,
+                        run_id=run_id,
+                    )
+                except BudgetExhausted:
+                    # The shared budget is spent: the primary lane's calls have
+                    # already consumed what the fallback would have needed.
+                    fallback_attempts -= 1
+                    parse_failures += 1
+                    skipped_clusters += 1
+                    continue
                 call_responses.append(fallback_response)
                 estimated_cost_usd += self._estimate_response_cost(fallback_response)
                 input_tokens += int(fallback_response.usage.get("input_tokens", 0))
@@ -209,6 +236,7 @@ class DistillationPipeline:
                         set(self.categories) if self.categories else None
                     ),
                     seen_topics=seen_topics,
+                    now=self._now,
                 )
             except EvidenceRuleRejection:
                 evidence_rule_rejections += 1
@@ -304,9 +332,27 @@ class DistillationPipeline:
         )
 
     def _budget_exhausted(self, estimated_cost_usd: float) -> bool:
+        """The legacy self-accounting gate; used only when no budget is injected.
+
+        With ``context.budget`` present this always yields ``False``: the run
+        budget refuses an over-ceiling call itself, inside ``reserve()``, before
+        the request goes out. Keeping a second gate here would mean two copies
+        of the budget rules, free to drift apart, deciding the same question.
+        """
+        if self.run_budget is not None:
+            return False
         if self.cost_budget_usd is None:
             return False
         return estimated_cost_usd >= self.cost_budget_usd
+
+    @property
+    def run_budget(self) -> RunBudget | None:
+        return self.context.budget if self.context is not None else None
+
+    def _now(self) -> str:
+        """The run's clock: injected identity first, wall clock otherwise."""
+        identity = self.context.identity if self.context is not None else None
+        return identity.now() if identity is not None else utc_now()
 
     def _estimate_response_cost(self, response: LLMResponse) -> float:
         input_tokens = int(response.usage.get("input_tokens", 0))
@@ -505,6 +551,7 @@ def render_products(
     min_contributors_by_category: dict[str, int] | None = None,
     allowed_categories: set[str] | None = None,
     seen_topics: set[tuple[str, str]] | None = None,
+    now: Callable[[], str] | None = None,
 ) -> list[TeamProduct]:
     records_by_id = {str(record["memory_id"]): record for record in records}
     min_citations_by_category = {
@@ -516,7 +563,10 @@ def render_products(
         for category, value in (min_contributors_by_category or {}).items()
     }
     seen_topics = seen_topics if seen_topics is not None else set()
-    generated_at = _utc_now()
+    # The run's clock, not this module's: ``generated_at`` feeds the product
+    # body, whose hash feeds the manifest, so a stray clock read here is
+    # enough to make two runs of identical input differ.
+    generated_at = now() if now is not None else utc_now()
     products: list[TeamProduct] = []
     pending_topics: set[tuple[str, str]] = set()
     for index, raw in enumerate(parsed["products"], start=start_index):
@@ -660,10 +710,6 @@ def _render_body(
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "common"
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _raw_decode_object(text: str) -> dict[str, Any]:
