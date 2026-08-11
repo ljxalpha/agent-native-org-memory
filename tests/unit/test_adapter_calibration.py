@@ -104,6 +104,13 @@ def test_codex_excludes_git_repo_sqlite_and_lock(
     """codex shared root must not leak the git repo, sqlite, or lock files.
 
     Mirrors that ~/.codex/memories/ is itself a git repo with a sqlite sidecar.
+
+    What actually rejects each of these is worth stating, because the config
+    reads as if ``exclude`` did all of it: the sqlite and ``.lock`` siblings are
+    dropped by ``include: ["**/*.md"]`` before any exclusion runs, and the file
+    under ``.git/`` is dropped by the hidden-path skip. The ``exclude`` entries
+    are declared cover for a future config that widens ``include``, so this test
+    pins the collection boundary, not the exclusion machinery.
     """
     monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
     agent_root = tmp_path / "agent"
@@ -127,9 +134,12 @@ def test_hermes_excludes_sibling_lock_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """hermes shared root reads md but excludes the sibling *.lock files.
+    """hermes shared root reads md and leaves the sibling *.lock files behind.
 
     Mirrors that ~/.hermes/memories/ holds MEMORY.md alongside MEMORY.md.lock.
+    The ``.lock`` files are excluded from the collection surface by
+    ``include: ["**/*.md"]``, not by the yaml's ``**/*.lock`` entry, which never
+    executes while ``include`` stays markdown-only.
     """
     monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
     agent_root = tmp_path / "agent"

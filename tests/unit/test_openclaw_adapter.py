@@ -21,6 +21,7 @@ import pytest
 import yaml  # type: ignore[import-untyped]
 
 from memory_net.shared.adapters import FileSystemMdAdapter
+from memory_net.shared.adapters.filesystem_md import _is_hidden_path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_YAML = REPO_ROOT / "config" / "adapters" / "openclaw.yaml"
@@ -135,20 +136,24 @@ def test_native_store_and_dotenv_are_denied_before_exclude_is_consulted(
 ) -> None:
     """The sqlite store and ``.env`` are stopped, but not by ``exclude``.
 
-    Naming the actual mechanism matters: believing ``exclude`` is what guards
-    them would make it safe-looking to widen ``file_pattern`` later, which is
-    precisely when the real guards fall away. The layers, in the order the
+    Naming the operative mechanism matters: believing ``exclude`` is what guards
+    them would make it safe-looking to widen the collection surface later, which
+    is precisely when the real guard falls away. The layers, in the order the
     collector applies them:
 
-      1. position — both live *outside* ``${AGENT_ROOT}/memory/shared``, so the
-         configured glob never enumerates them at all;
-      2. ``file_pattern: "*.md"`` — a stray ``main.sqlite`` copied *into* the
-         managed root is rejected on its name, before ``exclude`` is reached;
-      3. the hidden-path skip — a stray ``.env`` is rejected as a dotfile, also
-         before ``exclude`` is reached.
+      1. position — both live *outside* ``${AGENT_ROOT}/memory/shared``, so
+         nothing under the managed root refers to them at all;
+      2. the ``include`` glob ``**/*.md`` — this is the operative gate for a
+         stray copy placed *inside* the managed root. ``Path.glob`` never
+         enumerates ``main.sqlite`` or ``.env``, so neither reaches any later
+         filter;
+      3. behind it, ``file_pattern: "*.md"`` and the hidden-path skip would
+         reject them too — redundant today, load-bearing only if ``include``
+         were widened.
 
-    ``exclude`` still lists both, as declared defence for a future config that
-    widens ``file_pattern``; that intent is asserted separately from behaviour.
+    ``exclude`` lists both purely as declared defence for a config that widens
+    ``include``; that intent is asserted separately from behaviour, because a
+    pattern that never executes must not be counted as an enforced control.
     """
     agent_root = _materialize_install(tmp_path / "openclaw")
     shared = agent_root / "memory" / "shared"
@@ -166,15 +171,22 @@ def test_native_store_and_dotenv_are_denied_before_exclude_is_consulted(
     assert not _is_within(dotenv, shared_root.base_dir)
     assert not _is_within(agent_root.parent / "credentials", shared_root.base_dir)
 
-    # --- layers 2 and 3: stray copies inside the managed root ---------------
+    # --- layer 2: stray copies inside the managed root ----------------------
     (shared / "main.sqlite").write_text("", encoding="utf-8")
     (shared / ".env").write_text("TOKEN=sample\n", encoding="utf-8")
 
     records = list(adapter.list_shared())
 
     assert [r.source_locator for r in records] == ["openclaw-shared:keep.md"]
-    assert adapter.file_pattern == "*.md"  # layer 2
-    assert (shared / ".env").name.startswith(".")  # layer 3
+    # The operative gate, asserted directly: the include glob does not enumerate
+    # either file, so no later filter — exclude included — gets a say.
+    enumerated = set()
+    for pattern in shared_root.include:
+        enumerated |= {p.name for p in shared_root.base_dir.glob(pattern)}
+    assert enumerated == {"keep.md"}
+    # --- layer 3: the redundant filters behind it ---------------------------
+    assert adapter.file_pattern == "*.md"
+    assert _is_hidden_path(Path(".env"))
     # Declared-only intent, kept honest by living apart from the behaviour above.
     assert {"**/*.sqlite*", ".env"} <= set(shared_root.exclude)
 
