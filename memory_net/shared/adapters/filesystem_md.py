@@ -4,11 +4,13 @@ import fcntl
 import fnmatch
 import hashlib
 import os
+import re
 import shutil
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -391,36 +393,65 @@ def _content_hash(content: str) -> str:
 def _exclude_matches(rel: str, pattern: str) -> bool:
     """Match a base_dir-relative posix path against one exclude pattern.
 
-    ``include`` is evaluated by :meth:`pathlib.Path.glob`, where ``**/`` means
-    "zero or more path segments" *wherever it appears*. ``fnmatch`` disagrees: it
-    translates ``**/`` into a form that has to consume a real separator, so
-    ``**/draft/**`` matches ``a/draft/x.md`` but not the top-level ``draft/x.md``,
-    and ``foo/**/draft/**`` matches ``foo/a/draft/x.md`` but not ``foo/draft/x.md``.
-    Left as-is the two sides drift, and the drift is unsafe in one direction only —
-    a directory an adapter explicitly excluded would still be collected and handed
-    to the distiller.
+    ``include`` is evaluated by :meth:`pathlib.Path.glob`; ``exclude`` has to mean
+    the same thing, or an adapter author gets a different answer from the same
+    glob depending on which list they wrote it in. Plain :mod:`fnmatch` gives two
+    different answers, in both directions:
 
-    So every ``**/`` is expanded into both of its readings and the path is matched
-    against each. Doing it here rather than in each adapter YAML is deliberate:
-    spelling both ``draft/**`` and ``**/draft/**`` in a config would paper over the
-    same defect and the next adapter would reintroduce it.
+    * ``**/`` there must consume a real separator, so ``**/draft/**`` misses the
+      top-level ``draft/x.md`` and ``foo/**/draft/**`` misses ``foo/draft/x.md``.
+      That direction **under**-excludes — a directory the adapter explicitly
+      denied is still collected and handed to the distiller.
+    * ``*`` there crosses ``/``, so ``**/*.sqlite*`` also swallows
+      ``archive.sqlite/keep.md``. That direction **over**-excludes — a legitimate
+      team note silently disappears from the collection.
+
+    So the pattern is compiled to a path-segment-aware regex instead: ``**/`` is
+    zero or more segments, a trailing ``**`` is the rest of the path, and ``*``
+    and ``?`` stay inside one segment. Doing it here rather than in each adapter
+    YAML is deliberate — spelling both ``draft/**`` and ``**/draft/**`` in a config
+    would paper over the gap and the next adapter would reintroduce it.
     """
-    return any(
-        fnmatch.fnmatch(rel, variant) for variant in _zero_segment_variants(pattern)
-    )
+    return _compile_glob(pattern).match(rel) is not None
 
 
-def _zero_segment_variants(pattern: str) -> list[str]:
-    """Expand each ``**/`` in ``pattern`` into its present and absent readings."""
-    index = pattern.find("**/")
-    if index == -1:
-        return [pattern]
-    head, tail = pattern[:index], pattern[index + 3 :]
-    variants: list[str] = []
-    for rest in _zero_segment_variants(tail):
-        variants.append(f"{head}**/{rest}")
-        variants.append(f"{head}{rest}")
-    return variants
+@lru_cache(maxsize=512)
+def _compile_glob(pattern: str) -> re.Pattern[str]:
+    """Compile one relative glob into a fullmatch regex with POSIX path semantics.
+
+    Character classes (``[abc]``, ``[!abc]``) are passed through so the supported
+    syntax stays a superset of what adapter configs already use.
+    """
+    parts: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            parts.append("(?:[^/]+/)*")
+            index += 3
+        elif pattern.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        elif pattern[index] == "[":
+            close = pattern.find("]", index + 2)
+            if close == -1:  # unterminated class: treat the bracket literally
+                parts.append(re.escape("["))
+                index += 1
+                continue
+            body = pattern[index + 1 : close]
+            if body.startswith("!"):
+                body = f"^{body[1:]}"
+            parts.append(f"[{body}]")
+            index = close + 1
+        else:
+            parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("".join(parts) + r"\Z")
 
 
 def _is_hidden_path(path: Path) -> bool:

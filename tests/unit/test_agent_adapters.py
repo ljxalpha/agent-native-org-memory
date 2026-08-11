@@ -151,10 +151,15 @@ def test_calibration_allowlist_is_backed_by_tests() -> None:
         )
 
 
-def _adapters_loaded_by(module: Path) -> set[str]:
-    """Adapter names passed as a literal argument to a call in ``module``.
+LOADER_NAMES = frozenset({"_load", "from_yaml"})
 
-    Covers both spellings the calibration module uses: its ``_load("<name>", ...)``
+
+def _adapters_loaded_by(module: Path) -> set[str]:
+    """Adapter names passed as a literal argument to a *loader* call in ``module``.
+
+    The callee is checked, not just the argument: crediting every literal string
+    anywhere in the file would let a bare ``assert "codex"`` satisfy the ratchet.
+    Covers both spellings the calibration module uses — its ``_load("<name>", ...)``
     helper and a direct ``from_yaml`` on ``<name>.yaml``.
     """
     tree = ast.parse(module.read_text(encoding="utf-8"))
@@ -162,7 +167,17 @@ def _adapters_loaded_by(module: Path) -> set[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        for argument in node.args:
+        callee = node.func
+        if isinstance(callee, ast.Attribute):
+            called = callee.attr
+        elif isinstance(callee, ast.Name):
+            called = callee.id
+        else:
+            continue
+        if called not in LOADER_NAMES:
+            continue
+        arguments = list(node.args) + [kw.value for kw in node.keywords]
+        for argument in arguments:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                 names.add(argument.value.removesuffix(".yaml"))
     return names
@@ -241,3 +256,35 @@ team_target: "${AGENT_ROOT}/memory/team"
 
     assert [r.source_locator for r in records] == [f"shared:foo/{middle}keep.md"]
     assert all("not ready" not in r.content for r in records)
+
+
+def test_exclude_wildcards_do_not_cross_directory_separators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``*`` in an exclude stays inside one path segment.
+
+    The other half of the include/exclude contract, and the one that fails
+    silently in the opposite direction: under plain fnmatch semantics ``*``
+    crosses ``/``, so openclaw's ``**/*.sqlite*`` would also swallow
+    ``archive.sqlite/keep.md`` — a legitimate team note vanishing from the
+    collection with nothing logged. Over-exclusion is not the safe failure mode
+    here; it is data loss that no one is told about.
+    """
+    monkeypatch.setenv("MEMORY_NET_ALLOW_EXPERIMENTAL_ADAPTER", "1")
+    agent_root = tmp_path / "openclaw"
+    directory = agent_root / "memory" / "shared" / "archive.sqlite"
+    directory.mkdir(parents=True)
+    (directory / "keep.md").write_text("team-facing note\n", encoding="utf-8")
+    # Same rule, genuinely firing: a markdown file whose own name matches.
+    (directory.parent / "main.sqlite.md").write_text("denied\n", encoding="utf-8")
+
+    adapter = FileSystemMdAdapter.from_yaml(
+        ADAPTERS_DIR / "openclaw.yaml",
+        agent_root=agent_root,
+    )
+    records = list(adapter.list_shared())
+
+    assert [r.source_locator for r in records] == [
+        "openclaw-shared:archive.sqlite/keep.md"
+    ]

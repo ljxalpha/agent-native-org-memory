@@ -580,7 +580,8 @@ roots:
     - alias: hermes-shared
       base_dir: "${AGENT_ROOT}/memory/shared"
       include: ["**/*.md"]
-      # .git/.cache 由 DEFAULT_EXCLUDES + 隐藏目录跳过兜底；*.lock 显式排除以贴合真实布局
+      # .git/.cache 由 DEFAULT_EXCLUDES + 隐藏目录跳过兜底；*.lock 一条为声明式——
+      # include 为 **/*.md 时它不会被执行到，放宽 include 后才承重
       exclude: [".git/**", "**/.git/**", ".cache/**", "**/.cache/**", "**/*.lock"]
 team_target: "${AGENT_ROOT}/memory/team"
 file_pattern: "*.md"
@@ -594,7 +595,7 @@ team_hint_injection:
 ```
 
 `config/adapters/codex.yaml` 与 hermes 同构：shared 约定根 + `support_status: experimental` +
-同款 `exclude`（含 `**/*.lock`），hint 目标同为 `${AGENT_ROOT}/AGENTS.md`。
+同款 `exclude`（含声明式的 `**/*.lock`，见上），hint 目标同为 `${AGENT_ROOT}/AGENTS.md`。
 `openclaw.yaml` / `opencode.yaml` 亦各一份。**每新增一个 Agent ≡ 新增一份 YAML**
 （呼应 §2 约束：规则全外挂，代码不硬编码任何 agent 专属路径或蒸馏行为）。
 上述真实布局与"约定 shared 根 / 无 list_personal"的隐私不变量，由
@@ -1959,6 +1960,13 @@ collect_ops_identity(
 不进 health schema 的校验面）。
 
 `ops_identity` 为 `None` 时不写任何相关键，`.health.json` 与扩展前逐字节一致。
+
+这两个参数**必须由 CLI 侧实际喂入**，否则整条能力等于死代码：叶子仓 `.health.json`
+是被 commit 并推到团队远端、也是安装后自检要校验的那一份，`report` 子命令与守护的
+`report_task`、`run_foreground()` 三处调用点都要传 `_ops_identity(args)`。
+该接线由**命令级**回归固定（构造安装布局后跑 `report` 子命令，再断言仓内
+`.health.json` 的七字段与 `build_id_source`），仅断言 `report()` 这个函数接口的用例
+无法证明接线存在。
 
 #### 8.7.4 CLI 接线与 `memory-net-leaf status`
 

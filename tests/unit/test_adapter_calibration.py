@@ -97,7 +97,7 @@ def test_claude_code_personal_scope_is_never_listed(
     assert all(secret not in r.content for r in records)
 
 
-def test_codex_excludes_git_repo_sqlite_and_lock(
+def test_codex_collects_only_md_outside_the_git_repo(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -130,7 +130,7 @@ def test_codex_excludes_git_repo_sqlite_and_lock(
     assert all("leaked?" not in r.content for r in records)
 
 
-def test_hermes_excludes_sibling_lock_files(
+def test_hermes_collects_md_and_leaves_sibling_lock_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

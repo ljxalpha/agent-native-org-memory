@@ -29,11 +29,13 @@ roots:
       # `**/` means "zero or more segments" on both the include and the exclude side,
       # so one spelling covers the managed root itself as well as any depth below it.
       #
-      # Only the three directory rules can actually fire: a file reaches `exclude`
-      # only after passing `include` and `file_pattern: "*.md"`, and hidden paths are
-      # skipped earlier still. `**/*.sqlite*` and `.env` are therefore DECLARATIVE —
-      # they never execute today and are kept so that widening `file_pattern` later
-      # cannot silently start collecting the native store or the secrets file.
+      # Only the three directory rules can actually fire. `include: ["**/*.md"]` is
+      # the gate that decides the collection surface: a `main.sqlite` or `.env`
+      # copied into the managed root is never enumerated, so it reaches neither
+      # `file_pattern` nor `exclude`. `**/*.sqlite*` and `.env` are therefore
+      # DECLARATIVE — kept so that widening `include` later cannot silently start
+      # collecting the native store or the secrets file. (`**/*.sqlite*` does fire
+      # for a markdown file named like `main.sqlite.md`.)
       exclude:
         - "**/.git/**"
         - "**/.cache/**"
