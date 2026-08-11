@@ -444,11 +444,13 @@ def _clusters_concluded(
                 f"{lane.name}: clustered into {lane.metrics['clusters']}, "
                 f"expected {len(partition)}"
             )
-        rejected = (
-            int(lane.metrics.get("skipped_clusters", 0))
-            + int(lane.metrics.get("evidence_rule_rejections", 0))
-            + int(lane.metrics.get("parse_failures", 0))
-        )
+        # `skipped_clusters` alone, not a sum. The pipeline increments it
+        # *alongside* `parse_failures` and `evidence_rule_rejections` at every
+        # site (pipeline.py: each `parse_failures += 1` is followed by a
+        # `skipped_clusters += 1`), so adding them counted one rejection two or
+        # three times -- and an inflated denominator is exactly how a second
+        # silently dropped cluster gets excused.
+        rejected = int(lane.metrics.get("skipped_clusters", 0))
         silent = [
             cluster_id
             for cluster_id, paths in _by_cluster(lane, partition).items()

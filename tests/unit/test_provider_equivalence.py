@@ -62,7 +62,14 @@ def _load_builder() -> ModuleType:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # No bytecode beside a fixture; see the hygiene test in
+    # test_golden_repo_builder.py for what a stray `.pyc` would carry.
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -277,3 +284,30 @@ def test_a_fully_accounted_for_rejection_does_not_trip_clause_ten(
         compare_run_invariants(mock, dropped, clusters=clusters, expect=EXPECT)
     )
     assert 10 not in failed
+
+
+def test_one_rejection_is_not_counted_three_times(
+    lanes: tuple[LaneOutcome, LaneOutcome], clusters: list[dict[str, Any]]
+) -> None:
+    """The pipeline raises `skipped_clusters` alongside `parse_failures` and
+    `evidence_rule_rejections` at every site, so summing the three counted one
+    rejection three times -- and an inflated count is exactly what excuses a
+    cluster that was dropped for no recorded reason.
+    """
+    mock, real = lanes
+    two_silent = replace(
+        real,
+        products={},
+        bodies={},
+        metrics={
+            **real.metrics,
+            "skipped_clusters": 1,
+            "parse_failures": 1,
+            "evidence_rule_rejections": 1,
+        },
+    )
+
+    failed = _failed(
+        compare_run_invariants(mock, two_silent, clusters=clusters, expect=EXPECT)
+    )
+    assert 10 in failed
