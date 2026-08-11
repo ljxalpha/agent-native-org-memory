@@ -335,6 +335,67 @@ def test_a_resume_id_that_is_a_path_is_refused(tmp_path: Path) -> None:
             _orchestrator(tmp_path, resume_from=value)._resumed_products(SNAPSHOT_SHA)
 
 
+def test_a_symlinked_run_directory_is_refused(tmp_path: Path) -> None:
+    """A valid run id whose directory points out of the repository."""
+    repo = tmp_path / "repo"
+    (repo / "distill_runs").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / "team" / "common_knowledge").mkdir(parents=True)
+    (outside / "snapshot.json").write_text(
+        json.dumps(
+            {
+                "leaf_refs": {"origin/leaf/alice": "b" * 40},
+                "master_snapshot_sha": SNAPSHOT_SHA,
+                "run_id": PRIOR_RUN,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outside / "team" / "common_knowledge" / "retry-policy.md").write_text(
+        PRODUCT.format(run=PRIOR_RUN), encoding="utf-8"
+    )
+    (repo / "distill_runs" / PRIOR_RUN).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="symbolic link"):
+        _orchestrator(tmp_path)._resumed_products(SNAPSHOT_SHA)
+
+
+def test_a_symlinked_snapshot_is_refused(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _prior_run(repo)
+    root = repo / "distill_runs" / PRIOR_RUN
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text((root / "snapshot.json").read_text(encoding="utf-8"), "utf-8")
+    (root / "snapshot.json").unlink()
+    (root / "snapshot.json").symlink_to(elsewhere)
+
+    with pytest.raises(RuntimeError, match="symbolic link"):
+        _orchestrator(tmp_path)._resumed_products(SNAPSHOT_SHA)
+
+
+def test_a_symlinked_product_is_refused(tmp_path: Path) -> None:
+    """The one that still passes the scanner: the text is fine, the origin is not."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _prior_run(repo)
+    product = (
+        repo
+        / "distill_runs"
+        / PRIOR_RUN
+        / "team"
+        / "common_knowledge"
+        / ("retry-policy.md")
+    )
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text(product.read_text(encoding="utf-8"), encoding="utf-8")
+    product.unlink()
+    product.symlink_to(elsewhere)
+
+    with pytest.raises(RuntimeError, match="symbolic link"):
+        _orchestrator(tmp_path)._resumed_products(SNAPSHOT_SHA)
+
+
 def test_an_edited_record_is_not_treated_as_already_distilled(
     tmp_path: Path,
 ) -> None:

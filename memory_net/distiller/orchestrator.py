@@ -505,8 +505,11 @@ class DistillOrchestrator:
             # would pull a snapshot and a product tree from outside this
             # repository into the release path.
             raise RuntimeError(f"cannot resume {self.resume_from!r}: not a run id")
-        root = self.repo_path / "distill_runs" / self.resume_from
+        runs_root = self.repo_path / "distill_runs"
+        root = runs_root / self.resume_from
+        _refuse_link(root, runs_root)
         snapshot_path = root / "snapshot.json"
+        _refuse_link(snapshot_path, root)
         if not snapshot_path.exists():
             raise RuntimeError(
                 f"cannot resume {self.resume_from}: no snapshot.json for that run"
@@ -537,6 +540,7 @@ class DistillOrchestrator:
         self._refuse_leftover_staging()
         products: list[Any] = []
         for path in sorted((root / TEAM_PREFIX).rglob("*.md")):
+            _refuse_link(path, root)
             content = path.read_text(encoding="utf-8")
             self._scan_published(content, field_path="resumed_products")
             frontmatter, _ = split_frontmatter(content)
@@ -1821,6 +1825,25 @@ def _accounting_of(
         input_records=input_records,
         aborted=bool(output.redaction_failures),
     )
+
+
+def _refuse_link(path: Path, inside: Path) -> None:
+    """A resumed input must be a real file of this run's own directory.
+
+    The run id is checked for shape, but a directory with a perfectly valid
+    name can itself be a symlink -- as can its snapshot or any of its products.
+    Following one would carry content from outside the repository into the
+    release path under the name of "the previous run of this repository".
+    """
+    if path.is_symlink():
+        raise RuntimeError(f"cannot resume: {path.name} is a symbolic link")
+    try:
+        resolved = path.resolve()
+        boundary = inside.resolve()
+    except OSError as exc:  # pragma: no cover - platform dependent
+        raise RuntimeError(f"cannot resume: {path.name} is unreadable") from exc
+    if resolved != boundary and boundary not in resolved.parents:
+        raise RuntimeError(f"cannot resume: {path.name} resolves outside {inside.name}")
 
 
 def _distill_gate_error(
