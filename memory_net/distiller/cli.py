@@ -421,8 +421,12 @@ def _output_scanner(
                 f"no output scanner rules at {settings.patterns_path}: recording "
                 "would write prompts and responses that nothing has scanned"
             )
-        LOGGER.info(
-            "no output scanner rules at %s; running without one",
+        # A warning, not an info line: this run publishes model-derived
+        # products with no output gate at all. It is reachable only in a
+        # repository that ships no rules -- a production profile must declare
+        # the block, and a declared block whose file is missing stops the run.
+        LOGGER.warning(
+            "no output scanner rules at %s; this run publishes unscanned output",
             settings.patterns_path,
         )
         return None
