@@ -22,6 +22,7 @@ import yaml  # type: ignore[import-untyped]
 from memory_net import __version__
 from memory_net.leaf import daemon, hints
 from memory_net.leaf.health import build_health, write_health
+from memory_net.leaf.identity import read_host
 from memory_net.leaf.reporter import RedactionBlockedError, report
 from memory_net.leaf.scanner import scanner_config_from_report_config
 from memory_net.leaf.subscriber import SubscribeResult, subscribe
@@ -631,7 +632,7 @@ def _current_owner_identity(node_id: str) -> dict[str, str]:
         "node_id": node_id,
         "install_id": _read_or_create_install_id(state_home),
         "owner_fingerprint": _owner_fingerprint(),
-        "host": platform.node(),
+        "host": read_host(),
     }
 
 
@@ -648,7 +649,7 @@ def _read_or_create_install_id(state_home: Path) -> str:
 def _owner_fingerprint() -> str:
     import hashlib
 
-    raw = f"{platform.node()}:{platform.system()}:{platform.machine()}".encode()
+    raw = f"{read_host()}:{platform.system()}:{platform.machine()}".encode()
     return "ofp-" + hashlib.sha256(raw).hexdigest()[:12]
 
 

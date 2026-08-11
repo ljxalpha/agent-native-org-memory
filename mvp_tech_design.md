@@ -1812,6 +1812,39 @@ MVP 强校验字段为 `schema_version`、`node_id`、`role`、`status`、
 - **严格档（`require_ops_identity=True`）**：七个字段缺一即 `SchemaError`，错误信息列出全部
   缺失字段名。该档供安装后自检与稳定性巡检等运维路径显式开启。
 
+#### 8.7.2 运维身份采集（`memory_net.leaf.identity`）
+
+采集与构造分离：`collect_ops_identity()` 是唯一从环境读取运维身份的地方，
+`build_health()` 只接收已采集好的值。
+
+```python
+collect_ops_identity(
+    *, state_dir, adapter_path, local_yaml_path, generation_dir, started_at
+) -> dict[str, str]
+```
+
+| 输出键 | 来源 | 缺失时 |
+|---|---|---|
+| `install_id` | `<state_dir>/install_id` | 抛 `OpsIdentityError` |
+| `code_version` | `memory_net.__version__` | — |
+| `build_id` | `local.yaml` 的 `package_ref` 尾部 40 位 commit sha | 回落 `code_version` |
+| `build_id_source` | `package_ref` 或 `code_version` | — |
+| `host` | `platform.node()` | 抛 `OpsIdentityError` |
+| `adapter` | adapter YAML 的 `name` 键 | 抛 `OpsIdentityError` |
+| `config_source_master_sha` | `<generation_dir>/config_source_master_sha` | **不写该键** |
+| `started_at` | 调用方注入 | 抛 `OpsIdentityError` |
+
+两条设计约束：
+
+- **`build_id` 的降级必须可审计**：`package_ref` 不是 `git+…@<40 位 sha>` 形态时（开发路径），
+  `build_id` 回落为 `code_version`，同时输出 `build_id_source` 标明实际来源——降级留痕，
+  不静默。
+- **`platform.node()` 在 `memory_net/` 下只允许出现在本模块**（由 AST 测试守住）。
+  主机名是本机身份材料，收敛到单一读取点才能审计它流向了哪里。
+- `started_at` 由调用方注入，采集器不自读时钟，保证健康快照可回放。
+
+`config_source_master_sha` 缺失时不写该键，因此扩展前物化的旧配置代次继续可用（向后兼容）。
+
 ### 8.8 `platform.yaml`（平台元信息，兼容替换）
 
 ```yaml
