@@ -17,9 +17,10 @@ TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/memory-net-install.XXXXXX")"
 cleanup() {
   # Kill before removing the tree: a daemon left running against a deleted home
   # would be exactly the machine pollution this harness exists to prevent.
-  if [[ -f "$TMPROOT/home-daemon/state/daemon.pid" ]]; then
-    kill "$(cat "$TMPROOT/home-daemon/state/daemon.pid")" 2>/dev/null || true
-  fi
+  for pid_file in "$TMPROOT"/home-*/state/daemon.pid; do
+    [[ -f "$pid_file" ]] || continue
+    kill "$(cat "$pid_file")" 2>/dev/null || true
+  done
   rm -rf "$TMPROOT"
 }
 trap cleanup EXIT
@@ -128,6 +129,8 @@ import sys
 state = json.loads(open(sys.argv[1], encoding="utf-8").read())
 # --no-daemon stops one step short of DAEMON_STARTED.
 assert state["status"] == "HINTS_INSTALLED", state
+# Injection is non-fatal, so the state has to say whether it actually landed.
+assert state["hints_injected"] is True, state
 PY
 
 # --- Failure staging and dirty recovery -------------------------------------
@@ -244,6 +247,39 @@ PY
 MEMORY_NET_HOME="$DAEMON_HOME" "$DAEMON_HOME/venv/bin/python" \
   -m memory_net.leaf.cli status \
   --health "$DAEMON_HOME/state/post_install_health.json" >/dev/null
+
+# A post-verification failure must fail the install AND take the daemon with
+# it. Forcing the deadline to zero makes the timeout branch deterministic.
+FAIL_HOME="$TMPROOT/home-postverify"
+set +e
+MEMORY_NET_HOME="$FAIL_HOME" MEMORY_NET_INSTALL_POST_VERIFY_SECONDS=0 \
+  "$ROOT/scripts/install_leaf.sh" \
+  --repo "$MEMORY_REPO" \
+  --agent claude-code \
+  --node-id "$NODE_ID-p" \
+  --agent-root "$AGENT_ROOT" \
+  --package-ref "$ROOT" \
+  --home "$FAIL_HOME" \
+  --no-cron > "$TMPROOT/postverify.out" 2> "$TMPROOT/postverify.err"
+POSTVERIFY_EXIT=$?
+set -e
+test "$POSTVERIFY_EXIT" -ne 0 \
+  || { echo "[FAIL] post-verify timeout did not fail the install" >&2; exit 1; }
+
+python3 - "$FAIL_HOME/state/install_state.json" <<'PY'
+import json
+import sys
+
+state = json.loads(open(sys.argv[1], encoding="utf-8").read())
+assert state["status"] == "FAILED:POST_VERIFY", state
+assert set(state) == {"status", "exit_code", "at"}, state
+PY
+
+# The daemon it started must be gone: the operator was told the install failed.
+if [[ -f "$FAIL_HOME/state/daemon.pid" ]]; then
+  echo "[FAIL] a failed install left its daemon pid file behind" >&2
+  exit 1
+fi
 
 DAEMON_PID="$(cat "$DAEMON_HOME/state/daemon.pid")"
 kill "$DAEMON_PID" 2>/dev/null || true

@@ -263,6 +263,16 @@ def main(argv: list[str] | None = None) -> int:
     record.add_argument("--state-dir", required=True, type=Path)
     record.add_argument("--status", required=True)
     record.add_argument("--exit-code", type=int)
+    record.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "extra context for a *success* record, e.g. hints-injected=false. "
+            "Refused on a failure record, whose shape is fixed"
+        ),
+    )
 
     recover = sub.add_parser("recover")
     recover.add_argument("--home", required=True, type=Path)
@@ -274,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             args.status,
             exit_code=args.exit_code,
             at=_utc_now(),
+            **_parse_fields(args.field),
         )
         return 0
 
@@ -294,6 +305,22 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _parse_fields(raw_fields: list[str]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for raw in raw_fields:
+        key, separator, value = raw.partition("=")
+        if not separator or not key:
+            raise InstallStageError(f"field must be KEY=VALUE: {raw}")
+        fields[key.replace("-", "_")] = _coerce(value)
+    return fields
+
+
+def _coerce(value: str) -> Any:
+    if value in {"true", "false"}:
+        return value == "true"
+    return value
 
 
 def _utc_now() -> str:

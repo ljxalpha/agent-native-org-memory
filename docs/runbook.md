@@ -14,6 +14,23 @@
 3. Add or tighten rules in `config/redaction_patterns.yaml` and run `scripts/redaction_benchmark.py`.
 4. Re-report after rules pass benchmark.
 
+## Reinstalling Over a Running Leaf
+
+The installer takes an exclusive lock on `<MEMORY_NET_HOME>/state/install.lock`,
+so two installs against the same home cannot race. It does **not** coordinate
+with a leaf daemon that is already running: that daemon keeps its own handle on
+the repo and on `config-current` while the install replaces them.
+
+Before reinstalling into a home that already has a daemon:
+
+1. `memory-net-leaf stop --state-dir <MEMORY_NET_HOME>/state`, or remove the
+   crontab entry and kill the pid in `state/daemon.pid`.
+2. Confirm nothing remains: `pgrep -f 'memory_net.leaf.cli start'`.
+3. Run the installer.
+
+A failed install never leaves the daemon *it* started running, but it cannot
+clean up one that predates it.
+
 ## What the Install Regression Does Not Cover
 
 `tests/integration/install_leaf_local.sh` exercises the installer end to end,

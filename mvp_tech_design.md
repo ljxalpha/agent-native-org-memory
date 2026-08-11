@@ -1557,7 +1557,21 @@ adapter_name=…, source_master_sha=…)`，并用「临时符号链接 + 原子
 2. `memory-net-leaf status` 的**严格档**在一份新写出的 health 上通过——
    严格档要求七个运维身份字段齐全，因此这一步实际验证的是"安装布局能解析出完整身份"。
 
-任一失败 → `FAILED:POST_VERIFY` + 非零退出。`--no-daemon` 时整段跳过。
+任一失败 → `FAILED:POST_VERIFY` + 非零退出，**并且由 `EXIT` trap 杀掉这次刚起的守护**：
+运维已被告知"安装失败"，机器上却留着一个进程，两者自相矛盾。
+成功标志在写完 `DAEMON_STARTED` **之后**才置位——状态写失败同样算安装失败。
+`--no-daemon` 时整段跳过。
+
+补充三条同源约束：
+
+- **单机单装**：脚本开工前对 `<state>/install.lock` 取排他 `flock`。两个并发安装会互相
+  改写 `local.yaml`、共用同一个 worktree、互相覆盖 `daemon.pid`，而失败的那个看起来
+  和成功一样。**已在跑的守护进程不在协调范围内**，重装前需先停守护（见 runbook）。
+- **中断即失败**：除 `ERR` 外另装 `INT` / `TERM` trap，记 `FAILED:<STAGE>`（130 / 143）。
+  否则一次 Ctrl-C 会把上一个**成功**阶段留在盘上，描述一次根本没跑完的安装。
+- **hint 注入结果如实记录**：注入保持非致命（能上报、能订阅的叶子仍然有用），
+  但状态写的是 `HINTS_INSTALLED` + `hints_injected: true|false`，
+  而不是无条件的成功——非致命不等于可以让状态说谎。
 
 > 该验证针对新写出的 health 文件，而不是装机时种进叶子分支的那份
 > `.health.json`——后者在建分支时写入，那时 `config-current` 尚不存在，

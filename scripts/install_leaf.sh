@@ -84,6 +84,15 @@ PYTHON="$MN_HOME/venv/bin/python"
 "$PYTHON" -m pip install --upgrade pip >/dev/null
 "$PYTHON" -m pip install "$PACKAGE_REF" >/dev/null
 
+# One install per home at a time. Two concurrent runs would rewrite local.yaml,
+# share a worktree and overwrite each other's daemon.pid, and the loser would
+# look like a successful install.
+exec 9>"$MN_HOME/state/install.lock"
+flock -n 9 || {
+  echo "[ABORT] another install is already running for $MN_HOME" >&2
+  exit 7
+}
+
 # From here on every failure records which stage it happened in. Under
 # `set -euo pipefail` the script used to die silently between its two state
 # writes, leaving a file that described a previous run -- exactly when someone
@@ -95,23 +104,38 @@ record_stage() {
     --state-dir "$MN_HOME/state" --status "$1"
 }
 abort() {
-  # An explicit `exit` bypasses the ERR trap, which would leave the previous
+  # An explicit `exit` bypasses the ERR trap, so this records the failure
+  # itself. Without it an intentional refusal would leave the previous
   # (successful) state on disk describing a run that in fact failed.
   local code="$1"; shift
   echo "$@" >&2
+  record_failed_stage "$code"
   exit "$code"
+}
+record_failed_stage() {
+  "$PYTHON" -m memory_net.leaf.install_state record \
+    --state-dir "$MN_HOME/state" --status "FAILED:$STAGE" --exit-code "$1" \
+    >/dev/null 2>&1 || true
 }
 record_failure() {
   local code=$?
   # Stage and exit code only. Command output here would carry the remote URL,
   # absolute paths and possibly a credential fragment into a file that gets
   # pasted into support issues.
-  "$PYTHON" -m memory_net.leaf.install_state record \
-    --state-dir "$MN_HOME/state" --status "FAILED:$STAGE" --exit-code "$code" \
-    >/dev/null 2>&1 || true
+  record_failed_stage "$code"
   exit "$code"
 }
+# An interrupted install is a failed install. Without these the operator's Ctrl-C
+# would leave the last *successful* stage on disk, describing a run that never
+# finished.
+record_signal() {
+  STAGE="$STAGE"
+  record_failed_stage "$1"
+  exit "$1"
+}
 trap record_failure ERR
+trap 'record_signal 130' INT
+trap 'record_signal 143' TERM
 
 # PREFLIGHT. Placed here rather than at the very top because the probe ships
 # with the package, and because the interpreter that matters is the venv's --
@@ -323,10 +347,18 @@ ADAPTER_CONFIG="$MN_HOME/config-current/adapters/$AGENT.yaml"
   --adapter "$ADAPTER_CONFIG" \
   --state-dir "$MN_HOME/state" \
   --config-revision "$GEN_REVISION" \
-  inject >/dev/null 2>&1 \
-  || echo "[WARN] team hint injection did not succeed; the leaf is installed but agent-side hints are absent" >&2
+  inject >/dev/null 2>&1 && HINTS_INJECTED=true || HINTS_INJECTED=false
+if [[ "$HINTS_INJECTED" != "true" ]]; then
+  echo "[WARN] team hint injection did not succeed; the leaf is installed but agent-side hints are absent" >&2
+fi
 
-record_stage HINTS_INSTALLED
+# The recorded state says what actually happened. Injection stays non-fatal --
+# a leaf that reports and subscribes is still useful without hints -- but
+# recording HINTS_INSTALLED unconditionally would have made the state lie.
+STAGE="HINTS_INSTALLED"
+"$PYTHON" -m memory_net.leaf.install_state record \
+  --state-dir "$MN_HOME/state" --status HINTS_INSTALLED \
+  --field "hints-injected=$HINTS_INJECTED"
 
 # cron re-parses this string as a shell command, so every value that can
 # contain a space or a metacharacter is escaped. --home and --agent-root are
@@ -334,6 +366,9 @@ record_stage HINTS_INSTALLED
 # crontab entry has to be equally careful.
 DAEMON_CMD="$(printf 'MEMORY_NET_HOME=%q %q -m memory_net.leaf.cli start --node-id %q --state-dir %q --repo %q --adapter %q --agent-root %q' \
   "$MN_HOME" "$PYTHON" "$NODE_ID" "$MN_HOME/state" "$MN_HOME/repo" "$ADAPTER_CONFIG" "$AGENT_ROOT")"
+# crontab has its own parser on top of the shell's: an unescaped % ends the
+# command and becomes stdin. Shell quoting alone does not cover it.
+DAEMON_CMD="${DAEMON_CMD//%/\\%}"
 # Escape valve: the crontab write is the first of two steps that leave
 # $MEMORY_NET_HOME and touch the machine itself.
 if [[ "$NO_CRON" != "1" ]] && command -v crontab >/dev/null 2>&1; then
@@ -398,8 +433,10 @@ if [[ "$NO_DAEMON" != "1" ]]; then
   MEMORY_NET_HOME="$MN_HOME" "$PYTHON" -m memory_net.leaf.cli status \
     --health "$POST_VERIFY_HEALTH" >/dev/null
 
-  POST_VERIFY_OK=1
+  # After the state write, not before: if recording DAEMON_STARTED fails the
+  # install has failed, and a surviving daemon would contradict that.
   record_stage DAEMON_STARTED
+  POST_VERIFY_OK=1
 fi
 
 echo "Installed memory-net leaf $NODE_ID at $MN_HOME"

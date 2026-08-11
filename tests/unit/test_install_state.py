@@ -45,10 +45,19 @@ def test_the_install_script_records_only_known_stages_in_order() -> None:
     script = Path("scripts/install_leaf.sh").read_text(encoding="utf-8")
     recorded = re.findall(r"record_stage ([A-Z_]+)", script)
 
-    assert recorded, script
-    assert set(recorded) <= set(INSTALL_STAGES), recorded
-    positions = [INSTALL_STAGES.index(stage) for stage in recorded]
-    assert positions == sorted(positions), recorded
+    # An explicit sequence, not an ordered subset: "some stages, in order" stays
+    # green when every stage but one is deleted.
+    assert recorded == [
+        "VENV_READY",
+        "REPO_READY",
+        "BRANCH_READY",
+        "GENERATION_READY",
+        "DAEMON_STARTED",
+    ], recorded
+    # The stages the script sets directly rather than through record_stage.
+    assigned = set(re.findall(r'STAGE="([A-Z_]+)"', script))
+    assert {"PREFLIGHT", "SCHEMA_PROBE", "HINTS_INSTALLED", "POST_VERIFY"} <= assigned
+    assert (set(recorded) | assigned) == set(INSTALL_STAGES)
 
 
 def test_every_stage_round_trips(tmp_path: Path) -> None:
@@ -109,6 +118,47 @@ def test_a_success_record_may_still_carry_context(tmp_path: Path) -> None:
 
     state = read_state(tmp_path)
     assert state is not None and state.payload["generation"] == "abc"
+
+
+def test_cli_records_a_success_field(tmp_path: Path) -> None:
+    """Hint injection is non-fatal, so the state must say whether it landed."""
+    from memory_net.leaf import install_state
+
+    assert (
+        install_state.main(
+            [
+                "record",
+                "--state-dir",
+                str(tmp_path),
+                "--status",
+                "HINTS_INSTALLED",
+                "--field",
+                "hints-injected=false",
+            ]
+        )
+        == 0
+    )
+
+    state = read_state(tmp_path)
+    assert state is not None
+    assert state.payload["hints_injected"] is False
+
+
+def test_cli_refuses_a_field_on_a_failure_record(tmp_path: Path) -> None:
+    from memory_net.leaf import install_state
+
+    with pytest.raises(InstallStageError):
+        install_state.main(
+            [
+                "record",
+                "--state-dir",
+                str(tmp_path),
+                "--status",
+                "FAILED:REPO_READY",
+                "--field",
+                "stderr=fatal: could not read from remote",
+            ]
+        )
 
 
 def test_artifacts_without_readable_state_are_an_inconsistency(tmp_path: Path) -> None:
