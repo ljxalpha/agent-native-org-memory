@@ -2053,10 +2053,72 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
   parse/citation failures、fallback attempts、config revision、master snapshot、
   incompatible leaves、id collisions、quarantined records 与 scanner audit summary。
 - 上报阶段零 LLM；embedding 阶段默认本地模型零 token；LLM 花费只在蒸馏主调用。
-- 以下能力不属于当前 MVP-core 必填合同，统一进入 `DISTILL-001`：
-  `max_records_per_prompt` 二次切分、singleton/noise fallback lane、soft/per-cluster
-  预算、省电模式、embedding cache、`unclustered.json`、`--resume`、按预估成本调度、
-  以及 prompt-cache 命中量 metrics。
+- 省电模式仍不属于当前合同。其余 `DISTILL-001` 能力已交付，合同见下方
+  「调度与续跑合同（DISTILL-001）」。
+
+**调度与续跑合同（DISTILL-001）**：
+
+1. **`llm.max_records_per_prompt` 二次切分**。未声明该键时行为逐字节不变（默认 profile
+   不声明它）。声明后，记录数超阈值的 cluster 被切成多个 sub-prompt 依次调用，
+   同一 cluster 各 sub-prompt 的产物在 render 之前按 `(category, canonical_topic_key)`
+   归并：首次出现的标题/摘要/证据/置信度保留，citation 按 `memory_id@revision_hash`
+   去重合并，conflicts 追加。归并后整簇只 render 一次，因此不会产生重复 `topic_id`，
+   citation 仍在整簇记录集内逐条反查。
+2. **singleton / noise fallback lane**（`clustering.singleton_lane.enabled`，默认 `false`）。
+   开启后，`size == 1` 的 cluster（DBSCAN 噪声点，`dbscan.py` 已把它们各自编号成独立簇）
+   不在主序中就地蒸馏，而是延后到所有多记录 cluster 之后再跑，使预算优先落在真正成簇的
+   输入上。关闭时它们仍与今天完全一样在主序中就地蒸馏。
+3. **`distill_runs/<run_id>/unclustered.json`**：`{run_id, records: [{memory_id,
+   revision_hash, reason_code}]}`，列出所有**未被任何最终产物引用**的输入记录。
+   `reason_code ∈ {noise, budget_skipped, parse_failed, citation_failed,
+   evidence_rule_failed, uncited}`（`uncited` 是本实现新增的一档：cluster 成功蒸馏
+   但该记录未被任何 citation 引用）。**该文件只放 id、revision 与原因码，不放任何正文**
+   ——正文进去等于又造一个未经 scanner 的落盘面。字段是 allowlist：多一个键即校验失败。
+4. **soft / per-cluster 预算**。硬上界 `max_usd` 的来源不变（`llm.budget_usd` →
+   legacy `cost_budget.budget_usd`）。新增同级子块
+   `llm.budget.{soft_max_usd, per_cluster_max_usd}`，二者只能比硬上界**更严**：
+   - 只给子块而没有硬上界 → 配置加载即报错（没有基准就没有"更严"）；
+   - 子块任一值大于 `max_usd`、为负、或非数值 → 报错，不静默钳制；
+   - `soft_max_usd`：一旦已花费+在途预留触及该值，**不再开新簇**，已开的簇跑完；
+   - `per_cluster_max_usd`：单簇上界，触顶只跳该簇（记 `skipped_budget`）并继续下一簇，
+     不整 run 停。
+   三者优先级 hard > soft > per-cluster，且全部走既有 `RunBudget.reserve()` /
+   `Reservation` 三终态机制（新增 `enter_scope()` 只是给同一条计费路径加一层 scope 累计），
+   **不新增第二套计费路径**；primary 与 fallback 共用同一 `RunBudget` 实例，不双花。
+5. **embedding cache**（`clustering.embedding_cache.enabled`，默认 `false`）。
+   键 = `(embedding_backend, model_name, sha256(text))`，值**只有向量**，
+   **绝不缓存原文**。换 backend 或 model 即换键空间（必然 miss），因此 `test-cheap`
+   的三维替身向量不可能被 `fastembed` 车道复用。缓存文件损坏时回落重算，不崩溃。
+6. **prompt cache 命中量 metrics**：`prompt_cache_read_tokens` /
+   `prompt_cache_creation_tokens` / `prompt_cache_source ∈ {reported, unreported}`。
+   provider 回报（OpenAI 兼容的 `usage.prompt_tokens_details.cached_tokens` 等）时按真实
+   回报聚合；**不回报时记 0 并标 `unreported`，绝不估算**——与 `usage_source` 的
+   provenance 语义同构，不把估算伪装成实测。
+7. **按预估成本调度**（`clustering.schedule_by_estimated_cost`，**默认必须 `false`**）。
+   为真时按预估 prompt token 成本升序执行 cluster（预算耗尽时最大化完成簇数），
+   `cluster_assignments` / `clusters.jsonl` 仍按原始聚类顺序编号。默认必须关：
+   strict replay 按录制顺序逐条比对，开启会让 golden bundle 全部 miss，因此
+   fixture profile 与 golden 录制**一律不开**，并由测试直接断言该键不存在或为 `false`。
+8. **metrics 对账不变量**。新增 `clusters_total`（聚类产出的簇总数）、
+   `clusters_terminal`（各互斥终态计数之和）与 `cluster_terminal_counts`（终态直方图）。
+   簇的互斥终态为 `distilled | skipped_budget | skipped_parse | skipped_citation |
+   skipped_evidence | noise | resumed`，每簇恰好落一个。`clusters_attempted`
+   **沿用今天的语义**（主 lane 真实发出过调用的簇数，供 `total_calls` / replay /
+   parse 失败率使用），不被重定义。不变量：
+   `clusters_total == clusters_terminal == 各终态计数之和`，
+   以及记录级 `input_records == records_cited + records_unclustered`
+   （`unclustered.json` 是**记录级**清单，不进簇级等式）。任一不成立即写
+   `accounting_mismatch: true`，并让质量闸失败。
+9. **`--resume <run_id>` 续跑合同**：
+   - 复用 `distill_runs/<run_id>/snapshot.json` 的 `master_snapshot_sha`；
+     当前 `origin/master` 与快照不一致即**拒绝续跑**（不在漂移的输入上续跑，
+     与 `config_drift_superseded` 同义）；
+   - 上一轮已产出产物的簇被跳过（终态记 `resumed`），其产物原样带入本轮，
+     并与本轮新产物一起过 scanner、manifest 与发布闸；
+   - **拒绝复用任何残留 staging**（TXN-001 的残留 staging 拒绝复用规则优先级更高）：
+     续跑写**新的** staging 与**新的**版本化 bundle，并使用**新的** run_id；
+   - 续跑段照样过两阶段 scanner 与发布闸，不因"是续跑"而放行；
+   - `metrics.json` 记 `resumed_from`，对账不变量在续跑语境下依然成立。
 
 **LLM JSON 输出容错**（当前 MVP-core 合同）：
 - 主 provider 输出先尝试完整 `json.loads`，失败时会从文本中 raw-decode 首个 JSON object。
@@ -2160,7 +2222,45 @@ acquire_distill_lease ──► fetch_all_branches ──► snapshot leaf/* ref
 - `distill.yaml.review_gate.enabled=true` 时，distiller **不直接 push master**，改为 push 到 `release/<run_id>` 分支并打开 PR → master。
 - PR 由 `.github/CODEOWNERS` 指定的人工 reviewer 审核；review 通过后由 CODEOWNERS 合并，CI 合并事件上再跑一次 schema / citation / evidence-rule 校验作为 merge gate。
 - 作用：拦截"被 prompt injection 投毒的 leaf 记忆经 LLM 汇总后被直接写入团队产物"的场景。结合 §4.2 leaf 分支防投毒（pre-receive hook / quarantine 发布路径）形成纵深防御。
-- M0.5 / M1 本地 PoC 可用 `review_gate.enabled=false` 保留 CI 直推 master 的快路径；一旦进入多人共享仓试点，默认应设为 `true`，除非已启用平台层 pre-receive hook / 每节点独立凭证。review gate 开启时，`distill_runs/<run_id>/metrics.json` 多记一个 `review_gate=pending|approved|rejected` 字段。
+- M0.5 / M1 本地 PoC 可用 `review_gate.enabled=false` 保留 CI 直推 master 的快路径；一旦进入多人共享仓试点，默认应设为 `true`，除非已启用平台层 pre-receive hook / 每节点独立凭证。review gate 开启时，`distill_runs/<run_id>/metrics.json` 的 `review_gate_status` 取值域为 `disabled | pending | approved | rejected`（`approved` / `rejected` 由 merge gate 回填）。
+
+**review request intent artifact（M2-004）**：
+- review gate 开启时，`distill_runs/<run_id>/review_request.json` 在
+  `_publish_outputs()` 的 `git add` **之前**写出，因此它会被暂存路径白名单检查、
+  随 release commit 一起进入提交，PR 上可见。写在 push 之后既不在提交里、PR 也看不见。
+- 字段是 allowlist（多一个键即校验失败）：`{schema_version, run_id, head, base, title,
+  codeowners_path, master_snapshot_sha, metrics_path, products_count, categories}`。
+  值也受约束：`codeowners_path` 必须是仓内相对路径（绝对路径或含 `..` 即失败）；
+  `head` / `base` 必须匹配 `^[A-Za-z0-9._/-]+$`，`head` 由 `release/<run_id>` 模板派生；
+  `title` 由固定模板 + `run_id` 派生，不接受自由文本；`categories` 取自配置的封闭类目集。
+- **只放摘要与指针，绝不放产物正文**；`codeowners_path` 只存路径字符串，
+  不存 CODEOWNERS 正文，也不存任何真人账号。
+- 该文件与 `unclustered.json` 一律走同一条写入路径 `scan_then_write()`：
+  先在内存里对序列化后的 JSON 文本跑 scanner，命中即抛且**不落盘**（不留半成品）；
+  落盘后立刻二次扫描，二次命中则删除该文件并让整个 run fail-closed。
+- `.github/workflows/distill.yml` 的失败 artifact 只上传
+  `metrics.json` / `review_request.json` / `unclustered.json` 三类白名单文件。
+
+**PR 创建（默认关）**：
+- `--open-pr`（默认关）+ `AOMT_PR_COMMAND`（默认 `gh pr create`）。默认关时不调用任何
+  外部命令，只产 artifact。
+- 子进程调用形状与 `hermes_tool` 一致：`shlex.split` + `start_new_session=True` +
+  timeout + 进程组 `SIGTERM` → 有界 wait → `SIGKILL` + 非零退出/非预期输出时抛出
+  携带 stdout 与 stderr 的错误。
+- **PR 正文只能来自 `review_request.json`**（单一真相源），不在此处二次组装。
+
+**merge gate 与平台保护探针**：
+- `.github/workflows/ci.yml` 的 `merge-gate` job 只在 `pull_request` 且
+  `base == master` 且 `head` 匹配 `release/*` 时执行，对 release 分支内容重跑
+  schema / citation / evidence-rule 校验。零凭据、零 secret（`permissions: contents: read`），
+  fork PR 常绿；条件不满足时 job 被跳过（skip）而不是失败。
+- `scripts/validate_shared_pilot_gate.py` 从布尔位检查升级为**配置自洽探针**：
+  review gate 开启时要求 `config/platform.yaml` 的
+  `branch_protection.master_writers_only` 非空，且 `branch_protection.protected_branch`
+  与 `distill.yaml.review_gate.pr_target_branch` 一致。
+  仅当环境提供 `AOMT_PLATFORM_TOKEN` 时才可能做平台侧实证；没有该 token 时，
+  脚本在 stdout 明确打印 `platform-side protection NOT empirically verified`
+  并以 0 退出——**不假装验证过**。
 
 ### 7.3 分类与分级产物
 
@@ -4456,4 +4556,35 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   数两到三遍，而被抬高的计数正是"静默丢弃被放行"的原因。
   (d) `mkdir(exist_ok=True)` 会跟随既有符号链接，`<root>/home -> ~` 时 `up` 会把
   config.yaml 写进 operator 真实的 agent 配置——这是写入而不只是暴露。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 DISTILL-001 调度与续跑合同
+
+- Change summary: §7.2 把九项调度/续跑能力从 `DISTILL-001` 待办提升为当前合同：
+  `llm.max_records_per_prompt` 二次切分与簇内产物归并、singleton/noise 延后 lane、
+  记录级 `unclustered.json`（只含 id/revision/reason_code）、`llm.budget` 子块的
+  soft / per-cluster 上界（复用 `RunBudget.reserve()`，新增 scope 累计）、
+  embedding cache（只存向量）、prompt cache 命中量（不回报即 `unreported`，不估算）、
+  默认关闭的按预估成本调度、`clusters_total` / `clusters_terminal` /
+  `cluster_terminal_counts` / `accounting_mismatch` 对账不变量，以及 `--resume`。
+  省电模式仍不在合同内。
+- Change reason: 这九项已实现并有回归，设计文档不能继续把它们描述为"不属于当前合同"。
+  三处与原计划的偏离一并写进合同：(a) 复用 `RunBudget` 而不是复活 pipeline 的旧成本闸，
+  否则同一次调用会被两套计费路径各扣一次；(b) 不重定义 `clusters_attempted`，
+  它的现有语义被 `total_calls` / replay / parse 失败率依赖，改它会连带打穿录制指标；
+  (c) 成本调度默认必须关，否则 strict replay 的顺序比对会让 golden bundle 全部 miss。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 M2-004 review gate 产物与 merge gate
+
+- Change summary: §7.2 补齐 review gate 的三段合同：`review_request.json`
+  （allowlist 键与值约束、在 `git add` 之前写出、只放摘要与指针、走 `scan_then_write()`）、
+  默认关闭的 `--open-pr` 子进程 publisher（形状与 `hermes_tool` 一致，正文只来自 artifact），
+  以及 `ci.yml` 的 `merge-gate` job 与 `validate_shared_pilot_gate.py` 的平台保护探针；
+  `review_gate_status` 取值域扩为 `disabled | pending | approved | rejected`。
+- Change reason: 原描述只说"打开 PR 并由 CI 在合并事件上复校验"，与实现之间缺了
+  三个可验证落点。其中两处是纠正而非补充：(a) intent artifact 必须写在 `add` 之前，
+  写在 push 之后既不进提交也不在 PR 上可见；(b) `config/platform.yaml` 此前根本没有
+  `branch_protection` 键，探针必须先建该块再校验，且在没有 `AOMT_PLATFORM_TOKEN` 时
+  必须明说"未做平台侧实证"，不得让配置自洽冒充平台侧已验证。
 - Change time: 2026-08-11
