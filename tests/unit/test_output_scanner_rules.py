@@ -134,6 +134,29 @@ def test_distillation_ids_do_not_trip_the_entropy_rule(ruleset: Ruleset) -> None
     assert scan(payload, field_kind=PROSE, ruleset=ruleset) == []
 
 
+def test_identifier_collections_are_structural(ruleset: Ruleset) -> None:
+    """The plural keys the artifacts actually use, not just the singular ones:
+    a cluster assignment stores its ids as a list under ``memory_ids``."""
+    payload = {
+        "clusters": [
+            {
+                "cluster_id": 0,
+                "memory_ids": ["alice-claude-01-20260810T101010Z-ab12cd34ef"],
+            }
+        ],
+        "leaf_refs": {"leaf/alice-claude-01": "a" * 40},
+    }
+    assert scan(payload, field_kind=PROSE, ruleset=ruleset) == []
+
+
+def test_a_home_path_in_an_identifier_collection_still_fires(
+    ruleset: Ruleset,
+) -> None:
+    """Structural exempts the entropy rule only; the regex rules still apply."""
+    payload = {"memory_ids": [f"note-from-{HOME_PATH}"]}
+    assert _rules(scan(payload, field_kind=PROSE, ruleset=ruleset)) == {"abs_home_path"}
+
+
 def test_nested_tree_is_walked_in_full(ruleset: Ruleset) -> None:
     payload = {
         "clusters": [

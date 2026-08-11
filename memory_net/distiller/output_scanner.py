@@ -47,8 +47,10 @@ STRUCTURAL_FIELD_NAMES = frozenset(
         "evidence_hash",
         "id",
         "last_run_id",
+        "leaf_refs",
         "master_snapshot_sha",
         "memory_id",
+        "memory_ids",
         "profile_blob_sha256",
         "prompt_hash",
         "revision",
@@ -67,6 +69,10 @@ scanning a whole bundle JSON as ``prose`` must not have to enumerate which of
 its nested keys hold hashes. Identifiers are here for the same reason hashes
 are -- ``distill-<run_id>-001`` is a long dense token this project mints itself,
 so the entropy rule would fire on every product ever written.
+
+Collections of them (``memory_ids``, ``leaf_refs``) are listed alongside the
+singular keys: the exemption has to cover the shape the artifacts actually use,
+and a bundle's cluster assignment stores its ids as a list under the plural.
 """
 
 HIGH_ENTROPY_RULE = "high_entropy_blob"
