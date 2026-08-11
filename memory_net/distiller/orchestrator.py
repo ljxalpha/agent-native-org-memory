@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -13,12 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from memory_net.distiller.llm.recording import BundleRecorder
 from memory_net.distiller.metrics import (
     DistillMetrics,
     citation_resolution_rate,
     parse_failure_rate,
 )
-from memory_net.distiller.output_scanner import OutputScanner
+from memory_net.distiller.output_scanner import PROSE, OutputScanner
 from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
 from memory_net.distiller.provenance import RunProvenance
 from memory_net.distiller.runctx import RunContext, RunIdentity
@@ -148,10 +150,15 @@ class DistillOrchestrator:
             previous_manifest = self._load_master_manifest()
             with self._snapshot_prompts(snapshot_sha):
                 output = self.pipeline.run(records, run_id=run_id)
-            self._write_record_bundle(
-                run_id=run_id, snapshot_sha=snapshot_sha, output=output
-            )
             gate_error = _distill_gate_error(output)
+            if not gate_error:
+                # Written and published only once the run is known to be good.
+                # The old order wrote the bundle first, which is how a refused
+                # run still left one behind (§5.5.12).
+                self._write_record_bundle(
+                    run_id=run_id, snapshot_sha=snapshot_sha, output=output
+                )
+                self._commit_record_bundle()
             if gate_error:
                 if not self.dry_run:
                     self._write_failure_outputs(
@@ -197,6 +204,11 @@ class DistillOrchestrator:
                 )
             raise
         finally:
+            # In a finally, and idempotent after a commit: every path out of
+            # this method that is not a successful publish must leave no bundle
+            # at all -- including the ones nobody thought of, which is exactly
+            # what a bare except cannot cover.
+            self._abort_record_bundle()
             # Explicit, and in a finally: a reservation that never reached a
             # terminal state means an attempt's cost was silently dropped from
             # the run's ceiling. __del__ would be too late and too uncertain.
@@ -1042,6 +1054,87 @@ class DistillOrchestrator:
             for cluster in clusters:
                 handle.write(json.dumps(cluster, sort_keys=True) + "\n")
 
+    def _recorder(self) -> BundleRecorder | None:
+        """The run's recorder, injected by the CLI (§5.5.12).
+
+        ``None`` covers both "this run records nothing" and the pre-injection
+        callers that pass only ``record_bundle_dir``.
+        """
+        recorder = self.context.recorder if self.context is not None else None
+        return recorder if isinstance(recorder, BundleRecorder) else None
+
+    def _bundle_root(self) -> Path | None:
+        """Where the bundle's files are written *now*.
+
+        The staging directory when the recorder is staged -- the target does not
+        exist yet and must not, until the commit. The target directly on the
+        pre-staging path, which is what a caller passing only
+        ``record_bundle_dir`` still gets.
+        """
+        recorder = self._recorder()
+        if recorder is not None and recorder.staging is not None:
+            return recorder.staging if recorder.requests_dir is not None else None
+        return self.record_bundle_dir
+
+    def _commit_record_bundle(self) -> None:
+        recorder = self._recorder()
+        if recorder is None or recorder.staging is None:
+            return
+        recorder.commit(precheck=self._scan_staged_bundle)
+
+    def _abort_record_bundle(self) -> None:
+        recorder = self._recorder()
+        if recorder is not None:
+            recorder.abort()
+
+    def _scan_staged_bundle(self, staging: Path) -> None:
+        """Scan everything about to be published, once more, in full (§5.5.12).
+
+        The per-call scan already covered ``calls.jsonl`` and ``requests/``;
+        rescanning them here is what catches a writer that went around
+        ``RecordingProvider`` entirely. Under enforce the per-call scan leaves
+        nothing that can match, so any hit found here *is* the disagreement
+        between the two passes, and it aborts the commit.
+        """
+        scanner = self.context.scanner if self.context is not None else None
+        if not isinstance(scanner, OutputScanner):
+            return
+        entries: list[dict[str, Any]] = []
+        for path in sorted(staging.rglob("*")):
+            if not path.is_file():
+                continue
+            entries.append(
+                {
+                    # Scanned as prose: a path is exactly where a home directory
+                    # or a hostname shows up.
+                    "path": path.relative_to(staging).as_posix(),
+                    "size": path.stat().st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        # In memory only. Writing the listing into the bundle would leave it
+        # unable to describe itself.
+        scanner.check(entries, field_kind=PROSE, field_path="bundle.files")
+        for entry in entries:
+            relative = str(entry["path"])
+            path = staging / relative
+            if relative == "calls.jsonl":
+                for index, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), start=1
+                ):
+                    if line.strip():
+                        scanner.check(
+                            json.loads(line),
+                            field_kind=PROSE,
+                            field_path=f"{relative}:{index}",
+                        )
+            elif relative.endswith(".json"):
+                scanner.check(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    field_kind=PROSE,
+                    field_path=relative,
+                )
+
     def _write_record_bundle(
         self,
         *,
@@ -1049,9 +1142,9 @@ class DistillOrchestrator:
         snapshot_sha: str,
         output: DistillationOutput,
     ) -> None:
-        if self.record_bundle_dir is None:
+        root = self._bundle_root()
+        if root is None:
             return
-        root = self.record_bundle_dir
         root.mkdir(parents=True, exist_ok=True)
         # RecordingProvider creates calls.jsonl lazily on its
         # first call, so a zero-call run (empty input or exhausted budget) would

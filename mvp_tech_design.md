@@ -1354,6 +1354,38 @@ bundle 的写入过去不是事务性的：`BundleRecorder.record()` 逐调用 a
 
 不传 run_id 构造时保持今天的直写行为，`commit()` 退化为返回当前路径。
 
+#### 5.5.12 事务接线：recorder 归 `RunContext`，orchestrator 负责 commit/abort
+
+过去 recorder 在 run_id 之前就被造出来，而 orchestrator 只拿到一个目录路径、
+根本不持有 recorder——无从 commit、也无从 abort。接线改为：
+
+- **CLI**：recorder 在 `RunIdentity` 之后构造（staging 名需要 run_id），
+  填进 `RunContext.recorder`；`_build_providers` 不再自己造 recorder，从 context 取。
+- **orchestrator**：顺序由"先写 bundle 再判闸"改为
+
+  ```
+  pipeline 全部 cluster 完成
+    → 质量闸 _distill_gate_error()
+    → 在 staging 内写三个附属 JSON（cluster_assignment / snapshot / record_metrics）
+    → recorder.commit(precheck=_scan_staging_bundle)
+  任何异常路径 → try/finally 里的 recorder.abort()
+  ```
+
+**commit 前的全量扫描 `_scan_staging_bundle`** 做三件事：
+
+1. 生成**完整清单**（相对路径 + 大小 + sha256）并扫描它——
+   **路径字符串本身**也要扫，防止路径里带家目录或主机名。清单只在内存里存在：
+   它是判定的输入，不是 bundle 的一部分（写进去还会产生"清单不包含自己"的悖论）。
+2. **每一个附属 JSON 逐字段全树扫描**：`cluster_assignment.json`、`snapshot.json`、
+   `record_metrics.json`——字符串叶子按 `prose` 扫，已知哈希/标识字段按 `structural` 扫。
+3. `calls.jsonl` 与 `requests/*.json` 在出站/落盘时已逐调用扫过，此处**再全量复扫一遍**，
+   防有人绕过 `RecordingProvider` 直接落文件。`enforce` 下逐调用扫过的内容复扫必然 0 命中，
+   因此**复扫出现任何命中就等价于"逐调用与全量结果不一致"**，直接 abort。
+
+两条 CLI 侧断言：`--record` 与 `--record-dir` 不得同时给；
+**生产 profile 拒绝平面 `--record`**——平面文件不经过 commit 前的全量复扫，
+生产的录制必须是走完整闸门的 bundle。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区

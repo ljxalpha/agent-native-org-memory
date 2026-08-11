@@ -52,6 +52,7 @@ from memory_net.distiller.output_scanner import (
 from memory_net.distiller.pipeline import DistillationPipeline
 from memory_net.distiller.profile import (
     OUTPUT_SCANNER_MODES,
+    PRODUCTION,
     ProfileError,
     ProfileProvenance,
     profile_class,
@@ -182,10 +183,22 @@ def main(argv: list[str] | None = None) -> int:
         # One assembly, one freeze, before any consumer exists (§5.5.4). The
         # run id has to precede its consumers: anything named after it could
         # not be constructed otherwise.
+        identity = RunIdentity.system()
+        if args.record and profile_class(distill_config) == PRODUCTION:
+            # A flat recording never passes the commit-time full rescan that a
+            # bundle does, so it is not an acceptable production artifact.
+            raise SystemExit(
+                "a production profile cannot use --record; record a bundle with "
+                "--record-dir, which is scanned in full before it is published"
+            )
         context = (
             RunContextBuilder()
-            .set_identity(RunIdentity.system())
+            .set_identity(identity)
             .set_budget(_run_budget(distill_config))
+            # Named after the run id, so it is built here rather than inside
+            # _build_providers, and handed to the orchestrator to commit or
+            # abort as one transaction.
+            .set_recorder(_record_recorder(args, run_id=identity.run_id))
             # Built here and read from the context by every consumer, so a run
             # cannot end up with two scanners disagreeing about the mode.
             .set_scanner(
@@ -318,7 +331,10 @@ def _build_providers(
             else None
         )
         return replay, replay.sharing_cursor(fallback_provider=fallback_live)
-    recorder = _record_recorder(args)
+    # Built by main() before the freeze, because the staging directory is named
+    # after the run id. Taking it off the context is what lets the orchestrator
+    # commit or abort the very recorder these lanes wrote to.
+    recorder = context.recorder if context is not None else _record_recorder(args)
     primary = _wrap_record(
         _base_provider(provider_name, args.model, budget=budget), recorder, context
     )
@@ -445,16 +461,32 @@ def _snapshot_text(
     return None
 
 
-def _record_recorder(args: argparse.Namespace) -> BundleRecorder | None:
+def _record_recorder(
+    args: argparse.Namespace, *, run_id: str | None = None
+) -> BundleRecorder | None:
+    """The run's recorder, staged when a run id is available (§5.5.12).
+
+    Without a run id there is no unique staging name, so the recorder writes
+    straight through exactly as it did before staging existed.
+    """
     if args.replay:
         return None
-    if args.record_dir:
-        return BundleRecorder(
-            args.record_dir / "calls.jsonl",
-            requests_dir=args.record_dir / "requests",
+    if args.record_dir and args.record:
+        raise SystemExit(
+            "--record and --record-dir cannot be combined: a run records either "
+            "one flat file or one bundle, not both"
         )
+    if args.record_dir:
+        if run_id is None:
+            return BundleRecorder(
+                args.record_dir / "calls.jsonl",
+                requests_dir=args.record_dir / "requests",
+            )
+        return BundleRecorder.staged_bundle(args.record_dir, run_id=run_id)
     if args.record:
-        return BundleRecorder(args.record)
+        if run_id is None:
+            return BundleRecorder(args.record)
+        return BundleRecorder.staged_file(args.record, run_id=run_id)
     return None
 
 
