@@ -16,9 +16,14 @@ from typing import Any
 import pytest
 
 from memory_net.distiller import cli as cli_module
+from memory_net.distiller import orchestrator as orchestrator_module
 from memory_net.distiller.llm.base import LLMProvider, LLMRequest, LLMResponse
 from memory_net.distiller.llm.recording import BundleRecorder, RecordingProvider
-from memory_net.distiller.orchestrator import DistillGateError, DistillOrchestrator
+from memory_net.distiller.orchestrator import (
+    BundleContentError,
+    DistillGateError,
+    DistillOrchestrator,
+)
 from memory_net.distiller.output_scanner import (
     OutputScanner,
     RedactionViolation,
@@ -342,20 +347,84 @@ def test_a_file_the_extension_does_not_advertise_is_still_read(
     assert not (tmp_path / "bundle").exists()
 
 
-def test_undecodable_bytes_are_scanned_rather_than_skipped(
-    tmp_path: Path, scanner: OutputScanner
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\xff\xfe" + b"junk",
+        f"see {HOME_PATH}".encode("utf-16"),
+    ],
+)
+def test_bytes_that_are_not_utf8_are_refused_rather_than_decoded_loosely(
+    payload: bytes, tmp_path: Path, scanner: OutputScanner
 ) -> None:
+    """``errors="replace"`` turns UTF-16 into interleaved NULs, in which no rule
+    can match the text a reader would see, so the commit is refused instead."""
     recorder = _staged(tmp_path)
     orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=recorder)
     orchestrator._write_record_bundle(
         run_id=RUN_ID, snapshot_sha="deadbeef", output=_output()
     )
     assert recorder.staging is not None
-    (recorder.staging / "blob.bin").write_bytes(
-        b"\xff\xfe" + f"see {HOME_PATH}".encode()
+    (recorder.staging / "blob.bin").write_bytes(payload)
+
+    with pytest.raises(BundleContentError, match="not valid UTF-8"):
+        orchestrator._commit_record_bundle()
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_a_symlink_is_refused_rather_than_followed(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """Following it would scan the target and then publish a link to content
+    the bundle never contained and cannot keep."""
+    recorder = _staged(tmp_path)
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=recorder)
+    orchestrator._write_record_bundle(
+        run_id=RUN_ID, snapshot_sha="deadbeef", output=_output()
     )
+    assert recorder.staging is not None
+    outside = tmp_path / "outside.txt"
+    outside.write_text("clean for now", encoding="utf-8")
+    (recorder.staging / "link.txt").symlink_to(outside)
+
+    with pytest.raises(BundleContentError, match="not a regular file"):
+        orchestrator._commit_record_bundle()
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_an_empty_directory_name_is_still_scanned(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """It has no child to carry its name into the listing."""
+    recorder = _staged(tmp_path)
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=recorder)
+    orchestrator._write_record_bundle(
+        run_id=RUN_ID, snapshot_sha="deadbeef", output=_output()
+    )
+    assert recorder.staging is not None
+    (recorder.staging / "build-box.local").mkdir()
 
     with pytest.raises(RedactionViolation):
+        orchestrator._commit_record_bundle()
+
+
+def test_a_file_too_large_to_scan_is_refused(
+    tmp_path: Path, scanner: OutputScanner, monkeypatch: Any
+) -> None:
+    """Reading it whole is how the fail-closed path runs out of memory instead
+    of refusing."""
+    monkeypatch.setattr(orchestrator_module, "MAX_STAGED_FILE_BYTES", 16)
+    recorder = _staged(tmp_path)
+    orchestrator = _orchestrator(tmp_path, scanner=scanner, recorder=recorder)
+    orchestrator._write_record_bundle(
+        run_id=RUN_ID, snapshot_sha="deadbeef", output=_output()
+    )
+    assert recorder.staging is not None
+    (recorder.staging / "big.txt").write_text("x" * 64, encoding="utf-8")
+
+    with pytest.raises(BundleContentError, match="too large"):
         orchestrator._commit_record_bundle()
 
 
@@ -422,6 +491,46 @@ def test_the_master_manifest_is_scanned_before_it_is_written(
                 }
             },
         )
+
+
+def test_a_leaking_manifest_stops_the_run_before_anything_is_written(
+    tmp_path: Path, scanner: OutputScanner
+) -> None:
+    """The manifest is built and scanned before the bundle commit and before
+    team/ is replaced, so a refusal here leaves the repository untouched."""
+    recorder = _staged(tmp_path)
+    provider = RecordingProvider(
+        _EchoProvider(["clean answer", "also clean"]),
+        recorder=recorder,
+        context=RunContextBuilder().set_scanner(scanner).freeze(),
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        scanner=scanner,
+        recorder=recorder,
+        pipeline=_TwoClusterPipeline(provider, "also clean"),
+    )
+    orchestrator.repo_path.mkdir(parents=True)
+    _stub_repo_io(orchestrator)
+    written: list[str] = []
+    orchestrator._write_distill_outputs = (  # type: ignore[method-assign]
+        lambda **kwargs: written.append("products")
+    )
+    orchestrator._load_master_manifest = lambda: {  # type: ignore[method-assign]
+        "products_active": {
+            "distill-old-001": {
+                "relative_path": f"team/{HOME_PATH}",
+                "category": "practice",
+            }
+        }
+    }
+
+    with pytest.raises(RedactionViolation):
+        orchestrator._run_at_snapshot(0.0, "deadbeef")
+
+    assert written == []
+    assert not (tmp_path / "bundle").exists()
+    assert recorder.staging is not None and not recorder.staging.exists()
 
 
 def test_a_clean_manifest_is_returned_unchanged(

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -61,6 +62,19 @@ class SupersededRunError(RuntimeError):
 
 class DistillGateError(RuntimeError):
     pass
+
+
+class BundleContentError(RuntimeError):
+    """A staged bundle holds something the commit-time scan cannot vouch for.
+
+    Refusing is the only honest answer: publishing an entry the scan could not
+    read would make the scan a statement about the entries that happened to be
+    convenient.
+    """
+
+
+MAX_STAGED_FILE_BYTES = 64 * 1024 * 1024
+"""Upper bound on a staged file the commit-time scan will read whole."""
 
 
 class DistillOrchestrator:
@@ -161,7 +175,18 @@ class DistillOrchestrator:
                     # gate below turns them into the failure path (§5.5.13).
                     output = exc.output
             gate_error = _distill_gate_error(output)
+            manifest: dict[str, Any] | None = None
             if not gate_error:
+                # Built (and therefore scanned) before anything is written or
+                # published, so that every scan in the run precedes the bundle
+                # commit and the replacement of team/: a manifest refused here
+                # must leave the repository exactly as it was.
+                manifest = self._master_manifest(
+                    run_id=run_id,
+                    snapshot_sha=snapshot_sha,
+                    products=output.products,
+                    previous_manifest=previous_manifest,
+                )
                 # Written and published only once the run is known to be good.
                 # The old order wrote the bundle first, which is how a refused
                 # run still left one behind (§5.5.12).
@@ -180,13 +205,15 @@ class DistillOrchestrator:
                         output=output,
                     )
                 raise DistillGateError(gate_error)
+            if manifest is None:  # pragma: no cover - the gate above raised
+                raise RuntimeError("no manifest was built for a passing run")
             if self.dry_run:
                 self._write_dry_run_outputs(
                     run_id=run_id,
                     snapshot_sha=snapshot_sha,
                     records=records,
                     output=output,
-                    previous_manifest=previous_manifest,
+                    manifest=manifest,
                     duration_seconds=time.monotonic() - started,
                 )
             else:
@@ -195,7 +222,7 @@ class DistillOrchestrator:
                     snapshot_sha=snapshot_sha,
                     records=records,
                     output=output,
-                    previous_manifest=previous_manifest,
+                    manifest=manifest,
                     duration_seconds=time.monotonic() - started,
                 )
                 if not self.no_push:
@@ -345,20 +372,17 @@ class DistillOrchestrator:
         snapshot_sha: str,
         records: list[dict[str, Any]],
         output: DistillationOutput,
-        previous_manifest: dict[str, Any],
+        manifest: dict[str, Any],
         duration_seconds: float,
     ) -> None:
+        # The manifest arrives already built and already scanned (§5.5.13): it
+        # is the last artifact a scan can refuse, so it cannot be built here,
+        # after the products have been written.
         root = self.repo_path / "_dryrun" / run_id
         if root.exists():
             shutil.rmtree(root)
         root.mkdir(parents=True)
         self._write_product_snapshot(root / TEAM_PREFIX, output.products)
-        manifest = self._master_manifest(
-            run_id=run_id,
-            snapshot_sha=snapshot_sha,
-            products=output.products,
-            previous_manifest=previous_manifest,
-        )
         (root / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -384,16 +408,12 @@ class DistillOrchestrator:
         snapshot_sha: str,
         records: list[dict[str, Any]],
         output: DistillationOutput,
-        previous_manifest: dict[str, Any],
+        manifest: dict[str, Any],
         duration_seconds: float,
     ) -> None:
+        # Built and scanned by the caller, before team/ was touched: a manifest
+        # the scanner refuses must not leave a replaced team/ behind.
         self._write_team_products(output.products)
-        manifest = self._master_manifest(
-            run_id=run_id,
-            snapshot_sha=snapshot_sha,
-            products=output.products,
-            previous_manifest=previous_manifest,
-        )
         (self.repo_path / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -1131,14 +1151,35 @@ class DistillOrchestrator:
             return
         entries: list[dict[str, Any]] = []
         for path in sorted(staging.rglob("*")):
-            if not path.is_file():
+            relative = path.relative_to(staging).as_posix()
+            # lstat, not stat: ``is_file()`` follows symlinks, so a link is
+            # read (and hashed) as its target and then published as a link to
+            # content this bundle never contained and cannot keep.
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                # Directory names are scanned as part of their children's paths;
+                # an empty one has no child to carry it.
+                entries.append({"path": relative, "size": 0, "sha256": ""})
                 continue
+            if not stat.S_ISREG(info.st_mode):
+                raise BundleContentError(
+                    f"staged bundle entry is not a regular file: {relative}"
+                )
+            if info.st_size > MAX_STAGED_FILE_BYTES:
+                # Refused rather than streamed: nothing this bundle writes comes
+                # near the bound, so a file that does is not ours, and reading
+                # it whole to scan it is how the fail-closed path runs out of
+                # memory instead of refusing.
+                raise BundleContentError(
+                    f"staged bundle entry is too large to scan: {relative} "
+                    f"({info.st_size} bytes)"
+                )
             entries.append(
                 {
                     # Scanned as prose: a path is exactly where a home directory
                     # or a hostname shows up.
-                    "path": path.relative_to(staging).as_posix(),
-                    "size": path.stat().st_size,
+                    "path": relative,
+                    "size": info.st_size,
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 }
             )
@@ -1148,11 +1189,21 @@ class DistillOrchestrator:
         for entry in entries:
             relative = str(entry["path"])
             path = staging / relative
+            if path.is_dir():
+                continue
             # Every regular file's *content*, not only the ones whose name says
             # JSON: dispatching on the extension leaves an innocuously named
             # file publishing whatever is inside it, with only its path, size
             # and hash ever looked at.
-            text = path.read_bytes().decode("utf-8", errors="replace")
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                # Fail closed rather than decode leniently: ``errors="replace"``
+                # turns UTF-16 into interleaved NULs, in which no rule can match
+                # the text a reader would see.
+                raise BundleContentError(
+                    f"staged bundle entry is not valid UTF-8: {relative}"
+                ) from exc
             if relative == "calls.jsonl":
                 for index, line in enumerate(text.splitlines(), start=1):
                     if line.strip():
@@ -1165,9 +1216,7 @@ class DistillOrchestrator:
             try:
                 payload = json.loads(text)
             except json.JSONDecodeError:
-                # Not JSON, so it is scanned as the text it is. Undecodable
-                # bytes were replaced above rather than skipped: skipping is an
-                # invitation to write the secret in another encoding.
+                # Not JSON, so it is scanned as the text it is.
                 scanner.check(text, field_kind=PROSE, field_path=relative)
                 continue
             scanner.check(payload, field_kind=PROSE, field_path=relative)
