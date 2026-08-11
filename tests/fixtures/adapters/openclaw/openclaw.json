@@ -1,0 +1,8 @@
+{
+  "_comment": "Neutral placeholder. Position and name only; no real settings.",
+  "version": "2026.3.2",
+  "workspace": "workspace",
+  "memory": {
+    "store": "memory/main.sqlite"
+  }
+}
