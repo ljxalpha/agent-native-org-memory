@@ -1,0 +1,19 @@
+version: 2
+
+# Every `uses:` in .github/workflows is pinned to a full commit SHA, with the
+# tag it resolved from kept in a trailing comment. A SHA is what a workflow can
+# actually verify -- a tag is a mutable pointer, and a moved tag silently
+# changes what runs in CI.
+#
+# A pin without this file is the worse failure, though: it freezes the action at
+# one commit and stops security fixes from ever arriving. Dependabot re-resolves
+# the pins and opens a reviewable pull request, which keeps the choice of when
+# to move deliberate instead of automatic.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "[Chore] CI:"
