@@ -1090,6 +1090,10 @@ pipeline 因此回落到既有的 `cost_budget_usd` 闸——即"没配预算就
 
 1. `llm.provider` 不得为 `mock` / `hermes_tool`——前者是假的，后者的通道丢 role 边界
    且无结构化输出约束（§3.0 / §5.3.2），都不能承担把不可信记录喂给模型的生产职责。
+   这条按**生效值**判定而非 profile 字面值：`--provider` / `--fallback-provider` 会覆盖 profile，
+   只查 profile 的话，一条 `--provider mock` 就能让 production profile 跑出一份假产物，
+   而 `profile_class: production` 仍照常写进 metrics。**主备两条通道分别判**——
+   备用通道同样会产出发布物。
 2. `output_scanner.mode` 在 production 下**唯一合法值是 `enforce`**；写 `observe` 直接拒绝启动，
    **不静默改回 `enforce`**——静默纠正会让人以为 `observe` 生效了。
 3. `clustering.embedding_backend` 在 production 下**不得为 `test-cheap`**。

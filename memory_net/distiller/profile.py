@@ -177,7 +177,10 @@ def _lookup(config: dict[str, Any], dotted: str) -> Any:
 
     An explicit ``null`` in the YAML is treated as absent on purpose: writing
     ``budget_usd:`` with no value declares nothing, and reading it as "declared"
-    would let a production profile satisfy the check with an empty promise.
+    would let a production profile satisfy the check with an empty promise. An
+    empty or whitespace-only string is absent for the same reason -- and worse,
+    ``llm.provider: ""`` would otherwise pass the presence check and then be
+    resolved to the mock backend downstream.
     """
     current: Any = config
     for part in dotted.split("."):
@@ -186,4 +189,27 @@ def _lookup(config: dict[str, Any], dotted: str) -> Any:
         current = current.get(part)
         if current is None:
             return None
+    if isinstance(current, str) and not current.strip():
+        return None
     return current
+
+
+def validate_effective_provider(
+    declared_class: str, *, provider: str, fallback: str
+) -> None:
+    """Check the provider a run will *actually* use, not the one it declared.
+
+    Validating the profile alone is not enough: ``--provider`` overrides it, and
+    an override to mock turns a production run into one that never touches a
+    model while still publishing its output as team knowledge. The fallback lane
+    matters just as much -- it is what handles the first parse failure, so a
+    mock there quietly substitutes fabricated products for the real ones.
+    """
+    if declared_class != PRODUCTION:
+        return
+    for role, name in (("llm.provider", provider), ("fallback provider", fallback)):
+        if name in FORBIDDEN_PRODUCTION_PROVIDERS:
+            raise ProfileError(
+                f"production run cannot use {role}={name!r}; "
+                f"forbidden: {', '.join(FORBIDDEN_PRODUCTION_PROVIDERS)}"
+            )

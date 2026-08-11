@@ -35,10 +35,12 @@ from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import (
     API_KEY_ENV,
     BASE_URL_ENV,
-    OpenAICompatProvider,
 )
 from memory_net.distiller.llm.openai_compat import (
     DEFAULT_MODEL as DEFAULT_DEEPSEEK_MODEL,
+)
+from memory_net.distiller.llm.openai_compat import (
+    OpenAICompatProvider,
 )
 from memory_net.distiller.llm.recording import (
     BundleRecorder,
@@ -50,6 +52,8 @@ from memory_net.distiller.pipeline import DistillationPipeline
 from memory_net.distiller.profile import (
     ProfileError,
     ProfileProvenance,
+    profile_class,
+    validate_effective_provider,
     validate_profile,
 )
 from memory_net.distiller.runctx import (
@@ -140,6 +144,17 @@ def main(argv: list[str] | None = None) -> int:
         embedding.probe()
         provider_name = _provider_name(args, distill_config)
         fallback_name = _fallback_provider_name(args, distill_config)
+        # Re-checked against the *resolved* names, because --provider overrides
+        # the profile: a production profile invoked with --provider mock would
+        # otherwise publish fabricated products as team knowledge.
+        try:
+            validate_effective_provider(
+                profile_class(distill_config),
+                provider=provider_name,
+                fallback=fallback_name,
+            )
+        except ProfileError as exc:
+            raise SystemExit(f"invalid profile {profile.path}: {exc}") from exc
         # One assembly, one freeze, before any consumer exists (§5.5.4). The
         # run id has to precede its consumers: anything named after it could
         # not be constructed otherwise.
@@ -363,9 +378,17 @@ def _base_provider(
         return _budgeted(AnthropicSDKProvider(model=model), budget)
     if provider_name == "hermes_tool":
         return _budgeted(HermesToolProvider(), budget)
-    # The mock costs nothing. Charging it against a configured budget_usd would
-    # let the shipped default profile starve its own deterministic run.
-    return MockLLMProvider()
+    if provider_name == "mock":
+        # The mock costs nothing. Charging it against a configured budget_usd
+        # would let the shipped default profile starve its own deterministic run.
+        return MockLLMProvider()
+    # Named rather than defaulted. --provider is constrained by argparse, but a
+    # profile's llm.provider is not, and a typo silently resolving to the mock
+    # produces a run that never touches a model and publishes anyway.
+    raise SystemExit(
+        f"unknown provider {provider_name!r}; choose one of "
+        + ", ".join(PROVIDER_CHOICES)
+    )
 
 
 def _budgeted(provider: LLMProvider, budget: RunBudget | None) -> LLMProvider:

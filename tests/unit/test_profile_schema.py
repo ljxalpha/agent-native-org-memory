@@ -19,6 +19,7 @@ from memory_net.distiller.profile import (
     ProfileError,
     ProfileProvenance,
     profile_class,
+    validate_effective_provider,
     validate_profile,
 )
 
@@ -128,6 +129,38 @@ def test_a_non_production_backend_is_refused_in_production(provider: str) -> Non
 
     with pytest.raises(ProfileError, match="llm.provider"):
         validate_profile(config)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_string_counts_as_absent(value: str) -> None:
+    """``llm.provider: ""`` would otherwise pass the presence check and then be
+    resolved to the mock backend downstream."""
+    config = _production()
+    config["llm"]["provider"] = value
+
+    with pytest.raises(ProfileError, match="llm.provider"):
+        validate_profile(config)
+
+
+@pytest.mark.parametrize("provider", ["mock", "hermes_tool"])
+def test_the_provider_a_run_will_really_use_is_checked_too(provider: str) -> None:
+    """--provider overrides the profile, so validating the declaration alone
+    lets a production run be redirected to a backend that never touches a
+    model while still publishing its output as team knowledge."""
+    with pytest.raises(ProfileError, match="llm.provider"):
+        validate_effective_provider(PRODUCTION, provider=provider, fallback="deepseek")
+
+
+def test_the_fallback_lane_is_checked_as_well() -> None:
+    """It handles the first parse failure, so a mock there quietly substitutes
+    fabricated products for the real ones."""
+    with pytest.raises(ProfileError, match="fallback"):
+        validate_effective_provider(PRODUCTION, provider="deepseek", fallback="mock")
+
+
+def test_the_effective_check_is_inert_outside_production() -> None:
+    validate_effective_provider(DEVELOPMENT, provider="mock", fallback="mock")
+    validate_effective_provider(PRODUCTION, provider="deepseek", fallback="none")
 
 
 def test_the_test_embedding_backend_is_refused_in_production() -> None:
