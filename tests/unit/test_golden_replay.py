@@ -15,6 +15,7 @@ import json
 import re
 import socket
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -104,6 +105,10 @@ def _replay(repo: Path) -> int:
 
 def _run_once(tmp_path: Path, name: str) -> tuple[Path, str]:
     """One replayed run in a fresh repository; returns the repo and its run id."""
+    assert _network_is_blocked(), (
+        "the network guard is not installed for the run itself; a guard that "
+        "covers only the assertions about a run is not a guard"
+    )
     repo = builder.build(tmp_path / name).work
     assert _replay(repo) == 0
     run_id = json.loads((repo / "manifest.json").read_text())["last_run_id"]
@@ -125,8 +130,14 @@ def recorded_call_count(bundle: Path) -> int:
     return len([line for line in lines if line.strip()])
 
 
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def _refuse_network(*args: object, **kwargs: object) -> None:
+    raise AssertionError(
+        "the golden replay attempted a network connection; it must be offline"
+    )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def no_network() -> Iterator[None]:
     """A socket in this file is a defect, whatever the metrics say.
 
     ``replay_live_calls`` is computed from the run's own counters, so it is the
@@ -134,20 +145,29 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     response would leave that counter at zero and this file green -- while
     having spent money and reached a third party. Blocking the syscall is the
     only assertion here that does not depend on the code under test.
+
+    **Module-scoped on purpose.** pytest sets higher-scoped fixtures up first,
+    so a function-scoped guard is installed *after* the module-scoped fixture
+    that performs the replay -- covering every assertion about the run except
+    the run itself.
     """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(socket.socket, "connect", _refuse_network)
+        patch.setattr(socket.socket, "connect_ex", _refuse_network)
+        patch.setattr(socket, "create_connection", _refuse_network)
+        yield
 
-    def _refuse(*args: object, **kwargs: object) -> None:
-        raise AssertionError(
-            "the golden replay attempted a network connection; it must be offline"
-        )
 
-    monkeypatch.setattr(socket.socket, "connect", _refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", _refuse)
-    monkeypatch.setattr(socket, "create_connection", _refuse)
+def _network_is_blocked() -> bool:
+    return socket.create_connection is _refuse_network
 
 
 @pytest.fixture(scope="module")
-def replayed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
+def replayed(
+    no_network: None, tmp_path_factory: pytest.TempPathFactory
+) -> tuple[Path, str]:
+    # Depends on the guard by name rather than relying on autouse ordering
+    # between two fixtures of the same scope.
     return _run_once(tmp_path_factory.mktemp("replay"), "repo")
 
 
@@ -331,3 +351,16 @@ def test_the_network_guard_is_actually_armed() -> None:
     this file weaker while looking identical."""
     with pytest.raises(AssertionError, match="must be offline"):
         socket.create_connection(("127.0.0.1", 9))
+
+
+def test_the_guard_covers_the_run_and_not_only_the_assertions_about_it(
+    replayed: tuple[Path, str],
+) -> None:
+    """The ordering bug this file had: a function-scoped guard is installed
+    after the module-scoped fixture that performs the replay, so the run --
+    the only part that could reach a network -- ran unguarded.
+
+    `_run_once` asserts the guard directly; this names the requirement.
+    """
+    assert _network_is_blocked()
+    assert replayed[1]
