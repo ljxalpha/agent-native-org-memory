@@ -1410,6 +1410,28 @@ orchestrator 侧 `_distill_gate_error()` 新增 `redaction_failures > 0` 分支�
 
 `context.scanner is None` 时全部行为与接线前逐字相同。
 
+#### 5.5.14 项目级 attempt ledger（`memory_net/distiller/llm/ledger.py`）
+
+`RunBudget` 是**进程内**对象，`cli.py` 每次运行都重新构造它：它看不见第二个 distiller
+进程、看不见 agent 运行、也看不见昨天的消耗。一个"进程一起就归零"的上限，
+不是项目层面的上限。
+
+因此另设一个**跨进程**的账本：`<MEMORY_NET_HOME>/state/llm_attempts.jsonl`，
+append-only，配 `O_CREAT|O_EXCL` 锁文件。
+
+- **计量单位是 attempt**，不是"逻辑调用"：一次 `generate()` 在重试路径上最多发出
+  `max_retries + 1` 次真实请求，按逻辑调用计数会系统性低估。
+- **预留发生在请求发出之前**：事后写的记录能报告超支，但阻止不了超支。
+  `OpenAICompatProvider` 的重试循环里**每一次** `_call` 之前各预留一次，
+  拒绝即抛 `BudgetExhausted`（并把已取的 run 预算 hold 释放掉——那次请求根本没发出）。
+- **计数靠重放文件恢复**：崩溃后活下来的行是"已经花了多少"的唯一真相；
+  内存计数器在重启后归零，正是同一个上限被花两次的路径。
+- **每行只记 `{ts, kind, run_id, provider, model, outcome}`**，
+  绝不记 prompt 或响应正文——账本是个计数，计数不需要正文也能被审计。
+- **上限是代码常量**：`ATTEMPT_CEILING_HARD = 50`。
+  `AOMT_ATTEMPT_CEILING` **只在小于该常量时生效**，大于即忽略并告警。
+  把闸门交给环境变量等于没有闸：那个上限属于设置该变量的人，而不属于项目。
+
 ### 5.6 凭据 launcher（`memory_net/shared/env_allowlist.py` + `scripts/aomt-with-env`）
 
 生产蒸馏需要 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` 两个变量，
