@@ -217,11 +217,21 @@ if [[ ! -f "$WORKSPACE/leaves.json" ]]; then
   setup_workspace
 fi
 
+# Fault injection for the soak's own regression: the named leaf reports on the
+# first cycle and then stops, while the other two carry on. That is the shape of
+# the failure the driver's "the health payload must change" check exists for, and
+# it is the only way to exercise that check against the real pipeline.
+STALL_LEAF="${MEMORY_NET_SOAK_STALL_LEAF:-}"
+
 index=0
 for node_id in "${LEAF_IDS[@]}"; do
-  write_cycle_memory "$node_id" "${LEAF_TOPICS[$index]}" "$CYCLE"
-  run_report "$node_id"
+  index_now=$index
   index=$((index + 1))
+  if [[ "$node_id" == "$STALL_LEAF" && "$CYCLE" -gt 1 ]]; then
+    continue
+  fi
+  write_cycle_memory "$node_id" "${LEAF_TOPICS[$index_now]}" "$CYCLE"
+  run_report "$node_id"
 done
 
 run_distill

@@ -1243,6 +1243,48 @@ team 目录 / bundle / CI artifact 之前**没有任何扫描**。叶子侧的 `
 replay 回归发现 bundle 的 version 与当前不一致时给出**明确警告**而非直接打红——
 规则收紧不应让历史 bundle 失效，但必须可见。
 
+#### 5.5.9 scanner 的 mode 与生产锁定（`enforce` / `observe`）
+
+初版规则集必然有误报，而输出 scanner 是"命中即整 run 失败"的强闸门：
+要标定阈值就得先拿到真实命中分布，要拿到分布就得先跑一遍。
+解法是一个**受严格限制的标定模式**，不是放松闸门。
+
+profile 里的配置形态（版本化）：
+
+```yaml
+output_scanner:
+  schema_version: memory-net/output-scanner/v1   # 必填，改语义必须升版本
+  mode: enforce                                   # enforce | observe，默认 enforce
+  patterns_path: config/redaction_patterns.yaml   # 仓相对，走冻结快照读取
+```
+
+| mode | 行为 |
+|---|---|
+| `enforce`（默认，唯一的生产模式） | 命中 → `RedactionViolation` → 不落盘 → 整 run 失败 → 非零退出 |
+| `observe`（仅标定用） | 命中 → 不阻断，只把**规则名 × 字段类型 × 计数**写进 metrics 的 `redaction_observations`（无原文） |
+
+**没有 `warn`**：一个"打印警告但继续、且允许生产使用"的档位在实践中等价于关闸，
+只会制造"我们有 scanner"的错觉。要么阻断，要么明确标记为无闸的标定跑。
+
+四条硬约束（全部由负向测试守住）：
+
+1. `profile_class: production` 的 profile 强制 `enforce`；profile 里写 `observe` →
+   **拒绝启动**。不静默改回 `enforce`：静默纠正会让作者以为自己写的那个 mode 生效了。
+2. production 下 **`--output-scanner-mode` 与 `AOMT_OUTPUT_SCANNER_MODE` 一律拒绝**，
+   **无论其取值**——包括与 profile 一致的 `enforce`。理由是通道本身：
+   一个"取值相同就放行"的覆盖通道会教会使用者它存在，而它存在就意味着生产的 mode
+   不再只由被冻结、被哈希的 profile 决定。
+3. 非生产 profile 可以选 `observe`，取值优先级 CLI > 环境变量 > profile。
+4. **`observe` 下禁用一切录制**：`--record` / `--record-dir` 与 `observe` 同时出现即非零退出，
+   且**独立于 `profile_class`**。理由：`observe` 下 scanner 不阻断，
+   recorder 会把**含命中原文的完整 prompt/response** 照常写进 bundle。
+   标定需要的是分布，而分布已经在 metrics 里（只有规则名与计数），不需要 bundle。
+
+**patterns 文件走冻结快照**，与 profile 同一条读取路径：从工作树读会让 run 记录的
+`master_snapshot_sha` 看起来干净，而实际生效的规则来自快照之外。
+因此 `patterns_path` 必须是仓相对路径，绝对路径与 `..` 一律拒绝。
+profile 里完全不声明 `output_scanner` 块时落到 `enforce` + 默认规则文件（fail-closed 默认）。
+
 ## 6. 叶子节点（Leaf Node）
 
 ### 6.1 目录布局与记忆分区
@@ -2674,6 +2716,9 @@ secrets_filter:                  # S6 必须落地：避免 DEBUG 日志把 toke
   分支快进到 master → 按新的 master sha 重新物化每个叶子的配置代际 → `subscribe`。
   第一次调用负责建工作区，其后各轮复用同一工作区，**因此跨轮状态是累积的**——
   这是 `last_report_at` 单调性与"健康文件确实被重新生成"能被断言的前提。
+  harness 另带一个故障注入钩子 `MEMORY_NET_SOAK_STALL_LEAF=<node_id>`：该叶子在第一轮之后
+  停止上报，其余两个照常。它只服务于 soak 自身的回归——下面第 6 条断言必须能在**真实管线**上
+  被触发，否则它只是一条在假执行器上成立的断言。
 - **driver**（`stability_soak.py`）：`--leaves N`、`--cycles N` 与 `--duration-seconds N`
   两种终止条件（二选一）、`--report <path>`、`--workspace <dir>`。
   每轮结束后读取**每个叶子**的 `.health.json` 并断言：

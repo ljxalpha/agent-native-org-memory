@@ -378,3 +378,26 @@ def test_live_two_cycle_soak_is_green(tmp_path: Path) -> None:
     assert summary["passed"] is True
     assert summary["cycles_completed"] == 2
     assert sorted(summary["leaves"]) == sorted(LEAF_IDS)
+
+
+@pytest.mark.skipif(
+    os.environ.get("MEMORY_NET_SOAK_E2E") != "1",
+    reason="set MEMORY_NET_SOAK_E2E=1 to run the live soak",
+)
+def test_live_soak_catches_a_leaf_that_stopped_reporting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The anti-vacuity check must fire against the real pipeline, not just fakes.
+
+    The harness makes one leaf stop reporting after the first cycle. Its health
+    file stays valid, healthy, error-free and monotonic -- and stale, which is
+    the only thing that distinguishes a stopped leaf from a working one.
+    """
+    monkeypatch.setenv("MEMORY_NET_SOAK_STALL_LEAF", "carol-claude-01")
+    report = tmp_path / "soak.json"
+
+    assert main(["--leaves", "3", "--cycles", "2", "--report", str(report)]) == 1
+
+    summary = json.loads(report.read_text(encoding="utf-8"))
+    assert summary["cycles_completed"] == 2
+    assert checks(summary) == [("carol-claude-01", "health_not_regenerated")]
