@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from memory_net.distiller import cli as cli_module
+from memory_net.distiller.llm.budgeted import BudgetedProvider
 from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import OpenAICompatProvider
 from memory_net.distiller.runctx import RunBudget, RunContext
@@ -63,13 +64,46 @@ def test_deepseek_is_selectable_on_both_provider_flags() -> None:
     assert "deepseek" in actions["fallback_provider"].choices
 
 
-def test_the_other_provider_branches_ignore_the_budget() -> None:
-    """Only the production backend spends money; the rest must stay buildable."""
+def test_the_mock_lane_is_never_charged_against_the_ceiling() -> None:
+    """It costs nothing, and charging it would let the shipped default profile
+    -- provider: mock plus budget_usd -- starve its own deterministic run."""
     budget = RunBudget(1.0, 10.0)
 
     assert isinstance(
         cli_module._base_provider("mock", None, budget=budget), MockLLMProvider
     )
+
+
+@pytest.mark.parametrize("provider_name", ["anthropic", "hermes_tool"])
+def test_the_paid_non_reserving_lanes_get_a_pre_call_ceiling(
+    provider_name: str,
+) -> None:
+    """These providers never reserve, so without the wrapper their only gate is
+    the pipeline accumulator -- which can only refuse the call *after* the
+    over-ceiling one has already gone out."""
+    budget = RunBudget(1.0, 10.0, max_usd=1.0)
+
+    provider = cli_module._base_provider(provider_name, None, budget=budget)
+
+    assert isinstance(provider, BudgetedProvider)
+    assert provider.budget is budget
+
+
+@pytest.mark.parametrize("provider_name", ["anthropic", "hermes_tool"])
+def test_no_configured_ceiling_leaves_the_lane_unwrapped(provider_name: str) -> None:
+    """A profile without budget_usd must keep the pre-injection behaviour."""
+    assert not isinstance(
+        cli_module._base_provider(provider_name, None, budget=None), BudgetedProvider
+    )
+
+
+def test_the_production_lane_is_not_wrapped_because_it_reserves_itself() -> None:
+    """Wrapping it would reserve twice for every single call."""
+    provider = cli_module._base_provider(
+        "deepseek", None, budget=RunBudget(1.0, 10.0, max_usd=1.0)
+    )
+
+    assert not isinstance(provider, BudgetedProvider)
 
 
 # --------------------------------------------------------------------------
@@ -128,6 +162,39 @@ def test_the_budget_takes_its_ceiling_and_pricing_from_the_profile() -> None:
     assert budget.max_usd == 2.5
     assert budget.input_per_mtok_usd == 0.27
     assert budget.output_per_mtok_usd == 1.1
+
+
+def test_the_attempt_and_wall_clock_ceilings_are_wired_from_the_profile() -> None:
+    """A cost ceiling alone leaves a run that retries forever, or one wedged
+    against a slow endpoint, with nothing to stop it."""
+    budget = cli_module._run_budget(
+        {"llm": {"budget_usd": 1.0, "max_attempts": 7, "max_wall_clock_s": 90}}
+    )
+
+    assert budget is not None
+    assert budget.max_attempts == 7
+    assert budget.max_wall_clock_s == pytest.approx(90.0)
+
+
+def test_the_ceilings_also_read_from_the_cost_budget_section() -> None:
+    """Same two-place lookup as the cost ceiling and the pricing, so a profile
+    does not have to spread one concept across two sections."""
+    budget = cli_module._run_budget(
+        {"cost_budget": {"budget_usd": 1.0, "max_attempts": 3, "max_wall_clock_s": 5}}
+    )
+
+    assert budget is not None
+    assert budget.max_attempts == 3
+    assert budget.max_wall_clock_s == pytest.approx(5.0)
+
+
+def test_unnamed_ceilings_stay_unset_rather_than_defaulting() -> None:
+    """A silent default here would cap runs nobody asked to cap."""
+    budget = cli_module._run_budget({"llm": {"budget_usd": 1.0}})
+
+    assert budget is not None
+    assert budget.max_attempts is None
+    assert budget.max_wall_clock_s is None
 
 
 # --------------------------------------------------------------------------

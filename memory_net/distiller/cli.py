@@ -19,6 +19,7 @@ from memory_net.distiller.llm.anthropic_sdk import (
     AnthropicSDKProvider,
 )
 from memory_net.distiller.llm.base import LLMProvider
+from memory_net.distiller.llm.budgeted import BudgetedProvider
 from memory_net.distiller.llm.hermes_tool import HermesToolProvider
 from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.llm.openai_compat import (
@@ -301,12 +302,27 @@ def _base_provider(
     provider's internal retries do not have to thread it through.
     """
     if provider_name == "deepseek":
+        # Reserves for itself, so wrapping it would reserve twice per call.
         return OpenAICompatProvider(model=model, budget=budget)
     if provider_name == "anthropic":
-        return AnthropicSDKProvider(model=model)
+        return _budgeted(AnthropicSDKProvider(model=model), budget)
     if provider_name == "hermes_tool":
-        return HermesToolProvider()
+        return _budgeted(HermesToolProvider(), budget)
+    # The mock costs nothing. Charging it against a configured budget_usd would
+    # let the shipped default profile starve its own deterministic run.
     return MockLLMProvider()
+
+
+def _budgeted(provider: LLMProvider, budget: RunBudget | None) -> LLMProvider:
+    """Give a paid lane a pre-call ceiling, if the profile configured one.
+
+    Without this the lane's only gate is the pipeline's post-hoc accumulator,
+    which sums calls that already returned: it can refuse the *next* call but
+    never the over-ceiling one, and it never sees a retry at all.
+    """
+    if budget is None:
+        return provider
+    return BudgetedProvider(provider, budget=budget)
 
 
 def _provider_name(args: argparse.Namespace, config: dict[str, Any]) -> str:
@@ -368,7 +384,38 @@ def _run_budget(config: dict[str, Any]) -> RunBudget | None:
         input_per_mtok_usd=_input_cost_per_mtok_usd(config),
         output_per_mtok_usd=_output_cost_per_mtok_usd(config),
         max_usd=max_usd,
+        # Both stay None unless the profile names them. A cost ceiling alone
+        # leaves a run that retries forever, or one that wedges against a slow
+        # endpoint, with nothing to stop it: they are separate dimensions and
+        # each has to be configured to exist.
+        max_attempts=_budget_limit_int(config, "max_attempts"),
+        max_wall_clock_s=_budget_limit_float(config, "max_wall_clock_s"),
     )
+
+
+def _budget_limit_int(config: dict[str, Any], key: str) -> int | None:
+    value = _budget_limit(config, key)
+    return None if value is None else int(value)
+
+
+def _budget_limit_float(config: dict[str, Any], key: str) -> float | None:
+    value = _budget_limit(config, key)
+    return None if value is None else float(value)
+
+
+def _budget_limit(config: dict[str, Any], key: str) -> Any:
+    """Read one budget ceiling from ``llm.*``, falling back to ``cost_budget.*``.
+
+    Same two-place lookup as the cost ceiling and the pricing, so a profile does
+    not have to spread one concept across two sections.
+    """
+    llm = config.get("llm")
+    if isinstance(llm, dict) and llm.get(key) is not None:
+        return llm[key]
+    cost_budget = config.get("cost_budget")
+    if isinstance(cost_budget, dict) and cost_budget.get(key) is not None:
+        return cost_budget[key]
+    return None
 
 
 def _input_cost_per_mtok_usd(config: dict[str, Any]) -> float:

@@ -912,6 +912,19 @@ pipeline 完全委托给它"，与实现不符，已按实现订正）：
 （不回补），异常路径按 `BaseException` 兜底 `settle_unknown`。
 **`mock` lane 不包**——它不花钱，把它计入 `budget_usd` 会让出厂默认 profile 饿死自己的确定性 run；
 `deepseek` 也不包，它自己就预扣，再包一层等于双重预扣。
+profile 没写 `budget_usd`（即 `RunBudget` 为 `None`）时不包，保持注入前的行为。
+
+**三个上界都由 profile 显式声明才存在**，`cli.py` 从 `llm.*` 读、回落 `cost_budget.*`
+（与 `budget_usd` / `pricing` 同一套两处查找）：
+
+| profile 键 | `RunBudget` 字段 | 缺省 |
+|---|---|---|
+| `llm.budget_usd` | `max_usd` | 无 → **整个 `RunBudget` 不构造** |
+| `llm.max_attempts` | `max_attempts` | 无 → `None`（该维度不设限） |
+| `llm.max_wall_clock_s` | `max_wall_clock_s` | 无 → `None`（该维度不设限） |
+
+只有成本上界而没有另外两个，等于放任"无限重试"与"卡在慢端点上"两种失控；
+这里**不给静默默认值**，否则会去封顶没人要求封顶的 run。
 
 #### 5.5.3 消费方的注入契约与"禁止自读时钟"
 
