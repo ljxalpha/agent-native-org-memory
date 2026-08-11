@@ -374,3 +374,36 @@ def test_real_directories_under_the_root_are_accepted(tmp_path: Path) -> None:
     (root / "agentroot").mkdir()
 
     sandbox.assert_mount_sources_are_not_symlinks(root)
+
+
+def test_doctor_refuses_a_symlinked_bind_source(tmp_path: Path) -> None:
+    """The failure mode a subset of `run`'s checks produces: a reassuring
+    manifest printed for a configuration `run` would reject."""
+    root = tmp_path / "sbx"
+    root.mkdir()
+    (root / "agentroot").symlink_to(tmp_path / "elsewhere")
+
+    with pytest.raises(SystemExit, match="it is a symlink"):
+        sandbox.do_doctor(
+            root,
+            runtime_root=RUNTIME_ROOT,
+            env_file=None,
+            since=None,
+            environ={"HOME": str(tmp_path / "home")},
+        )
+
+
+def test_up_refuses_a_symlinked_home_before_it_writes(tmp_path: Path) -> None:
+    """`mkdir(exist_ok=True)` follows an existing symlink, so `<root>/home`
+    pointing at the real home would put this function's config.yaml into the
+    operator's actual agent configuration. A write, not just an exposure."""
+    root = tmp_path / "sbx"
+    root.mkdir()
+    real_home = tmp_path / "real-home"
+    (real_home / ".hermes").mkdir(parents=True)
+    (root / "home").symlink_to(real_home)
+
+    with pytest.raises(SystemExit, match="it is a symlink"):
+        sandbox.do_up(root, toolset="none", environ={"HOME": str(tmp_path / "home")})
+
+    assert not (real_home / ".hermes" / "config.yaml").exists()

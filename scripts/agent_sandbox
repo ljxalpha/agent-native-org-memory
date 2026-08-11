@@ -333,6 +333,11 @@ def config_yaml(toolset: str) -> str:
 
 def do_up(root: Path, *, toolset: str, environ: Mapping[str, str]) -> int:
     assert_root_is_safe(root, environ=environ)
+    # Before any mkdir or write. `mkdir(exist_ok=True)` follows an existing
+    # symlink, so a `<root>/home` pointing at the real home would put this
+    # function's config.yaml into the operator's actual agent configuration --
+    # a write, not just an exposure.
+    assert_mount_sources_are_not_symlinks(root)
     (root / "home" / ".hermes").mkdir(parents=True, exist_ok=True)
     (root / "agentroot").mkdir(parents=True, exist_ok=True)
     # Idempotent: the config is rewritten, and nothing else is touched. In
@@ -386,11 +391,12 @@ def do_doctor(
     since: str | None,
     environ: Mapping[str, str],
 ) -> int:
-    # Checked here too: `doctor` is what an operator reads to decide the plan is
-    # right, so it must refuse the same paths `run` refuses rather than print a
-    # plan that would never be allowed to execute.
+    # All three of `run`'s refusals, not a subset: `doctor` is what an operator
+    # reads to decide the plan is right, and a reassuring manifest printed for
+    # a configuration `run` would reject is worse than no manifest at all.
     assert_root_is_safe(root, environ=environ)
     assert_runtime_root_is_safe(runtime_root, environ=environ)
+    assert_mount_sources_are_not_symlinks(root)
     print("mount plan:")
     for line in _grouped(
         mount_plan(
