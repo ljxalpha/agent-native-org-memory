@@ -3256,9 +3256,12 @@ bundle 只记录 LLM 调用，重放时仍要 fetch 远端、读叶子分支、�
   bare remote 必须与工作克隆分离（一个目录不能同时是二者），
   放在同级而不是 `<dir>` 内部，是为了让 `--repo` 与 `--out` 取同一个值。
 
-**入库的只有输入资产（9 个）**：`leaves/{auth_retry,deploy_window,search_index}.json`、
+**入库的只有输入资产（10 个）**：`leaves/{auth_retry,deploy_window,search_index}.json`、
 `manifest.json`、`bootstrap.json`、`config/distill.deepseek.yaml`、
-`config/redaction_patterns.yaml`、`prompts/distill_system.md`、`prompts/distill_user.md`。
+`config/distill.mock.yaml`、`config/redaction_patterns.yaml`、
+`prompts/distill_system.md`、`prompts/distill_user.md`。
+builder 把 `config/**` 与 `prompts/**` **整目录**按排序写进 master commit，而不是按名单——
+名单漏掉一个 profile，它就在冻结快照里读不出来，而症状只是很久之后的 "cannot resolve config"。
 叶子记录一律是**合成的中性内容**，不含任何真实个人记忆、真实主机名、家目录绝对路径或凭据。
 
 **commit sha 可复现**的构成条件（缺一条即不成立）：固定的 author/committer 身份与

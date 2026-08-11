@@ -148,12 +148,11 @@ def _commit_master(staging: Path) -> str:
     """Master: the profile, its prompts, its rules, and the empty manifest."""
     _write(staging / "bootstrap_state.json", (ASSETS / "bootstrap.json").read_bytes())
     _write(staging / "manifest.json", (ASSETS / "manifest.json").read_bytes())
-    for rel in (
-        PROFILE_PATH,
-        "config/redaction_patterns.yaml",
-        "prompts/distill_system.md",
-        "prompts/distill_user.md",
-    ):
+    # Copied wholesale and in sorted order rather than from a list of names:
+    # a profile that exists as an asset but was left out of the commit is
+    # unreadable from the frozen snapshot, which is a failure that only shows
+    # up as "cannot resolve config" much later.
+    for rel in _asset_tree("config", "prompts"):
         _write(staging / rel, (ASSETS / rel).read_bytes())
     _write(staging / "team/.gitkeep", b"")
     _write(staging / "distill_runs/.gitkeep", b"")
@@ -161,6 +160,16 @@ def _commit_master(staging: Path) -> str:
     _git(staging, "commit", "--quiet", "-m", "golden fixture: master")
     _git(staging, "push", "--quiet", "origin", "master")
     return _git(staging, "rev-parse", "HEAD").strip()
+
+
+def _asset_tree(*directories: str) -> list[str]:
+    """Every asset file under the named directories, in a fixed order."""
+    found: list[str] = []
+    for directory in directories:
+        for path in (ASSETS / directory).rglob("*"):
+            if path.is_file():
+                found.append(path.relative_to(ASSETS).as_posix())
+    return sorted(found)
 
 
 def _commit_leaf(staging: Path, name: str) -> str:

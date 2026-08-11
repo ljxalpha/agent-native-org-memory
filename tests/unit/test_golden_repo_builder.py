@@ -27,7 +27,7 @@ ASSETS = REPO_ROOT / "tests" / "fixtures" / "golden_repo"
 SHIPPED_PROFILE = REPO_ROOT / "config" / "distill.deepseek.yaml"
 PATTERNS_PATH = REPO_ROOT / "config" / "redaction_patterns.yaml"
 
-MASTER_SHA = "85a2cc07eec5c92a9296004e1893eb5d508ca70f"
+MASTER_SHA = "64b77150b9020daa17522bee10cae2e161f6e563"
 LEAF_SHAS = {
     "auth_retry": "13f8821e0ffcea4cd5ff96a0cd7062b9d8857c7c",
     "deploy_window": "e6314c11c44d80a0a64cf77d978972454c445bb0",
@@ -118,6 +118,43 @@ def test_the_orchestrator_reads_every_record(built: Any) -> None:
     assert orchestrator.incompatible_leaves == 0
     assert orchestrator.quarantined_records == 0
     assert len(orchestrator.leaf_refs) == len(LEAF_SHAS)
+
+
+MOCK_PROFILE = "config/distill.mock.yaml"
+
+MOCK_LANE_DIFFERENCES = {"profile_class", "llm.provider", "llm.model"}
+"""The only fields the two lanes of the equivalence contract may differ in."""
+
+
+def test_the_mock_lane_profile_differs_only_in_which_backend_it_names() -> None:
+    """The contract compares two lanes over the same records. If the profiles
+    differ in anything else -- the categories, the evidence rules, the
+    embedding backend -- a difference in the invariants describes the fixture
+    rather than the backends."""
+    mock = yaml.safe_load((ASSETS / MOCK_PROFILE).read_text(encoding="utf-8"))
+    production = yaml.safe_load(
+        (ASSETS / builder.PROFILE_PATH).read_text(encoding="utf-8")
+    )
+    for dotted in RUN_RELEVANT_KEYS:
+        if dotted in MOCK_LANE_DIFFERENCES:
+            continue
+        assert _dig(mock, dotted) == _dig(production, dotted), dotted
+    assert _dig(mock, "llm.budget_usd") == _dig(production, "llm.budget_usd")
+    assert _dig(mock, "profile_class") == "development"
+    assert _dig(mock, "llm.provider") == "mock"
+
+
+def test_every_profile_asset_reaches_the_frozen_snapshot(built: Any) -> None:
+    """A profile that exists as a file but was left out of the commit is
+    unreadable through `git show`, and the run says only "cannot resolve
+    config" -- long after the flag naming it was accepted."""
+    committed = set(
+        builder._git(built.work, "ls-tree", "-r", "--name-only", built.master_sha)
+        .strip()
+        .splitlines()
+    )
+    for relative in builder._asset_tree("config", "prompts"):
+        assert relative in committed
 
 
 def test_the_fixture_profile_matches_the_shipped_production_one() -> None:
