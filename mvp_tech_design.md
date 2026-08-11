@@ -3323,6 +3323,38 @@ builder 在 build 之后就地做一次纯离线加载（profile + `Ruleset` + �
 输入必须是 §9.10 的合成 fixture 记录——bundle 里存的是完整 prompt 与完整模型响应，
 拿真实个人记忆去录，等于把它提交进一个公开仓库。
 
+### 9.12 跨后端等价合同（M4-004）
+
+**跨后端的逐字节等价既不可得也不该追求**：mock 从模板渲染，真实模型自己写句子，
+标题必然不同，由标题派生的 `topic_id`、`canonical_topic_key` 与文件名也随之不同。
+因此"回归等价"定义为**契约等价**——两条车道的输出必须满足同一组不变量。
+
+**两条车道**：mock 车道（`config/distill.mock.yaml`，development）与
+**生产车道的 strict replay**（`config/distill.deepseek.yaml` + golden bundle）。
+`hermes_tool` **不参与**：它是 experimental 入口，末端仍是 mock，
+拿它做基准等于让 mock 与自己比较。两条车道必须跑在**同一份记录、同一种聚类**上，
+否则不变量的差异描述的是 fixture 而不是后端。
+
+**17 条不变量**（`compare_run_invariants`，输出的是一张逐条命名的表而不是一个布尔值）：
+
+1. run status 为 `success`；2. `input_records` 相等；3. 每个产物通过产物 schema 校验；
+4. `citation_resolution_rate == 1.0`；5. `category_distribution` 的键 ⊆ 配置 categories；
+6. 每个 category 满足 `category_evidence_rules`；7. manifest 字段集合与 tombstone 状态一致；
+8. `metrics.json` 键集合一致且 `parse_failure_rate == 0`；9. fixture 的 `required_terms` 命中；
+10. **每个 cluster 都有明确结论**（要么产出，要么有带原因的拒绝计数，静默无输出即失败）；
+11. 产物数量下界（全 run ≥1，每个非空 cluster ≥1）；12. 产物数量上界（全 run 与每 cluster）；
+13. title / summary / evidence 非空，且 summary 达到最小长度；
+14. **逐产物**的 citation 数与贡献者数达标（不是全局平均）；
+15. 每个 cluster 的 citation 覆盖率达阈值；16. `topic_id` 全 run 唯一、cluster 内 topic key 唯一；
+17. fixture 声明的 category 分布与产物数逐条相等，且 manifest 的 active 条目数与之一致、无 tombstone。
+
+**后 8 条为什么存在**：前 9 条**全部**能被"什么都不产出"的 run 完美通过——
+空产物列表通过每一次 schema 校验，0 citation 时 `citation_resolution_rate` 按定义为 1.0。
+因此后 8 条断言的是**存在性与边界**，不是良构性。
+
+**期望值是声明的，不是导出的**（`Expectations`）：类别分布、产物数上下界、summary 最小长度、
+覆盖率阈值都写在 fixture 侧。拿"这次跑出来的结果"当期望，比较永远不会失败。
+
 ## 10. Sandbox 与权限兼容
 
 实现者必须遵守：
@@ -4250,4 +4282,13 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
 - Change reason: 原口径与验收判据 A5/A6（"无网络、无 key 的机器上跑通 strict replay，
   且进 CI 主 job"）直接矛盾——按原样执行，用录制时的同一个生产 profile 重放会被拒绝，
   且预检会先因缺凭据退出。bundle 已经带有 replay 不改写的 provenance，判据因此是可回答的。
+- Change time: 2026-08-11
+
+## Change Record - 2026-08-11 跨后端等价合同
+
+- Change summary: 新增 §9.12，定义 M4-004 的契约等价口径：两条车道（mock 与生产车道的
+  strict replay）、17 条不变量、`hermes_tool` 不参与基准的理由，以及"期望值必须声明"的约束。
+- Change reason: 原验收写的是"Hermes 路径与 mock 路径回归等价"，而该路径末端本身就是 mock，
+  等价断言零信息量；同时跨后端逐字节等价在结构上不可能成立（标题由模型决定，
+  一切派生标识随之改变）。
 - Change time: 2026-08-11
