@@ -3,9 +3,11 @@
 This is the only test that exercises a real model's output end to end -- the
 parsing, the rendering, the citation lookback, the manifest and the metrics --
 and it does so without a network, without a credential and without spending
-anything. It is therefore also the test that has to be hard to pass by
-accident: a replay that silently missed every call, or that compared a run
-against itself, would look exactly like a green one.
+anything. (The public embedding weights the run loads are fetched once
+beforehand if they are not cached yet; that fetch is setup, not the run --
+see ``embedding_model_cached``.) It is therefore also the test that has to be
+hard to pass by accident: a replay that silently missed every call, or that
+compared a run against itself, would look exactly like a green one.
 """
 
 from __future__ import annotations
@@ -21,8 +23,9 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
-from memory_net.distiller.cli import main
+from memory_net.distiller.cli import _embedding_policy, main
 from memory_net.distiller.normalize import RunAssets, assert_normalized_equal, normalize
 from memory_net.distiller.runctx import RunIdentity
 
@@ -136,9 +139,33 @@ def _refuse_network(*args: object, **kwargs: object) -> None:
     )
 
 
+@pytest.fixture(scope="module")
+def embedding_model_cached() -> None:
+    """Load the replay's embedding model once, before the network guard exists.
+
+    The production profile refuses the stand-in embedder, so the replayed run
+    loads a real, public embedding model. On a cold cache -- a fresh CI runner,
+    or a cleared temp directory -- the weights can only be fetched over the
+    network, and the replay would then trip its own guard while loading the
+    model rather than while calling one. Fetching public weights is environment
+    setup, of a kind with installing a dependency; it is not the replay under
+    test. Doing it here, first, keeps the guard's claim exact: the replayed run
+    itself makes no request. On a warm cache this loads from disk and opens no
+    socket either.
+
+    The policy is derived from the same profile and through the same function
+    as the run's own, so the model warmed here is the model the run loads.
+    """
+    profile = yaml.safe_load((GOLDEN_REPO_ASSETS / PROFILE).read_text(encoding="utf-8"))
+    _embedding_policy(profile).probe()
+
+
 @pytest.fixture(scope="module", autouse=True)
-def no_network() -> Iterator[None]:
+def no_network(embedding_model_cached: None) -> Iterator[None]:
     """A socket in this file is a defect, whatever the metrics say.
+
+    Depends on ``embedding_model_cached`` by name so the one-off model fetch is
+    complete before the guard goes up; everything after that is guarded.
 
     ``replay_live_calls`` is computed from the run's own counters, so it is the
     replay reporting on itself. A live request that still returned a replayed
