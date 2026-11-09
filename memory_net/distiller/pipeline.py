@@ -832,7 +832,11 @@ class DistillationPipeline:
 def parse_json_response(text: str) -> dict[str, Any]:
     try:
         value = json.loads(text)
-    except json.JSONDecodeError as first_exc:
+    # RecursionError: on Python 3.11 the C scanner honours the interpreter's
+    # recursion limit, so input nested deeper than that raises it instead of
+    # JSONDecodeError. It is an undecodable response like any other, and callers
+    # only treat ValueError as a parse failure -- left alone it aborts the run.
+    except (json.JSONDecodeError, RecursionError) as first_exc:
         try:
             value = _raw_decode_object(text)
         except json.JSONDecodeError as exc:
@@ -1355,6 +1359,7 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
     """
     decoder = json.JSONDecoder()
     first_error: json.JSONDecodeError | None = None
+    too_deep = False
     candidates: list[dict[str, Any]] = []
     matches: list[dict[str, Any]] = []
     index = 0
@@ -1387,6 +1392,13 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
             failures += 1
             index += 1
             continue
+        except RecursionError:
+            # Nested deeper than this interpreter decodes (Python 3.11). A failed
+            # candidate like any other: counted against the same bound, skipped.
+            too_deep = True
+            failures += 1
+            index += 1
+            continue
         # Skip past what was just decoded, so only *sibling* objects are
         # candidates. Scanning every brace would descend into the payload's own
         # nesting, and a product carrying a nested "products" key would then
@@ -1414,4 +1426,6 @@ def _raw_decode_object(text: str) -> dict[str, Any]:
         )
     if first_error is not None:
         raise first_error
+    if too_deep:
+        raise ValueError("distiller response is nested too deeply to decode")
     raise json.JSONDecodeError("no JSON object found", text, 0)

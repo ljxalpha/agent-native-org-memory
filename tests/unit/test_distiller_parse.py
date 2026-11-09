@@ -136,6 +136,61 @@ def test_a_deeply_nested_truncated_response_is_refused_quickly() -> None:
         parse_json_response(text)
 
 
+def _too_deep(*args: object, **kwargs: object) -> object:
+    raise RecursionError("maximum recursion depth exceeded while decoding")
+
+
+def test_a_response_too_deep_to_decode_is_a_parse_failure_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python 3.11's C scanner honours the recursion limit, so deep nesting raises
+    ``RecursionError`` there -- not ``JSONDecodeError``. Callers treat only
+    ``ValueError`` as a parse failure; anything else aborts the whole run. Forced
+    here so the property holds on every interpreter, not only on 3.11."""
+    monkeypatch.setattr(json, "loads", _too_deep)
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", _too_deep)
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_json_response('{"products": []}' + "{" * 200)
+
+    assert not isinstance(excinfo.value, RecursionError)
+    assert "undecodable" in str(excinfo.value)
+
+
+def test_a_single_too_deep_object_is_reported_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Below the attempt bound the refusal still names the cause rather than
+    surfacing the interpreter error."""
+    monkeypatch.setattr(json, "loads", _too_deep)
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", _too_deep)
+
+    with pytest.raises(ValueError, match="nested too deeply"):
+        parse_json_response('{"products": []}')
+
+
+def test_a_too_deep_candidate_does_not_hide_a_later_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate that cannot be decoded is skipped like any other failed one;
+    the scan carries on to the answer."""
+    real = json.JSONDecoder.raw_decode
+    calls = {"n": 0}
+
+    def first_too_deep(self: json.JSONDecoder, text: str, index: int = 0) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RecursionError("maximum recursion depth exceeded while decoding")
+        return real(self, text, index)
+
+    monkeypatch.setattr(json, "loads", _too_deep)
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", first_too_deep)
+
+    payload = parse_json_response('{"deep": 1} ' + json.dumps(PAYLOAD))
+
+    assert payload == PAYLOAD
+
+
 def test_the_attempt_bound_does_not_reject_an_ordinary_preamble() -> None:
     """The bound has to sit above anything a real response does, or it becomes
     a parse failure generator of its own."""
