@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 import memory_net.distiller.runctx as runctx_module
-from memory_net.distiller.llm.base import LLMResponse
+from memory_net.distiller.llm.base import LLMRequest, LLMResponse
 from memory_net.distiller.llm.mock import MockLLMProvider
 from memory_net.distiller.orchestrator import DistillOrchestrator, SupersededRunError
 from memory_net.distiller.pipeline import DistillationOutput, DistillationPipeline
@@ -187,6 +187,80 @@ def test_orchestrator_counts_invalid_leaf_health_as_incompatible(
     assert result.input_records == 1
     assert metrics["incompatible_leaves"] == 1
     assert metrics["scanner_audit_summary"] == {}
+
+
+class _CapturingProvider(MockLLMProvider):
+    """The mock backend, keeping every request exactly as it would leave."""
+
+    def __init__(self) -> None:
+        self.requests: list[LLMRequest] = []
+
+    def generate(self, request: LLMRequest) -> LLMResponse:
+        self.requests.append(request)
+        return super().generate(request)
+
+
+def test_the_model_never_sees_a_leaf_s_operational_identity(tmp_path: Path) -> None:
+    """A real leaf's health names its host; the prompt must not (§ 8.7.2).
+
+    Asserted on the requests as handed to the provider, so it holds whatever
+    the output scanner would or would not have recognised -- a scanner only
+    knows its own machine's name, never another leaf's.
+    """
+    repo = _distill_clone(tmp_path)
+    host = "ops-host-sentinel-7f3a"
+    for node_id in ("alice", "bob"):
+        _add_leaf(repo, node_id, f"leaf-{node_id}-mem-1", "retry oauth with backoff")
+        _replace_leaf_health(
+            repo,
+            node_id,
+            build_health(
+                node_id=node_id,
+                adapter="claude-code",
+                install_id=f"install-{node_id}-sentinel",
+                code_version="0.1.0",
+                host=host,
+                build_id="b" * 40,
+                config_source_master_sha="c" * 40,
+                started_at="2026-01-01T00:00:00Z",
+                extra={"build_id_source": "package_ref"},
+            ),
+        )
+    _git(repo, "fetch", "--all", "--prune")
+    provider = _CapturingProvider()
+    pipeline = DistillationPipeline(
+        provider=provider,
+        system_prompt_path=repo / "prompts" / "distill_system.md",
+        user_prompt_path=repo / "prompts" / "distill_user.md",
+    )
+    orchestrator = _orchestrator(repo, no_push=True, pipeline=pipeline)
+
+    result = orchestrator.run()
+
+    assert result.input_records == 2
+    assert (
+        provider.requests
+    ), "no model call was made; the checks below would be vacuous"
+    for request in provider.requests:
+        outbound = "\n".join(
+            [
+                request.system_prompt,
+                request.user_prompt,
+                json.dumps(request.metadata, sort_keys=True, default=str),
+            ]
+        )
+        assert host not in outbound
+        assert "install-alice-sentinel" not in outbound
+        assert "install-bob-sentinel" not in outbound
+        assert "build_id_source" not in outbound
+        # The reporting state still travels: only the machine was removed.
+        assert '"leaf_health"' in request.user_prompt
+        assert '"status": "healthy"' in request.user_prompt
+    # The distiller's own view of each leaf is the full snapshot.
+    for node_id in ("alice", "bob"):
+        full = orchestrator.leaf_health_by_branch[f"origin/leaf/{node_id}"]
+        assert full["host"] == host
+        assert full["install_id"] == f"install-{node_id}-sentinel"
 
 
 def test_orchestrator_quarantines_malformed_scanner_health(

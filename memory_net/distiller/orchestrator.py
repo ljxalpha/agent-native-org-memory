@@ -1713,6 +1713,50 @@ def _validate_manifest_frontmatter_consistency(
             )
 
 
+#: The ``.health.json`` keys that may travel to the model inside a record's
+#: ``leaf_health`` (mvp_tech_design.md § 8.7.2). They describe the leaf's
+#: reporting state -- the protocol fields ``build_health()`` writes -- and
+#: nothing about the machine it runs on.
+#:
+#: An allowlist, not a denylist: the operational identity of § 8.7.1 (``host``,
+#: ``install_id``, ``build_id`` ...) and diagnostic annotations such as
+#: ``build_id_source`` stay out, and so does any key a later health snapshot
+#: adds until it is listed here on purpose. The distiller's own health roll-up
+#: reads the full snapshot from ``leaf_health_by_branch``; only the copy that is
+#: rendered into the prompt is narrowed.
+LLM_LEAF_HEALTH_FIELDS: frozenset[str] = frozenset(
+    {
+        "schema_version",
+        "node_id",
+        "role",
+        "status",
+        "last_heartbeat_at",
+        "published_at",
+        "last_report_at",
+        "last_pull_at",
+        "config_revision",
+        "redaction_pattern_version",
+        "recent_errors",
+        "redaction_incidents",
+    }
+)
+
+
+def _prompt_leaf_health(leaf_health: dict[str, Any]) -> dict[str, Any]:
+    """Return the part of a leaf health snapshot that may be sent to the model.
+
+    :param leaf_health: the validated ``.health.json`` of the record's leaf.
+    :returns: a new mapping holding only the keys in ``LLM_LEAF_HEALTH_FIELDS``
+        that the snapshot carries, with their values unchanged. The input is
+        not modified.
+    """
+    return {
+        key: value
+        for key, value in leaf_health.items()
+        if key in LLM_LEAF_HEALTH_FIELDS
+    }
+
+
 def _llm_record(
     *,
     memory_id: str,
@@ -1748,7 +1792,8 @@ def _llm_record(
         "content": content,
         "body": body,
         "leaf_branch": leaf_branch,
-        "leaf_health": leaf_health,
+        # Rendered into the prompt verbatim, so only the allowlisted part (§ 8.7.2).
+        "leaf_health": _prompt_leaf_health(leaf_health),
         "source_branch_sha": branch_sha,
         "relative_path": relative_path,
     }
