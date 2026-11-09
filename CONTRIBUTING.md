@@ -36,6 +36,12 @@ bash tests/integration/local_repo.sh   # offline end-to-end (no network, no toke
 
 To auto-fix formatting/imports: `ruff check --fix . && isort . && black .`
 
+**WSL note:** ruff silently skips `EXE001`/`EXE002` (shebang vs executable bit) on
+WSL, so `ruff check .` can pass locally and still fail on CI. `pytest` covers the
+same rule from the git index (`tests/unit/test_script_exec_bits.py`), which gives
+the same verdict on every platform. A new script that starts with `#!` must be
+committed executable: `git update-index --chmod=+x path/to/script.py`.
+
 ## Testing expectations
 
 - Write tests alongside code (TDD). Cover both unit behavior and end-to-end /
