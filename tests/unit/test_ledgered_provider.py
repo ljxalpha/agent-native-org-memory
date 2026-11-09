@@ -9,6 +9,7 @@ as its weakest billable lane.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -132,7 +133,21 @@ def test_the_ledger_records_no_prompt_or_response(tmp_path: Path) -> None:
 # -- the retries the ledger cannot see -----------------------------------
 
 
-def test_the_sdk_clients_do_not_retry_behind_the_ledger() -> None:
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "build"),
+    [
+        pytest.param("openai", "OpenAI", lambda: _openai_client(), id="openai"),
+        pytest.param(
+            "anthropic", "Anthropic", lambda: _anthropic_client(), id="anthropic"
+        ),
+    ],
+)
+def test_the_sdk_clients_do_not_retry_behind_the_ledger(
+    module_name: str,
+    class_name: str,
+    build: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Both SDKs default to retrying internally, and those attempts never reach
     the loop that reserves.
 
@@ -140,28 +155,21 @@ def test_the_sdk_clients_do_not_retry_behind_the_ledger() -> None:
     that counts reservations would be wrong by a factor it cannot observe.
     Retries belong to the loop that can account for them -- which is why
     `OpenAICompatProvider` has its own, reserving once per iteration.
-    """
-    import anthropic
-    import openai
 
+    One case per SDK. ``openai`` ships in the optional ``llm`` extra, so with
+    ``.[dev]`` alone its case skips rather than failing; CI installs the extra,
+    so the production backend's case always runs there.
+    """
+    module = pytest.importorskip(module_name)
     captured: dict[str, object] = {}
 
     class _Recording:
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    for module, name, build in (
-        (openai, "OpenAI", _openai_client),
-        (anthropic, "Anthropic", _anthropic_client),
-    ):
-        captured.clear()
-        original = getattr(module, name)
-        setattr(module, name, _Recording)
-        try:
-            build()
-        finally:
-            setattr(module, name, original)
-        assert captured["max_retries"] == 0, f"{name} would retry behind the ledger"
+    monkeypatch.setattr(module, class_name, _Recording)
+    build()
+    assert captured["max_retries"] == 0, f"{class_name} would retry behind the ledger"
 
 
 def _openai_client() -> None:
