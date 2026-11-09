@@ -17,7 +17,7 @@ natively — use WSL2. Startup deliberately blocks other platforms.
 ```bash
 git clone https://github.com/ljxalpha/agent-native-org-memory.git
 cd agent-native-org-memory
-python3 -m pip install -e ".[dev]"   # Python 3.11+
+python3 -m pip install -e ".[dev,llm]"   # Python 3.11+; `llm` = the production backend SDK, as CI installs
 ```
 
 ## Before you open a PR
