@@ -106,8 +106,8 @@
 
 | ID | 状态 | 主题 | 来源 | 负责人 | 备注 |
 |---|---|---|---|---|---|
-| CI-001 | [ ] | shebang 脚本补可执行位 + 平台无关的守卫测试 | design:mvp Change Record 2026-11-09 | - | 10 个带 `#!` 的 Python 文件在 git 中是 `100644`，Linux CI 上 ruff `EXE001` 报错，WSL 上该规则被跳过故本地不可见。新增 `tests/unit/test_script_exec_bits.py`（读 git 索引的文件模式）先红后绿 |
-| CI-002 | [ ] | 合并 dependabot 的三个 Actions 升级 | design:mvp Change Record 2026-11-09 | - | checkout → v7.0.1、upload-artifact → v7.0.2、setup-python → v7.1.0；三者的 CI 失败均继承自 master 的 lint 错误，与升级本身无关 |
-| CI-004 | [ ] | golden 回放在冷模型缓存上不再误报联网 | design:mvp Change Record 2026-11-09 | - | 全新环境下 `test_golden_replay.py` 的 2 failed + 6 errors（嵌入模型未缓存 → 加载时联网 → 撞上断网守卫）；守卫安装前按同一 profile 预热模型。验收：空 `FASTEMBED_CACHE_PATH` 下该文件全绿 |
-| CI-005 | [ ] | 发给模型的 `leaf_health` 不再携带运维身份（含主机名） | design:mvp§8.7.2 | - | 此前叶子 `.health.json` 原样进 prompt：同机时 scanner 以 `local_hostname` 中止 run（`local_repo.sh` 与稳定性 soak 因此失败），异机时主机名等直接出站。验收：记录里只剩白名单字段、真实发出的 prompt 不含 host/install_id、蒸馏器自身健康汇总仍读全量、golden 严格回放不变、两条集成脚本转绿 |
+| CI-001 | [x] | shebang 脚本补可执行位 + 平台无关的守卫测试 | design:mvp Change Record 2026-11-09 | - | 10 个带 `#!` 的 Python 文件在 git 中是 `100644`，Linux CI 上 ruff `EXE001` 报错，WSL 上该规则被跳过故本地不可见。新增 `tests/unit/test_script_exec_bits.py`（读 git 索引的文件模式）先红后绿。已完成：10 个文件改为 `100755`（纯模式变更）；`tests/unit/test_script_exec_bits.py` 从 git 索引双向校验 shebang ⇔ 可执行位，并用合成仓自检两个方向；CONTRIBUTING 注明 WSL 上 ruff 跳过 EXE 规则。 |
+| CI-002 | [x] | 合并 dependabot 的三个 Actions 升级 | design:mvp Change Record 2026-11-09 | - | checkout → v7.0.1、upload-artifact → v7.0.2、setup-python → v7.1.0；三者的 CI 失败均继承自 master 的 lint 错误，与升级本身无关。已完成：以 `--no-ff` 合并三个 dependabot 分支（PR #1/#4/#5），相邻行冲突按「两边升级都保留」解决；三个钉住的 SHA 已逐一对照上游 tag 核实；workflow 相对原版只有 `uses:` 行变化。 |
+| CI-004 | [x] | golden 回放在冷模型缓存上不再误报联网 | design:mvp Change Record 2026-11-09 | - | 全新环境下 `test_golden_replay.py` 的 2 failed + 6 errors（嵌入模型未缓存 → 加载时联网 → 撞上断网守卫）；守卫安装前按同一 profile 预热模型。验收：空 `FASTEMBED_CACHE_PATH` 下该文件全绿。已完成：模块级 `embedding_model_cached` fixture 在守卫安装前经 `cli._embedding_policy` 预热模型，守卫按名依赖它；空 `FASTEMBED_CACHE_PATH` 下回放与等价合同 24 例全绿。 |
+| CI-005 | [x] | 发给模型的 `leaf_health` 不再携带运维身份（含主机名） | design:mvp§8.7.2 | - | 此前叶子 `.health.json` 原样进 prompt：同机时 scanner 以 `local_hostname` 中止 run（`local_repo.sh` 与稳定性 soak 因此失败），异机时主机名等直接出站。验收：记录里只剩白名单字段、真实发出的 prompt 不含 host/install_id、蒸馏器自身健康汇总仍读全量、golden 严格回放不变、两条集成脚本转绿。已完成：`LLM_LEAF_HEALTH_FIELDS` 白名单 + `_prompt_leaf_health()` 投影；单元 6 例 + 捕获真实出站请求的功能用例；`local_repo.sh` 与 5 轮三叶 soak 由红转绿，golden 严格回放不变。 |
 | CI-003 | [ ] | 推送并确认 master 上 `distiller-ci` 转绿 | - | - | 推送后核对每个 step 的结论，README 徽章随之变绿 |
