@@ -4860,4 +4860,13 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   `local_hostname` 规则在出站前命中并按 fail-closed 中止整次 run；异机部署时 scanner 不认识别的机器名，
   这些字段会直接出站。白名单包含 golden fixture 健康快照的全部字段，因此录制 bundle 的 prompt 逐字节不变，
   严格回放继续命中。
+  (e) 响应解析把 `RecursionError` 视同一次失败的解码（`parse_json_response` 与 `_raw_decode_object`），
+  计入既有的 `MAX_DECODE_FAILURES` 上界，最终以 `ValueError` fail-closed 拒绝。原因：Python 3.11 的 C 版
+  JSON 扫描器受解释器递归上限约束，嵌套过深的响应会抛 `RecursionError` 而非 `JSONDecodeError`
+  （3.12 起不再如此）；调用方只捕获 `(JSONDecodeError, ValueError)`，于是一份畸形的深嵌套模型响应
+  在 3.11 上会让整次 run 崩溃，而不是作为该 cluster 的解析失败处理。本仓声明支持 3.11 且 CI 跑在 3.11 上。
+  (f) `distiller-ci` 与 `distill` 两个 workflow 安装 `.[dev,llm]`：生产后端（`OpenAICompatProvider`）
+  依赖的 `openai` 只在 `llm` extra 里，只装 `.[dev]` 时，校验「SDK 内部重试关闭、重试只发生在会记账的
+  循环里」的用例无法导入它。该用例同时按 SDK 拆分，缺少可选 SDK 时 skip——只装 `.[dev]` 的贡献者
+  仍是全绿，而 CI 装了 extra，生产后端的这条性质每次都被实际校验。
 - Change time: 2026-11-09
