@@ -99,3 +99,15 @@
 | HARDEN-001 | [ ] | leaf daemon 的 `recent_errors` 只留错误类别，不留异常正文 | design:mvp§8.7 | - | `daemon.py` 目前把 `f"{task_name}: {error}"` 原样写进 `recent_errors`，而 `.health.json` 会被 commit 并 push 到共享 memory repo；redactor 只作用于 report 通道，不覆盖这里。distiller 侧已用 `ProviderCallError` 把逃逸异常收敛为「异常类型 + HTTP 状态 + 尝试次数」，leaf 侧是同类缺口。验收：`recent_errors` 只含白名单化的错误码/类型与计数，异常正文不落盘，且有断言覆盖 |
 | HARDEN-002 | [ ] | 叶子安装的依赖解析可复现 | design:mvp§6.6 | - | `install_leaf.sh` 对 `git+*` 已强制 40 位 commit sha、拒绝浮动 ref 与内嵌凭据，但 `pip install "$PACKAGE_REF"` 本身是无约束解析（无 constraints 文件、无 `--require-hashes`），因此依赖树仍非逐字节可复现。验收：随发布提供独立维护的、带哈希校验的部署约束文件，且 `pyproject.toml` 仍保持库应有的宽依赖区间 |
 | T27 | [x] | 项目级 attempt ledger | design:mvp§5.5.14 | - | 跨进程 append-only JSONL + `O_CREAT\|O_EXCL` 锁；计量单位是**真实请求**（重试各算一次），预留在请求发出之前，计数靠重放文件恢复。上限是代码常量 `ATTEMPT_CEILING_HARD = 50`，环境变量与构造参数**都只能调低**；账本预留失败会归还 run 级预算 hold（否则那笔预扣永远不会被结算，且在异常在途时连报都不会报） |
+
+---
+
+## 2026-11-09 — CI 恢复绿色与 GitHub Actions 升级
+
+| ID | 状态 | 主题 | 来源 | 负责人 | 备注 |
+|---|---|---|---|---|---|
+| CI-001 | [ ] | shebang 脚本补可执行位 + 平台无关的守卫测试 | design:mvp Change Record 2026-11-09 | - | 10 个带 `#!` 的 Python 文件在 git 中是 `100644`，Linux CI 上 ruff `EXE001` 报错，WSL 上该规则被跳过故本地不可见。新增 `tests/unit/test_script_exec_bits.py`（读 git 索引的文件模式）先红后绿 |
+| CI-002 | [ ] | 合并 dependabot 的三个 Actions 升级 | design:mvp Change Record 2026-11-09 | - | checkout → v7.0.1、upload-artifact → v7.0.2、setup-python → v7.1.0；三者的 CI 失败均继承自 master 的 lint 错误，与升级本身无关 |
+| CI-004 | [ ] | golden 回放在冷模型缓存上不再误报联网 | design:mvp Change Record 2026-11-09 | - | 全新环境下 `test_golden_replay.py` 的 2 failed + 6 errors（嵌入模型未缓存 → 加载时联网 → 撞上断网守卫）；守卫安装前按同一 profile 预热模型。验收：空 `FASTEMBED_CACHE_PATH` 下该文件全绿 |
+| CI-005 | [ ] | 发给模型的 `leaf_health` 不再携带运维身份（含主机名） | design:mvp§8.7.2 | - | 此前叶子 `.health.json` 原样进 prompt：同机时 scanner 以 `local_hostname` 中止 run（`local_repo.sh` 与稳定性 soak 因此失败），异机时主机名等直接出站。验收：记录里只剩白名单字段、真实发出的 prompt 不含 host/install_id、蒸馏器自身健康汇总仍读全量、golden 严格回放不变、两条集成脚本转绿 |
+| CI-003 | [ ] | 推送并确认 master 上 `distiller-ci` 转绿 | - | - | 推送后核对每个 step 的结论，README 徽章随之变绿 |

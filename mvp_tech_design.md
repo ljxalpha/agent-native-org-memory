@@ -2807,6 +2807,11 @@ collect_ops_identity(
 - **`platform.node()` 在 `memory_net/` 下只允许出现在本模块**（由 AST 测试守住）。
   主机名是本机身份材料，收敛到单一读取点才能审计它流向了哪里。
 - `started_at` 由调用方注入，采集器不自读时钟，保证健康快照可回放。
+- **运维身份不出站到 LLM**：蒸馏器在每条发给模型的记录里附带叶子健康快照（`leaf_health`），
+  但只保留白名单 `LLM_LEAF_HEALTH_FIELDS`（`memory_net/distiller/orchestrator.py`）中描述上报状态的
+  协议字段；§ 8.7.1 的七个运维身份字段与 `build_id_source` 等诊断附注一律剔除。白名单而非黑名单：
+  健康快照以后新增的字段默认不外发。蒸馏器自身的健康汇总（`leaf_health_by_branch`、scanner 审计）
+  仍读完整快照，不受影响。
 
 `config_source_master_sha` 缺失时不写该键，因此扩展前物化的旧配置代次继续可用（向后兼容）。
 
@@ -4824,3 +4829,35 @@ codex 实现时用 Jinja2 或 `str.format_map` 渲染即可。
   "经工具读取到达"也不能仅由字节差推出（字节差只说明 INDEX 未落入被测的那个 prompt 段）。
   判据设计本身成立且给出了阳性信号，缺的是重复次数与留痕，这两者都已写进升级条件。
 - Change time: 2026-08-11
+
+## Change Record - 2026-11-09 脚本可执行位与 shebang 一致；CI Actions 升级
+
+- Change summary: (a) 所有以 `#!` 开头的被跟踪 Python 文件在 git 索引中统一为 `100755`
+  （`scripts/` 下 9 个脚本与 `tests/fixtures/golden_repo/build_repo.py`）；新增
+  `tests/unit/test_script_exec_bits.py`，直接从 git 索引读取文件模式，断言「有 shebang ⇔ 可执行」双向成立。
+  (b) 三个 workflow 中的 `actions/checkout` 升到 v7.0.1、`actions/setup-python` 升到 v7.1.0、
+  `actions/upload-artifact` 升到 v7.0.2，仍按完整 commit SHA 钉住并在行尾注释标出 tag。
+- Change reason: `pyproject.toml` 不设 `select`，ruff 0.16 的默认规则集包含 `EXE001`/`EXE002`
+  （shebang 与可执行位必须一致）。ruff 在 WSL 上会主动跳过这两条规则（Windows 文件系统的
+  可执行位不可信），因此同一份代码在 WSL 上 `ruff check .` 全绿、在 Linux CI 上报 10 条 `EXE001`，
+  `distiller-ci` 在 lint 一步即失败，后续测试全部被跳过。以 git 索引为准的测试在任何平台上
+  判定一致，把这类问题挡在提交之前；修法取「补可执行位」而非「删 shebang」，因为这些脚本本来就是
+  直接执行的入口。Actions 升级的破坏性变更均不触及本仓用法：checkout v6/v7 收紧的是
+  `pull_request_target`/`workflow_run` 上的 fork PR 检出（本仓只用 `push`/`pull_request`），
+  setup-python v7 移除的是未使用的 `pip-install` 输入，upload-artifact v7 的直传模式需显式开启；
+  三者均改跑 Node.js 24，消除 Node.js 20 弃用告警。
+  (c) `tests/unit/test_golden_replay.py` 增加模块级 fixture，在**断网守卫安装之前**按回放所用 profile
+  （经 `cli._embedding_policy`，与 run 本身同一推导）把嵌入模型加载一次；断网守卫改为依赖该 fixture，
+  因此仍覆盖整个回放 run。原因：生产 profile 拒绝替身 embedder，回放必须加载真实的公开嵌入模型；
+  模型权重在冷缓存（全新 CI runner、或被清空的临时目录）上只能联网获取，而此前唯一会去获取它的测试
+  （`test_provider_equivalence.py`）按字母序排在回放之后，于是回放在冷缓存上必然先撞上自己的断网守卫，
+  报「attempted a network connection」。获取公开模型权重属于环境准备（与安装依赖同类），不属于被测的
+  回放；守卫要证明的是回放 run 不发出任何请求，这一点不变——缓存已热时预热本身也不联网。
+  (d) 发给模型的记录中 `leaf_health` 改为按白名单 `LLM_LEAF_HEALTH_FIELDS` 投影（§ 8.7.2 新增约束）。
+  原因：蒸馏器把叶子 `.health.json` 原样放进每条记录、经 `records_json` 进入 user prompt，
+  于是叶子的 `host`、`install_id`、`build_id` 等运维身份随每次调用发往模型服务商。叶子与蒸馏器同机时
+  （端到端回归 `tests/integration/local_repo.sh`、三叶稳定性 soak、以及任何单机部署），输出侧 scanner 的
+  `local_hostname` 规则在出站前命中并按 fail-closed 中止整次 run；异机部署时 scanner 不认识别的机器名，
+  这些字段会直接出站。白名单包含 golden fixture 健康快照的全部字段，因此录制 bundle 的 prompt 逐字节不变，
+  严格回放继续命中。
+- Change time: 2026-11-09
